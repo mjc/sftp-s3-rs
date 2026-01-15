@@ -84,9 +84,7 @@ impl<B: Backend> Server<B> {
     /// Set static users for authentication
     pub fn with_users(self, users: Vec<(String, String)>) -> Self {
         let users = Arc::new(users);
-        self.with_password_auth(move |user, pass| {
-            users.iter().any(|(u, p)| u == user && p == pass)
-        })
+        self.with_password_auth(move |user, pass| users.iter().any(|(u, p)| u == user && p == pass))
     }
 
     /// Run the server

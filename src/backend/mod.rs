@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use bytes::Bytes;
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod memory;
@@ -137,23 +139,27 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Read entire file contents
     ///
+    /// Returns file content as Bytes (reference-counted, cheap to clone).
     /// For the initial implementation, files are loaded entirely into memory.
-    /// Future versions may support streaming for large files.
-    async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>>;
+    async fn read_file(&self, path: &str) -> BackendResult<Bytes>;
 
     /// Write file contents
     ///
     /// Creates or overwrites the file at `path` with `content`.
-    async fn write_file(&self, path: &str, content: Vec<u8>) -> BackendResult<()>;
+    async fn write_file(&self, path: &str, content: Bytes) -> BackendResult<()>;
 }
 
-/// Normalize a path: trim leading/trailing slashes, handle empty as root
-pub fn normalize_path(path: &str) -> String {
+/// Normalize a path: trim leading/trailing slashes, handle empty as root.
+/// Returns Cow::Borrowed when input is already normalized, avoiding allocation.
+pub fn normalize_path(path: &str) -> Cow<'_, str> {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() || trimmed == "." {
-        String::new()
+        Cow::Borrowed("")
+    } else if trimmed.len() == path.len() {
+        // No slashes were trimmed, return borrowed
+        Cow::Borrowed(path)
     } else {
-        trimmed.to_string()
+        Cow::Owned(trimmed.to_string())
     }
 }
 

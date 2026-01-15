@@ -1,7 +1,10 @@
-use super::{normalize_path, BackendResult, current_timestamp, Backend, BackendError, DirEntry, FileInfo};
+use super::{
+    current_timestamp, normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo,
+};
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
+use bytes::Bytes;
 use std::collections::HashSet;
 use tracing::debug;
 
@@ -54,7 +57,7 @@ impl S3Backend {
     fn build_key(&self, path: &str) -> String {
         let normalized = normalize_path(path);
         if self.config.prefix.is_empty() {
-            normalized
+            normalized.into_owned()
         } else if normalized.is_empty() {
             self.config.prefix.trim_end_matches('/').to_string()
         } else {
@@ -95,7 +98,7 @@ impl Backend for S3Backend {
                 format!("{}/", self.config.prefix.trim_end_matches('/'))
             }
         } else {
-            format!("{}/", self.build_key(&normalized))
+            format!("{}/", self.build_key(normalized.as_ref()))
         };
 
         debug!(prefix = %prefix, "Listing S3 objects");
@@ -174,7 +177,7 @@ impl Backend for S3Backend {
             return Ok(FileInfo::directory());
         }
 
-        let key = self.build_key(&normalized);
+        let key = self.build_key(normalized.as_ref());
 
         // Try to get the object directly (file case)
         match self
@@ -288,7 +291,7 @@ impl Backend for S3Backend {
         Ok(())
     }
 
-    async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {
+    async fn read_file(&self, path: &str) -> BackendResult<Bytes> {
         let key = self.build_key(path);
 
         let result = self
@@ -307,10 +310,10 @@ impl Backend for S3Backend {
             .map_err(|e| BackendError::Io(e.to_string()))?
             .into_bytes();
 
-        Ok(bytes.to_vec())
+        Ok(bytes) // No .to_vec() needed - already Bytes!
     }
 
-    async fn write_file(&self, path: &str, content: Vec<u8>) -> BackendResult<()> {
+    async fn write_file(&self, path: &str, content: Bytes) -> BackendResult<()> {
         let key = self.build_key(path);
 
         self.client

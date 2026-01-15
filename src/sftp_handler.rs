@@ -1,5 +1,6 @@
 use crate::backend::{normalize_path, Backend, BackendError, FileInfo};
 use crate::handle::{HandleManager, HandleType};
+use bytes::Bytes;
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
@@ -9,14 +10,15 @@ use tracing::debug;
 
 /// Convert FileInfo to russh_sftp FileAttributes
 fn to_file_attributes(info: &FileInfo) -> FileAttributes {
-    let mut attrs = FileAttributes::default();
-    attrs.size = Some(info.size);
-    attrs.permissions = Some(info.permissions);
-    attrs.mtime = Some(info.mtime);
-    attrs.atime = Some(info.atime);
-    attrs.uid = Some(info.uid);
-    attrs.gid = Some(info.gid);
-    attrs
+    FileAttributes {
+        size: Some(info.size),
+        permissions: Some(info.permissions),
+        mtime: Some(info.mtime),
+        atime: Some(info.atime),
+        uid: Some(info.uid),
+        gid: Some(info.gid),
+        ..Default::default()
+    }
 }
 
 /// SFTP session handler that delegates to a backend
@@ -81,7 +83,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         // If it's a write handle, flush the buffer to backend
         if let Some(HandleType::Write { path, buffer }) = self.handles.get(&handle) {
             self.backend
-                .write_file(&path, buffer)
+                .write_file(&path, Bytes::from(buffer))
                 .await
                 .map_err(StatusCode::from)?;
         }
@@ -105,7 +107,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let handle = self.handles.create_dir_handle(normalized);
+        let handle = self.handles.create_dir_handle(normalized.into_owned());
         Ok(Handle { id, handle })
     }
 
@@ -162,15 +164,16 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
 
         let handle = if pflags.contains(OpenFlags::WRITE) {
             // Write mode: create empty buffer
-            self.handles.create_write_handle(normalized)
+            self.handles.create_write_handle(normalized.into_owned())
         } else {
-            // Read mode: load file content
+            // Read mode: load file content (returns Bytes)
             let content = self
                 .backend
                 .read_file(&normalized)
                 .await
                 .map_err(StatusCode::from)?;
-            self.handles.create_read_handle(normalized, content)
+            self.handles
+                .create_read_handle(normalized.into_owned(), content)
         };
 
         Ok(Handle { id, handle })
@@ -195,7 +198,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                 }
 
                 let end = std::cmp::min(start + len as usize, content.len());
-                let data = content[start..end].to_vec();
+                // Use Bytes::slice for efficient sub-range, then convert to Vec for protocol
+                let data = content.slice(start..end).to_vec();
 
                 Ok(Data { id, data })
             }
