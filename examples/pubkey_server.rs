@@ -3,6 +3,12 @@
 //! Run with: cargo run --example pubkey_server -- ~/.ssh/authorized_keys
 //! Or:       AUTHORIZED_KEYS="ssh-ed25519 AAAA... user" cargo run --example pubkey_server
 //!
+//! Environment variables:
+//!   AUTHORIZED_KEYS - Public keys (OpenSSH format, newline-separated)
+//!   HOST_KEY        - Server private key (PEM/OpenSSH format)
+//!   HOST_KEY_FILE   - Path to server private key file
+//!   PORT            - Port to listen on (default: 2224)
+//!
 //! Connect with: sftp -P 2224 -i ~/.ssh/id_ed25519 user@localhost
 
 use sftp_s3::{MemoryBackend, Server, ServerConfig};
@@ -70,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(2224);
 
-    let config = ServerConfig::new().port(port).with_generated_key();
+    let config = ServerConfig::new().port(port).with_key_from_env()?;
 
     println!("\nStarting SFTP server on port {}", port);
     println!(

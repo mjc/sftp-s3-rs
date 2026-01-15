@@ -53,6 +53,20 @@ impl S3Backend {
         Self::new(client, config)
     }
 
+    /// Create with custom endpoint (for MinIO, LocalStack, etc)
+    pub async fn with_endpoint(config: S3Config, endpoint: &str, region: &str) -> Self {
+        let sdk_config = aws_config::from_env()
+            .endpoint_url(endpoint)
+            .region(aws_config::Region::new(region.to_owned()))
+            .load()
+            .await;
+        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
+            .force_path_style(true)
+            .build();
+        let client = Client::from_conf(s3_config);
+        Self::new(client, config)
+    }
+
     /// Build the full S3 key from a path
     fn build_key(&self, path: &str) -> String {
         let normalized = normalize_path(path);

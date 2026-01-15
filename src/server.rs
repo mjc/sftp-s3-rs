@@ -3,6 +3,7 @@ use crate::ssh_handler::{AuthConfig, SshServer};
 use russh::keys::ssh_key::rand_core::OsRng;
 use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
@@ -49,6 +50,31 @@ impl ServerConfig {
             russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
         self.keys.push(key);
         self
+    }
+
+    /// Load a host key from a file (OpenSSH format)
+    pub fn with_key_file(mut self, path: impl AsRef<Path>) -> Result<Self, russh::keys::Error> {
+        let key = russh::keys::load_secret_key(path, None)?;
+        self.keys.push(key);
+        Ok(self)
+    }
+
+    /// Load a host key from PEM/OpenSSH format string data
+    pub fn with_key_data(mut self, data: &str) -> Result<Self, russh::keys::Error> {
+        let key = russh::keys::decode_secret_key(data, None)?;
+        self.keys.push(key);
+        Ok(self)
+    }
+
+    /// Load host key from HOST_KEY environment variable, or generate one if not set
+    pub fn with_key_from_env(self) -> Result<Self, russh::keys::Error> {
+        if let Ok(key_data) = std::env::var("HOST_KEY") {
+            self.with_key_data(&key_data)
+        } else if let Ok(key_path) = std::env::var("HOST_KEY_FILE") {
+            self.with_key_file(&key_path)
+        } else {
+            Ok(self.with_generated_key())
+        }
     }
 }
 

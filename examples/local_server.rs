@@ -1,6 +1,11 @@
 //! Local filesystem SFTP server example
 //!
 //! Run with: cargo run --example local_server -- /path/to/serve
+//!
+//! Environment variables:
+//!   HOST_KEY      - Server private key (PEM/OpenSSH format)
+//!   HOST_KEY_FILE - Path to server private key file
+//!
 //! Connect with: sftp -P 2222 user@localhost
 
 use sftp_s3::{LocalBackend, Server, ServerConfig};
@@ -22,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Username: user, Password: pass");
 
     let backend = LocalBackend::new(&root);
-    let config = ServerConfig::new().port(2222).with_generated_key();
+    let config = ServerConfig::new().port(2222).with_key_from_env()?;
 
     Server::new(backend)
         .config(config)
