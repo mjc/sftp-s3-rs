@@ -69,6 +69,7 @@ pub mod sftp_handler;
 pub mod ssh_handler;
 
 // Re-exports for convenience
+pub use backend::local::LocalBackend;
 pub use backend::memory::MemoryBackend;
 pub use backend::{Backend, BackendError, BackendResult, DirEntry, FileInfo};
 #[cfg(feature = "s3")]

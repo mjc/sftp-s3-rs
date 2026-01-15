@@ -1,0 +1,33 @@
+#!/bin/bash
+# Pre-commit hook for sftp-s3-rs
+# Install with: ./scripts/setup-hooks.sh
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Check formatting
+echo "Checking formatting..."
+cargo fmt --check
+if [ $? -ne 0 ]; then
+    echo "ERROR: Code is not formatted. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "Running clippy..."
+cargo clippy -- -D warnings
+if [ $? -ne 0 ]; then
+    echo "ERROR: Clippy found issues. Fix them before committing."
+    exit 1
+fi
+
+# Run tests
+echo "Running tests..."
+cargo test --quiet
+if [ $? -ne 0 ]; then
+    echo "ERROR: Tests failed. Fix them before committing."
+    exit 1
+fi
+
+echo "All pre-commit checks passed!"

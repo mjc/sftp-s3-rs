@@ -3,10 +3,12 @@ use bytes::Bytes;
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod local;
 pub mod memory;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+pub use local::LocalBackend;
 pub use memory::MemoryBackend;
 #[cfg(feature = "s3")]
 pub use s3::{S3Backend, S3Config};

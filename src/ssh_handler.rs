@@ -1,6 +1,7 @@
 use crate::backend::Backend;
 use crate::sftp_handler::SftpHandler;
 use async_trait::async_trait;
+use russh::keys::PublicKey;
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId};
 use std::collections::HashMap;
@@ -8,20 +9,31 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-/// Authentication callback type
-pub type AuthCallback = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+/// Password authentication callback type
+pub type PasswordAuthCallback = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+/// Public key authentication callback type
+/// Returns true if the given public key is authorized for the user
+pub type PubkeyAuthCallback = Arc<dyn Fn(&str, &PublicKey) -> bool + Send + Sync>;
+
+/// Authentication configuration
+#[derive(Clone, Default)]
+pub struct AuthConfig {
+    pub password_callback: Option<PasswordAuthCallback>,
+    pub pubkey_callback: Option<PubkeyAuthCallback>,
+}
 
 /// SSH server that creates sessions for each connection
 pub struct SshServer<B: Backend> {
     backend: Arc<B>,
-    auth_callback: AuthCallback,
+    auth_config: AuthConfig,
 }
 
 impl<B: Backend> SshServer<B> {
-    pub fn new(backend: Arc<B>, auth_callback: AuthCallback) -> Self {
+    pub fn new(backend: Arc<B>, auth_config: AuthConfig) -> Self {
         Self {
             backend,
-            auth_callback,
+            auth_config,
         }
     }
 }
@@ -30,7 +42,7 @@ impl<B: Backend> Clone for SshServer<B> {
     fn clone(&self) -> Self {
         Self {
             backend: self.backend.clone(),
-            auth_callback: self.auth_callback.clone(),
+            auth_config: self.auth_config.clone(),
         }
     }
 }
@@ -40,22 +52,22 @@ impl<B: Backend> russh::server::Server for SshServer<B> {
 
     fn new_client(&mut self, addr: Option<std::net::SocketAddr>) -> Self::Handler {
         info!(?addr, "New SSH connection");
-        SshSession::new(self.backend.clone(), self.auth_callback.clone())
+        SshSession::new(self.backend.clone(), self.auth_config.clone())
     }
 }
 
 /// Individual SSH session handler
 pub struct SshSession<B: Backend> {
     backend: Arc<B>,
-    auth_callback: AuthCallback,
+    auth_config: AuthConfig,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 
 impl<B: Backend> SshSession<B> {
-    pub fn new(backend: Arc<B>, auth_callback: AuthCallback) -> Self {
+    pub fn new(backend: Arc<B>, auth_config: AuthConfig) -> Self {
         Self {
             backend,
-            auth_callback,
+            auth_config,
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -70,26 +82,38 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        debug!(user, password, "Password authentication attempt");
-        let result = (self.auth_callback)(user, password);
-        debug!(user, password, result, "Auth callback result");
-        if result {
-            info!(user, "Authentication successful");
-            Ok(Auth::Accept)
-        } else {
-            info!(user, "Authentication failed");
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+        debug!(user, "Password authentication attempt");
+
+        if let Some(ref callback) = self.auth_config.password_callback {
+            let result = callback(user, password);
+            if result {
+                info!(user, "Password authentication successful");
+                return Ok(Auth::Accept);
+            }
         }
+
+        info!(user, "Password authentication failed");
+        Ok(Auth::Reject {
+            proceed_with_methods: None,
+        })
     }
 
     async fn auth_publickey(
         &mut self,
         user: &str,
-        _public_key: &russh::keys::PublicKey,
+        public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        debug!(user, "Public key authentication attempt - rejected");
+        debug!(user, key_type = ?public_key.algorithm(), "Public key authentication attempt");
+
+        if let Some(ref callback) = self.auth_config.pubkey_callback {
+            let result = callback(user, public_key);
+            if result {
+                info!(user, "Public key authentication successful");
+                return Ok(Auth::Accept);
+            }
+        }
+
+        info!(user, "Public key authentication failed");
         Ok(Auth::Reject {
             proceed_with_methods: None,
         })

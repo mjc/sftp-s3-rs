@@ -1,6 +1,7 @@
 use crate::backend::Backend;
-use crate::ssh_handler::{AuthCallback, SshServer};
+use crate::ssh_handler::{AuthConfig, SshServer};
 use russh::keys::ssh_key::rand_core::OsRng;
+use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +56,7 @@ impl ServerConfig {
 pub struct Server<B: Backend> {
     backend: Arc<B>,
     config: ServerConfig,
-    auth_callback: AuthCallback,
+    auth_config: AuthConfig,
 }
 
 impl<B: Backend> Server<B> {
@@ -63,7 +64,7 @@ impl<B: Backend> Server<B> {
         Self {
             backend: Arc::new(backend),
             config: ServerConfig::default(),
-            auth_callback: Arc::new(|_, _| false),
+            auth_config: AuthConfig::default(),
         }
     }
 
@@ -77,11 +78,32 @@ impl<B: Backend> Server<B> {
     where
         F: Fn(&str, &str) -> bool + Send + Sync + 'static,
     {
-        self.auth_callback = Arc::new(callback);
+        self.auth_config.password_callback = Some(Arc::new(callback));
         self
     }
 
-    /// Set static users for authentication
+    /// Set public key authentication callback
+    pub fn with_pubkey_auth<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, &PublicKey) -> bool + Send + Sync + 'static,
+    {
+        self.auth_config.pubkey_callback = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set authorized keys for a user (convenience method for pubkey auth)
+    pub fn with_authorized_keys(self, authorized: Vec<(String, Vec<PublicKey>)>) -> Self {
+        let authorized = Arc::new(authorized);
+        self.with_pubkey_auth(move |user, key| {
+            authorized
+                .iter()
+                .find(|(u, _)| u == user)
+                .map(|(_, keys)| keys.iter().any(|k| k == key))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Set static users for password authentication
     pub fn with_users(self, users: Vec<(String, String)>) -> Self {
         let users = Arc::new(users);
         self.with_password_auth(move |user, pass| users.iter().any(|(u, p)| u == user && p == pass))
@@ -97,16 +119,29 @@ impl<B: Backend> Server<B> {
             )?);
         }
 
+        // Determine which auth methods to advertise
+        let mut methods = russh::MethodSet::empty();
+        if self.auth_config.password_callback.is_some() {
+            methods |= russh::MethodSet::PASSWORD;
+        }
+        if self.auth_config.pubkey_callback.is_some() {
+            methods |= russh::MethodSet::PUBLICKEY;
+        }
+        // Default to password if nothing configured
+        if methods.is_empty() {
+            methods = russh::MethodSet::PASSWORD;
+        }
+
         let ssh_config = SshConfig {
             auth_rejection_time: self.config.auth_rejection_time,
             auth_rejection_time_initial: Some(Duration::from_secs(0)),
-            methods: russh::MethodSet::PASSWORD,
+            methods,
             keys,
             ..Default::default()
         };
 
         let ssh_config = Arc::new(ssh_config);
-        let mut server = SshServer::new(self.backend, self.auth_callback);
+        let mut server = SshServer::new(self.backend, self.auth_config);
 
         let addr = format!("0.0.0.0:{}", self.config.port);
         info!(addr = %addr, "Starting SFTP server");
@@ -131,3 +166,6 @@ pub async fn run<B: Backend>(
         .run()
         .await
 }
+
+// Re-export auth types for advanced usage
+pub use crate::ssh_handler::{PasswordAuthCallback, PubkeyAuthCallback};
