@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Cross-compile for multiple platforms
 # Requires: rustup target add <target>
 #

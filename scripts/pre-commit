@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Pre-commit hook for sftp-s3-rs
 # Install with: ./scripts/setup-hooks.sh
 
