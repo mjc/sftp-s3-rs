@@ -1,0 +1,38 @@
+[package]
+name = "sftp-s3"
+version = "0.1.0"
+edition = "2021"
+description = "Pluggable SFTP server with S3 and custom backend support"
+license = "Apache-2.0"
+repository = "https://github.com/elixir-ssh/sftp-s3-rs"
+
+[features]
+default = ["s3"]
+s3 = ["aws-sdk-s3", "aws-config"]
+
+[dependencies]
+# SSH/SFTP
+russh = "0.48"
+russh-sftp = "2.1"
+russh-keys = "0.48"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# S3 (optional)
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+
+# Utilities
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
