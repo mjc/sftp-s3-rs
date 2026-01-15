@@ -1,8 +1,14 @@
-use super::{normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo};
+use super::{
+    normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo, ReadHandle,
+    WriteHandle,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
-use tokio::fs;
+use std::sync::Arc;
+use tokio::fs::{self, File};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 use tracing::debug;
 
 /// Local filesystem storage backend
@@ -183,6 +189,95 @@ impl Backend for LocalBackend {
         fs::write(&full_path, &content)
             .await
             .map_err(Self::map_io_error)
+    }
+
+    async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>> {
+        let normalized = normalize_path(path);
+        let full_path = self.full_path(&normalized);
+
+        debug!(path = %full_path.display(), "Opening file for read");
+
+        let file = File::open(&full_path).await.map_err(Self::map_io_error)?;
+        let metadata = file.metadata().await.map_err(Self::map_io_error)?;
+        let size = metadata.len();
+
+        Ok(Box::new(LocalReadHandle {
+            file: Arc::new(Mutex::new(file)),
+            size,
+        }))
+    }
+
+    async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
+        let normalized = normalize_path(path);
+        let full_path = self.full_path(&normalized);
+
+        debug!(path = %full_path.display(), "Opening file for write");
+
+        let file = File::create(&full_path).await.map_err(Self::map_io_error)?;
+
+        Ok(Box::new(LocalWriteHandle {
+            file: Arc::new(Mutex::new(file)),
+        }))
+    }
+}
+
+/// Read handle for local filesystem - uses seek + read for random access
+struct LocalReadHandle {
+    file: Arc<Mutex<File>>,
+    size: u64,
+}
+
+#[async_trait]
+impl ReadHandle for LocalReadHandle {
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+        let mut file = self.file.lock().await;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(LocalBackend::map_io_error)?;
+
+        let mut buf = vec![0u8; len as usize];
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(LocalBackend::map_io_error)?;
+        buf.truncate(n);
+
+        Ok(Bytes::from(buf))
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// Write handle for local filesystem - writes directly to file
+struct LocalWriteHandle {
+    file: Arc<Mutex<File>>,
+}
+
+#[async_trait]
+impl WriteHandle for LocalWriteHandle {
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+        let mut file = self.file.lock().await;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(LocalBackend::map_io_error)?;
+        file.write_all(data)
+            .await
+            .map_err(LocalBackend::map_io_error)?;
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> BackendResult<()> {
+        let mut file = self.file.lock().await;
+        file.flush().await.map_err(LocalBackend::map_io_error)?;
+        Ok(())
+    }
+
+    async fn abort(self: Box<Self>) -> BackendResult<()> {
+        // File will be closed on drop, but it may have partial content
+        // For a cleaner abort, we'd need to track the path and delete the file
+        Ok(())
     }
 }
 

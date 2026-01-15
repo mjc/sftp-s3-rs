@@ -1,8 +1,12 @@
-use super::{normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo};
+use super::{
+    normalize_path, Backend, BackendError, BackendResult, BufferedReadHandle, DirEntry, FileInfo,
+    ReadHandle, WriteHandle,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const KEEP_MARKER: &str = ".keep";
 
@@ -15,7 +19,7 @@ struct FileData {
 
 /// In-memory storage backend for testing and development
 pub struct MemoryBackend {
-    files: RwLock<HashMap<String, FileData>>,
+    files: Arc<RwLock<HashMap<String, FileData>>>,
 }
 
 impl Default for MemoryBackend {
@@ -27,7 +31,7 @@ impl Default for MemoryBackend {
 impl MemoryBackend {
     pub fn new() -> Self {
         Self {
-            files: RwLock::new(HashMap::new()),
+            files: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -47,7 +51,7 @@ impl MemoryBackend {
             })
             .collect();
         Self {
-            files: RwLock::new(files),
+            files: Arc::new(RwLock::new(files)),
         }
     }
 }
@@ -186,6 +190,72 @@ impl Backend for MemoryBackend {
                 mtime: super::current_timestamp(),
             },
         );
+        Ok(())
+    }
+
+    async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>> {
+        let content = self.read_file(path).await?;
+        Ok(Box::new(BufferedReadHandle::new(content)))
+    }
+
+    async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
+        let normalized = normalize_path(path).into_owned();
+        Ok(Box::new(MemoryWriteHandle::new(
+            normalized,
+            self.files.clone(),
+        )))
+    }
+}
+
+/// Write handle for memory backend
+struct MemoryWriteHandle {
+    path: String,
+    buffer: Vec<u8>,
+    files: Arc<RwLock<HashMap<String, FileData>>>,
+}
+
+impl MemoryWriteHandle {
+    fn new(path: String, files: Arc<RwLock<HashMap<String, FileData>>>) -> Self {
+        Self {
+            path,
+            buffer: Vec::new(),
+            files,
+        }
+    }
+}
+
+#[async_trait]
+impl WriteHandle for MemoryWriteHandle {
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+        let start = offset as usize;
+        if start > self.buffer.len() {
+            self.buffer.resize(start, 0);
+        }
+        if start == self.buffer.len() {
+            self.buffer.extend_from_slice(data);
+        } else {
+            let end = start + data.len();
+            if end > self.buffer.len() {
+                self.buffer.resize(end, 0);
+            }
+            self.buffer[start..end].copy_from_slice(data);
+        }
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> BackendResult<()> {
+        self.files.write().insert(
+            self.path,
+            FileData {
+                content: Bytes::from(self.buffer),
+                mtime: super::current_timestamp(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn abort(self: Box<Self>) -> BackendResult<()> {
+        // Nothing to clean up
         Ok(())
     }
 }

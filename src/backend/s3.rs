@@ -1,8 +1,11 @@
 use super::{
     current_timestamp, normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo,
+    ReadHandle, WriteHandle,
 };
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::CompletedMultipartUpload;
+use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::collections::HashSet;
@@ -338,6 +341,258 @@ impl Backend for S3Backend {
             .send()
             .await
             .map_err(Self::map_s3_error)?;
+
+        Ok(())
+    }
+
+    async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>> {
+        let key = self.build_key(path);
+
+        // Get file size via HEAD request
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(Self::map_s3_error)?;
+
+        let size = head.content_length.unwrap_or(0) as u64;
+
+        Ok(Box::new(S3ReadHandle {
+            client: self.client.clone(),
+            bucket: self.config.bucket.clone(),
+            key,
+            size,
+        }))
+    }
+
+    async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
+        let key = self.build_key(path);
+
+        // Start multipart upload
+        let create_result = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(Self::map_s3_error)?;
+
+        let upload_id = create_result
+            .upload_id
+            .ok_or_else(|| BackendError::Other("No upload ID returned".into()))?;
+
+        debug!(key = %key, upload_id = %upload_id, "Started multipart upload");
+
+        Ok(Box::new(S3WriteHandle {
+            client: self.client.clone(),
+            bucket: self.config.bucket.clone(),
+            key,
+            upload_id,
+            buffer: Vec::new(),
+            parts: Vec::new(),
+            part_number: 1,
+        }))
+    }
+}
+
+/// S3 read handle using Range requests for random access
+struct S3ReadHandle {
+    client: Client,
+    bucket: String,
+    key: String,
+    size: u64,
+}
+
+#[async_trait]
+impl ReadHandle for S3ReadHandle {
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+        if offset >= self.size {
+            return Ok(Bytes::new());
+        }
+
+        let end = std::cmp::min(offset + len as u64, self.size) - 1;
+        let range = format!("bytes={}-{}", offset, end);
+
+        let result = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .range(&range)
+            .send()
+            .await
+            .map_err(S3Backend::map_s3_error)?;
+
+        let bytes = result
+            .body
+            .collect()
+            .await
+            .map_err(|e| BackendError::Io(e.to_string()))?
+            .into_bytes();
+
+        Ok(bytes)
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// Minimum part size for S3 multipart upload (5MB)
+const MIN_PART_SIZE: usize = 5 * 1024 * 1024;
+
+/// S3 write handle using multipart upload
+struct S3WriteHandle {
+    client: Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    buffer: Vec<u8>,
+    parts: Vec<CompletedPart>,
+    part_number: i32,
+}
+
+impl S3WriteHandle {
+    /// Flush buffer to S3 as a part if large enough (or if force is true)
+    async fn flush_part(&mut self, force: bool) -> BackendResult<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+
+        // Only flush if we have enough data (or are finishing)
+        if !force && self.buffer.len() < MIN_PART_SIZE {
+            return Ok(());
+        }
+
+        let data = std::mem::take(&mut self.buffer);
+        debug!(
+            key = %self.key,
+            part = self.part_number,
+            size = data.len(),
+            "Uploading part"
+        );
+
+        let result = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id)
+            .part_number(self.part_number)
+            .body(ByteStream::from(data))
+            .send()
+            .await
+            .map_err(S3Backend::map_s3_error)?;
+
+        let etag = result.e_tag.unwrap_or_default();
+        self.parts.push(
+            CompletedPart::builder()
+                .e_tag(etag)
+                .part_number(self.part_number)
+                .build(),
+        );
+
+        self.part_number += 1;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl WriteHandle for S3WriteHandle {
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+        // For simplicity, we assume sequential writes (offset == buffer end)
+        // S3 multipart doesn't support random writes anyway
+        let start = offset as usize;
+        if start > self.buffer.len() {
+            self.buffer.resize(start, 0);
+        }
+        if start == self.buffer.len() {
+            self.buffer.extend_from_slice(data);
+        } else {
+            let end = start + data.len();
+            if end > self.buffer.len() {
+                self.buffer.resize(end, 0);
+            }
+            self.buffer[start..end].copy_from_slice(data);
+        }
+
+        // Flush if we have enough data for a part
+        self.flush_part(false).await?;
+
+        Ok(())
+    }
+
+    async fn finish(mut self: Box<Self>) -> BackendResult<()> {
+        // Upload any remaining data
+        self.flush_part(true).await?;
+
+        if self.parts.is_empty() {
+            // No parts uploaded - abort multipart and use simple upload
+            let _ = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .upload_id(&self.upload_id)
+                .send()
+                .await;
+
+            // Write empty file
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .body(ByteStream::from_static(b""))
+                .send()
+                .await
+                .map_err(S3Backend::map_s3_error)?;
+
+            return Ok(());
+        }
+
+        // Complete multipart upload
+        let completed = CompletedMultipartUpload::builder()
+            .set_parts(Some(self.parts))
+            .build();
+
+        debug!(
+            key = %self.key,
+            upload_id = %self.upload_id,
+            "Completing multipart upload"
+        );
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id)
+            .multipart_upload(completed)
+            .send()
+            .await
+            .map_err(S3Backend::map_s3_error)?;
+
+        Ok(())
+    }
+
+    async fn abort(self: Box<Self>) -> BackendResult<()> {
+        debug!(
+            key = %self.key,
+            upload_id = %self.upload_id,
+            "Aborting multipart upload"
+        );
+
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id)
+            .send()
+            .await
+            .map_err(S3Backend::map_s3_error)?;
 
         Ok(())
     }
