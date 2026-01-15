@@ -171,7 +171,7 @@ impl Default for HandleManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{BackendResult, BufferedReadHandle};
+    use crate::backend::BufferedReadHandle;
     use bytes::Bytes;
     use proptest::prelude::*;
     use std::collections::HashSet;
