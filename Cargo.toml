@@ -37,9 +37,20 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio-test = "0.4"
 tempfile = "3"
 proptest = "1.4"
+criterion = { version = "0.6", features = ["async_tokio"] }
 
 [profile.release]
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Profile for profiling with flamegraph (optimized but with debug symbols)
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+[[bench]]
+name = "transfer"
+harness = false

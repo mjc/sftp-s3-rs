@@ -207,6 +207,10 @@ impl Backend for MemoryBackend {
     }
 }
 
+/// Initial buffer capacity for write handles (1MB)
+/// This reduces reallocations for typical file uploads
+const INITIAL_WRITE_CAPACITY: usize = 1024 * 1024;
+
 /// Write handle for memory backend
 struct MemoryWriteHandle {
     path: String,
@@ -218,7 +222,7 @@ impl MemoryWriteHandle {
     fn new(path: String, files: Arc<RwLock<HashMap<String, FileData>>>) -> Self {
         Self {
             path,
-            buffer: Vec::new(),
+            buffer: Vec::with_capacity(INITIAL_WRITE_CAPACITY),
             files,
         }
     }
@@ -228,13 +232,27 @@ impl MemoryWriteHandle {
 impl WriteHandle for MemoryWriteHandle {
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
         let start = offset as usize;
+        let end = start + data.len();
+
+        // Pre-reserve capacity if needed to avoid repeated small reallocations
+        // For sequential appends (most common), reserve enough for ~8 more chunks
+        if end > self.buffer.capacity() {
+            let new_capacity = std::cmp::max(
+                end,
+                self.buffer
+                    .capacity()
+                    .saturating_mul(2)
+                    .max(end + data.len() * 8),
+            );
+            self.buffer.reserve(new_capacity - self.buffer.len());
+        }
+
         if start > self.buffer.len() {
             self.buffer.resize(start, 0);
         }
         if start == self.buffer.len() {
             self.buffer.extend_from_slice(data);
         } else {
-            let end = start + data.len();
             if end > self.buffer.len() {
                 self.buffer.resize(end, 0);
             }
