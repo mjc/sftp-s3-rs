@@ -64,6 +64,11 @@
           # Benchmarking
           gnuplot
           hyperfine
+
+          # SFTP testing
+          sshpass
+          bc
+          openssh  # sftp client
         ]
         ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
           perf

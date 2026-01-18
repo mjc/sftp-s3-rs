@@ -7,11 +7,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::debug;
 
+// Unix file type bits for SFTP
+const S_IFREG: u32 = 0o100000; // Regular file
+const S_IFDIR: u32 = 0o040000; // Directory
+
 /// Convert FileInfo to russh_sftp FileAttributes
 fn to_file_attributes(info: &FileInfo) -> FileAttributes {
+    // SFTP requires file type bits in permissions
+    let file_type = if info.is_dir { S_IFDIR } else { S_IFREG };
+    let permissions = file_type | (info.permissions & 0o7777);
+
     FileAttributes {
         size: Some(info.size),
-        permissions: Some(info.permissions),
+        permissions: Some(permissions),
         mtime: Some(info.mtime),
         atime: Some(info.atime),
         uid: Some(info.uid),
