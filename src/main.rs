@@ -1,14 +1,50 @@
 //! SFTP server with pluggable backends (local filesystem, S3, memory)
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use sftp_s3::{LocalBackend, MemoryBackend, Server, ServerConfig};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Clone, Copy)]
+enum Backend {
+    Local,
+    #[cfg(feature = "s3")]
+    S3,
+    Memory,
+}
+
+impl std::str::FromStr for Backend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "local" => Ok(Backend::Local),
+            #[cfg(feature = "s3")]
+            "s3" => Ok(Backend::S3),
+            "memory" => Ok(Backend::Memory),
+            other => {
+                let available = if cfg!(feature = "s3") {
+                    "local, s3, memory"
+                } else {
+                    "local, memory"
+                };
+                Err(format!(
+                    "unknown backend '{}', choose from: {}",
+                    other, available
+                ))
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "sftp-s3")]
 #[command(about = "SFTP server with pluggable backends", long_about = None)]
 struct Cli {
+    /// Backend to use
+    #[arg(long, env = "BACKEND")]
+    backend: Backend,
+
     /// Port to listen on
     #[arg(short, long, env = "PORT", default_value = "2222")]
     port: u16,
@@ -33,39 +69,27 @@ struct Cli {
     #[arg(long, env = "AUTHORIZED_KEYS", hide = true)]
     authorized_keys: Option<String>,
 
-    #[command(subcommand)]
-    backend: BackendCommand,
-}
+    // Local backend options
+    /// Root directory to serve (for local backend)
+    #[arg(long, env = "LOCAL_ROOT", default_value = ".")]
+    root: PathBuf,
 
-#[derive(Subcommand)]
-enum BackendCommand {
-    /// Serve files from local filesystem
-    Local {
-        /// Root directory to serve
-        #[arg(default_value = ".")]
-        root: PathBuf,
-    },
-    /// Serve files from S3 bucket
-    #[cfg(feature = "s3")]
-    S3 {
-        /// S3 bucket name
-        #[arg(env = "S3_BUCKET")]
-        bucket: String,
+    // S3 backend options
+    /// S3 bucket name (for s3 backend)
+    #[arg(long, env = "S3_BUCKET")]
+    bucket: Option<String>,
 
-        /// S3 key prefix (optional)
-        #[arg(long, env = "S3_PREFIX", default_value = "")]
-        prefix: String,
+    /// S3 key prefix (for s3 backend)
+    #[arg(long, env = "S3_PREFIX", default_value = "")]
+    prefix: String,
 
-        /// S3 endpoint URL (for S3-compatible services)
-        #[arg(long, env = "S3_ENDPOINT")]
-        endpoint: Option<String>,
+    /// S3 endpoint URL (for S3-compatible services)
+    #[arg(long, env = "S3_ENDPOINT")]
+    endpoint: Option<String>,
 
-        /// AWS region
-        #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
-        region: String,
-    },
-    /// Use in-memory storage (for testing)
-    Memory,
+    /// AWS region (for s3 backend)
+    #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
+    region: String,
 }
 
 /// Parse an OpenSSH public key line
@@ -81,13 +105,27 @@ fn parse_pubkey(line: &str) -> Option<russh::keys::PublicKey> {
     russh::keys::parse_public_key_base64(parts[1]).ok()
 }
 
+/// Expand ~ to home directory
+fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    if let Some(path_str) = path.to_str() {
+        if path_str.starts_with("~") {
+            if let Ok(home) = std::env::var("HOME") {
+                let expanded = path_str.replacen("~", &home, 1);
+                return PathBuf::from(expanded);
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Load authorized keys from file or string
 fn load_authorized_keys(file: Option<&PathBuf>, data: Option<&str>) -> Vec<russh::keys::PublicKey> {
     let contents = if let Some(path) = file {
-        match std::fs::read_to_string(path) {
+        let expanded_path = expand_tilde(path);
+        match std::fs::read_to_string(&expanded_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Warning: could not read {}: {}", path.display(), e);
+                eprintln!("Warning: could not read {}: {}", expanded_path.display(), e);
                 return Vec::new();
             }
         }
@@ -129,8 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Load host key
     if let Some(ref path) = cli.host_key_file {
-        config = config.with_key_file(path)?;
-        eprintln!("Loaded host key from {}", path.display());
+        let expanded_path = expand_tilde(path);
+        config = config.with_key_file(&expanded_path)?;
+        eprintln!("Loaded host key from {}", expanded_path.display());
     } else if let Some(ref data) = cli.host_key {
         config = config.with_key_data(data)?;
         eprintln!("Loaded host key from HOST_KEY env var");
@@ -160,8 +199,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Run with appropriate backend
     match cli.backend {
-        BackendCommand::Local { root } => {
-            let root = root.canonicalize()?;
+        Backend::Local => {
+            let expanded_root = expand_tilde(&cli.root);
+            let root = expanded_root.canonicalize()?;
             eprintln!("Backend: local filesystem at {}", root.display());
 
             let mut server = Server::new(LocalBackend::new(&root)).config(config);
@@ -177,18 +217,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             server.run().await
         }
         #[cfg(feature = "s3")]
-        BackendCommand::S3 {
-            bucket,
-            prefix,
-            endpoint,
-            region,
-        } => {
-            eprintln!("Backend: S3 bucket '{}' (prefix: '{}')", bucket, prefix);
+        Backend::S3 => {
+            let bucket = cli.bucket.as_ref().ok_or("S3 bucket required (--bucket)")?;
+            eprintln!("Backend: S3 bucket '{}' (prefix: '{}')", bucket, cli.prefix);
 
-            let s3_config = sftp_s3::S3Config::new(&bucket).with_prefix(&prefix);
-            let backend = if let Some(endpoint) = endpoint {
+            let s3_config = sftp_s3::S3Config::new(bucket).with_prefix(&cli.prefix);
+            let backend = if let Some(endpoint) = &cli.endpoint {
                 eprintln!("Using custom S3 endpoint: {}", endpoint);
-                sftp_s3::S3Backend::with_endpoint(s3_config, &endpoint, &region).await
+                sftp_s3::S3Backend::with_endpoint(s3_config, endpoint, &cli.region).await
             } else {
                 sftp_s3::S3Backend::from_env(s3_config).await
             };
@@ -205,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             server.run().await
         }
-        BackendCommand::Memory => {
+        Backend::Memory => {
             eprintln!("Backend: in-memory (data will be lost on exit)");
 
             let mut server = Server::new(MemoryBackend::new()).config(config);
