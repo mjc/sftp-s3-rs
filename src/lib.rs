@@ -64,6 +64,7 @@
 pub mod backend;
 pub mod error;
 pub mod handle;
+pub mod scp_handler;
 pub mod server;
 pub mod sftp_handler;
 pub mod ssh_handler;

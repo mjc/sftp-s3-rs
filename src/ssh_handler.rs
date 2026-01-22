@@ -1,4 +1,5 @@
 use crate::backend::Backend;
+use crate::scp_handler::ScpHandler;
 use crate::sftp_handler::SftpHandler;
 use async_trait::async_trait;
 use russh::keys::PublicKey;
@@ -7,7 +8,7 @@ use russh::{Channel, ChannelId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Password authentication callback type
 pub type PasswordAuthCallback = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
@@ -137,15 +138,64 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
     ) -> Result<(), Self::Error> {
         debug!(channel_id = ?channel_id, name, "Subsystem request");
 
-        if name == "sftp" {
+        match name {
+            "sftp" => {
+                if let Some(channel) = self.get_channel(channel_id).await {
+                    let sftp_handler = SftpHandler::new(self.backend.clone());
+                    session.channel_success(channel_id)?;
+
+                    // Run SFTP handler (blocking until session ends)
+                    russh_sftp::server::run(channel.into_stream(), sftp_handler).await;
+                }
+            }
+            "scp" => {
+                if let Some(channel) = self.get_channel(channel_id).await {
+                    let mut scp_handler = ScpHandler::new(self.backend.clone());
+                    session.channel_success(channel_id)?;
+
+                    // Run SCP handler with default command (scp -t for subsystem)
+                    // When invoked as subsystem, assume receive mode
+                    let stream = channel.into_stream();
+                    if let Err(e) = scp_handler.run(stream, "scp -t /").await {
+                        debug!(channel_id = ?channel_id, error = %e, "SCP subsystem failed");
+                    }
+                }
+            }
+            _ => {
+                session.channel_failure(channel_id)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel_id: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data);
+        debug!(channel_id = ?channel_id, command = %command, "Exec request");
+
+        // Check if this is an SCP command
+        if command.starts_with("scp ") {
             if let Some(channel) = self.get_channel(channel_id).await {
-                let sftp_handler = SftpHandler::new(self.backend.clone());
+                let mut scp_handler = ScpHandler::new(self.backend.clone());
                 session.channel_success(channel_id)?;
 
-                // Run SFTP handler (blocking until session ends)
-                russh_sftp::server::run(channel.into_stream(), sftp_handler).await;
+                // Run SCP handler in a separate task (like SFTP does)
+                let stream = channel.into_stream();
+                let command = command.to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = scp_handler.run(stream, &command).await {
+                        warn!(error = %e, "SCP command failed");
+                    }
+                });
             }
         } else {
+            // Unknown command
+            debug!(channel_id = ?channel_id, "Unknown exec command, rejecting");
             session.channel_failure(channel_id)?;
         }
 
