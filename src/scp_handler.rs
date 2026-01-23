@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::backend::Backend;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::debug;
@@ -75,6 +76,17 @@ impl<B: Backend> ScpHandler<B> {
         }
     }
 
+    /// Expand tilde in path to root (virtual filesystem has no home dirs)
+    fn expand_tilde(path: &str) -> Cow<'_, str> {
+        if path == "~" {
+            Cow::Borrowed("/")
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            Cow::Owned(format!("/{}", rest))
+        } else {
+            Cow::Borrowed(path)
+        }
+    }
+
     /// Parse SCP command line
     fn parse_command(command: &str) -> Result<(ScpMode, bool, bool, String), ScpError> {
         if !command.starts_with("scp ") {
@@ -95,7 +107,7 @@ impl<B: Backend> ScpHandler<B> {
                 "-p" => preserve_times = true,
                 "-d" | "-v" => {} // Ignore other flags
                 path if !path.starts_with('-') => {
-                    target_path = path.to_string();
+                    target_path = Self::expand_tilde(path).into_owned();
                 }
                 _ => {}
             }
