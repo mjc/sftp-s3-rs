@@ -77,4 +77,4 @@ pub use backend::{Backend, BackendError, BackendResult, DirEntry, FileInfo};
 pub use backend::{S3Backend, S3Config};
 
 pub use error::Error;
-pub use server::{Server, ServerConfig};
+pub use server::{parse_cipher, Server, ServerConfig, AVAILABLE_CIPHERS};

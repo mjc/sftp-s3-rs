@@ -3,6 +3,8 @@ use crate::ssh_handler::{AuthConfig, SshServer};
 use russh::keys::ssh_key::rand_core::OsRng;
 use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
+use russh::{cipher, Preferred};
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +19,8 @@ pub struct ServerConfig {
     pub keys: Vec<russh::keys::PrivateKey>,
     /// Authentication rejection time
     pub auth_rejection_time: Duration,
+    /// Preferred ciphers (in order of preference)
+    pub ciphers: Option<Vec<cipher::Name>>,
 }
 
 impl Default for ServerConfig {
@@ -25,6 +29,7 @@ impl Default for ServerConfig {
             port: 2222,
             keys: Vec::new(),
             auth_rejection_time: Duration::from_secs(3),
+            ciphers: None,
         }
     }
 }
@@ -41,6 +46,12 @@ impl ServerConfig {
 
     pub fn with_key(mut self, key: russh::keys::PrivateKey) -> Self {
         self.keys.push(key);
+        self
+    }
+
+    /// Set preferred ciphers (in order of preference)
+    pub fn with_ciphers(mut self, ciphers: Vec<cipher::Name>) -> Self {
+        self.ciphers = Some(ciphers);
         self
     }
 
@@ -158,11 +169,21 @@ impl<B: Backend> Server<B> {
             methods = russh::MethodSet::PASSWORD;
         }
 
+        let preferred = if let Some(ref ciphers) = self.config.ciphers {
+            Preferred {
+                cipher: Cow::Owned(ciphers.clone()),
+                ..Preferred::DEFAULT
+            }
+        } else {
+            Preferred::DEFAULT
+        };
+
         let ssh_config = SshConfig {
             auth_rejection_time: self.config.auth_rejection_time,
             auth_rejection_time_initial: Some(Duration::from_secs(0)),
             methods,
             keys,
+            preferred,
             ..Default::default()
         };
 
@@ -195,3 +216,32 @@ pub async fn run<B: Backend>(
 
 // Re-export auth types for advanced usage
 pub use crate::ssh_handler::{PasswordAuthCallback, PubkeyAuthCallback};
+
+/// Parse a cipher name string into a cipher::Name
+pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
+    match s.trim() {
+        "aes256-gcm" | "aes256-gcm@openssh.com" => Some(cipher::AES_256_GCM),
+        "aes128-ctr" => Some(cipher::AES_128_CTR),
+        "aes192-ctr" => Some(cipher::AES_192_CTR),
+        "aes256-ctr" => Some(cipher::AES_256_CTR),
+        "aes128-cbc" => Some(cipher::AES_128_CBC),
+        "aes192-cbc" => Some(cipher::AES_192_CBC),
+        "aes256-cbc" => Some(cipher::AES_256_CBC),
+        "chacha20-poly1305" | "chacha20-poly1305@openssh.com" => Some(cipher::CHACHA20_POLY1305),
+        "3des-cbc" => Some(cipher::TRIPLE_DES_CBC),
+        _ => None,
+    }
+}
+
+/// List of available cipher names for help text
+pub const AVAILABLE_CIPHERS: &[&str] = &[
+    "aes256-gcm",
+    "aes128-ctr",
+    "aes192-ctr",
+    "aes256-ctr",
+    "aes128-cbc",
+    "aes192-cbc",
+    "aes256-cbc",
+    "chacha20-poly1305",
+    "3des-cbc",
+];

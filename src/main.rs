@@ -1,7 +1,7 @@
 //! SFTP server with pluggable backends (local filesystem, S3, memory)
 
 use clap::Parser;
-use sftp_s3::{LocalBackend, MemoryBackend, Server, ServerConfig};
+use sftp_s3::{parse_cipher, LocalBackend, MemoryBackend, Server, ServerConfig, AVAILABLE_CIPHERS};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -90,6 +90,11 @@ struct Cli {
     /// AWS region (for s3 backend)
     #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
     region: String,
+
+    /// Preferred ciphers (comma-separated, in order of preference)
+    /// Available: aes256-gcm, aes128-ctr, aes256-ctr, chacha20-poly1305
+    #[arg(long, env = "CIPHERS", value_delimiter = ',')]
+    ciphers: Option<Vec<String>>,
 }
 
 /// Parse an OpenSSH public key line
@@ -177,6 +182,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config = config.with_generated_key();
         eprintln!("Warning: Using generated host key (clients will see key change warnings)");
         eprintln!("         Set HOST_KEY_FILE or HOST_KEY for persistent keys");
+    }
+
+    // Parse ciphers
+    if let Some(ref cipher_names) = cli.ciphers {
+        let mut ciphers = Vec::new();
+        for name in cipher_names {
+            match parse_cipher(name) {
+                Some(c) => ciphers.push(c),
+                None => {
+                    eprintln!(
+                        "Unknown cipher '{}'. Available: {}",
+                        name,
+                        AVAILABLE_CIPHERS.join(", ")
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        config = config.with_ciphers(ciphers.clone());
+        eprintln!("Using ciphers: {:?}", cipher_names);
     }
 
     // Parse credentials

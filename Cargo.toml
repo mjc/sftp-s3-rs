@@ -40,17 +40,18 @@ proptest = "1.4"
 criterion = { version = "0.6", features = ["async_tokio"] }
 
 [profile.release]
-lto = false
+lto = true
 codegen-units = 1
 panic = "abort"
-#strip = true
-debug = true
+debug = false
+strip = true
 
 # Profile for profiling with flamegraph (optimized but with debug symbols)
 [profile.profiling]
 inherits = "release"
 debug = true
 strip = false
+split-debuginfo = "off"
 
 [[bench]]
 name = "transfer"
