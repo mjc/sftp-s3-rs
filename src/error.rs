@@ -19,7 +19,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("Key error: {0}")]
-    Key(#[from] russh_keys::Error),
+    Key(#[from] russh::keys::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

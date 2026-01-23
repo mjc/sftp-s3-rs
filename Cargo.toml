@@ -12,9 +12,8 @@ s3 = ["aws-sdk-s3", "aws-config"]
 
 [dependencies]
 # SSH/SFTP
-russh = "0.48"
+russh = { version = "0.56", default-features = false, features = ["aws-lc-rs", "flate2"] }
 russh-sftp = "2.1"
-russh-keys = "0.48"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros"] }

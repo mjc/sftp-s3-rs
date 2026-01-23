@@ -159,14 +159,14 @@ impl<B: Backend> Server<B> {
         // Determine which auth methods to advertise
         let mut methods = russh::MethodSet::empty();
         if self.auth_config.password_callback.is_some() {
-            methods |= russh::MethodSet::PASSWORD;
+            methods.push(russh::MethodKind::Password);
         }
         if self.auth_config.pubkey_callback.is_some() {
-            methods |= russh::MethodSet::PUBLICKEY;
+            methods.push(russh::MethodKind::PublicKey);
         }
         // Default to password if nothing configured
         if methods.is_empty() {
-            methods = russh::MethodSet::PASSWORD;
+            methods.push(russh::MethodKind::Password);
         }
 
         let preferred = if let Some(ref ciphers) = self.config.ciphers {
@@ -228,7 +228,6 @@ pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
         "aes192-cbc" => Some(cipher::AES_192_CBC),
         "aes256-cbc" => Some(cipher::AES_256_CBC),
         "chacha20-poly1305" | "chacha20-poly1305@openssh.com" => Some(cipher::CHACHA20_POLY1305),
-        "3des-cbc" => Some(cipher::TRIPLE_DES_CBC),
         _ => None,
     }
 }
@@ -243,5 +242,4 @@ pub const AVAILABLE_CIPHERS: &[&str] = &[
     "aes192-cbc",
     "aes256-cbc",
     "chacha20-poly1305",
-    "3des-cbc",
 ];
