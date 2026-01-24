@@ -12,7 +12,7 @@ s3 = ["aws-sdk-s3", "aws-config"]
 
 [dependencies]
 # SSH/SFTP
-russh = { version = "0.57", default-features = false, features = ["aws-lc-rs", "flate2"] }
+russh = { git = "https://github.com/EpicEric/russh.git", branch = "cryptovec-performance", default-features = false, features = ["aws-lc-rs", "flate2"] }
 russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 # Async runtime
