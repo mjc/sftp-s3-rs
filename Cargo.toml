@@ -13,7 +13,7 @@ s3 = ["aws-sdk-s3", "aws-config"]
 [dependencies]
 # SSH/SFTP
 russh = { version = "0.56", default-features = false, features = ["aws-lc-rs", "flate2"] }
-russh-sftp = "2.1"
+russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros"] }
@@ -23,6 +23,9 @@ futures = "0.3"
 # S3 (optional)
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+
+# Compression (zlib-rs for speed - pure Rust, fastest backend)
+flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
 
 # Utilities
 bytes = "1"
@@ -40,7 +43,7 @@ criterion = { version = "0.6", features = ["async_tokio"] }
 
 [profile.release]
 lto = true
-codegen-units = 1
+#codegen-units = 1
 panic = "abort"
 debug = false
 strip = true
@@ -48,9 +51,10 @@ strip = true
 # Profile for profiling with flamegraph (optimized but with debug symbols)
 [profile.profiling]
 inherits = "release"
-debug = true
+debug = 1
 strip = false
 split-debuginfo = "off"
+lto = false
 
 [[bench]]
 name = "transfer"

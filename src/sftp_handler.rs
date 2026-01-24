@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::backend::{normalize_path, Backend, BackendError, FileInfo};
 use crate::handle::{HandleInfo, HandleManager};
 use russh_sftp::protocol::{
@@ -220,7 +222,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         id: u32,
         handle: String,
         offset: u64,
-        data: Vec<u8>,
+        data: Bytes,
     ) -> Result<Status, Self::Error> {
         debug!(id, handle = %handle, offset, len = data.len(), "Writing file");
 
