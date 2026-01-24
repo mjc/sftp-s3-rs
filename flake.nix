@@ -73,6 +73,7 @@
         ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
           perf
           cargo-llvm-cov
+          valgrind  # Required for IAI benchmarks
         ];
 
       buildInputs = with pkgs; [

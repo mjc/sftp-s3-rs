@@ -40,6 +40,7 @@ tokio-test = "0.4"
 tempfile = "3"
 proptest = "1.4"
 criterion = { version = "0.6", features = ["async_tokio"] }
+iai-callgrind = "0.16"
 
 [profile.release]
 lto = true
@@ -56,6 +57,19 @@ strip = false
 split-debuginfo = "off"
 lto = false
 
+# Profile for benchmarks (need symbols for iai-callgrind)
+[profile.bench]
+strip = false
+debug = 1
+
 [[bench]]
 name = "transfer"
+harness = false
+
+[[bench]]
+name = "protocol"
+harness = false
+
+[[bench]]
+name = "protocol_iai"
 harness = false
