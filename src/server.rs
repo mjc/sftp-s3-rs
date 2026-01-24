@@ -3,7 +3,7 @@ use crate::ssh_handler::{AuthConfig, SshServer};
 use russh::keys::ssh_key::rand_core::OsRng;
 use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
-use russh::{cipher, Preferred};
+use russh::{cipher, compression, Preferred};
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,6 +21,8 @@ pub struct ServerConfig {
     pub auth_rejection_time: Duration,
     /// Preferred ciphers (in order of preference)
     pub ciphers: Option<Vec<cipher::Name>>,
+    /// Enable compression (disabled by default for better throughput)
+    pub compression: bool,
 }
 
 impl Default for ServerConfig {
@@ -30,6 +32,7 @@ impl Default for ServerConfig {
             keys: Vec::new(),
             auth_rejection_time: Duration::from_secs(3),
             ciphers: None,
+            compression: false,
         }
     }
 }
@@ -52,6 +55,12 @@ impl ServerConfig {
     /// Set preferred ciphers (in order of preference)
     pub fn with_ciphers(mut self, ciphers: Vec<cipher::Name>) -> Self {
         self.ciphers = Some(ciphers);
+        self
+    }
+
+    /// Enable compression (disabled by default for better throughput)
+    pub fn with_compression(mut self) -> Self {
+        self.compression = true;
         self
     }
 
@@ -169,14 +178,13 @@ impl<B: Backend> Server<B> {
             methods.push(russh::MethodKind::Password);
         }
 
-        let preferred = if let Some(ref ciphers) = self.config.ciphers {
-            Preferred {
-                cipher: Cow::Owned(ciphers.clone()),
-                ..Preferred::DEFAULT
-            }
-        } else {
-            Preferred::DEFAULT
-        };
+        let mut preferred = Preferred::DEFAULT;
+        if let Some(ref ciphers) = self.config.ciphers {
+            preferred.cipher = Cow::Owned(ciphers.clone());
+        }
+        if !self.config.compression {
+            preferred.compression = Cow::Borrowed(&[compression::NONE]);
+        }
 
         let ssh_config = SshConfig {
             auth_rejection_time: self.config.auth_rejection_time,

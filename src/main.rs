@@ -95,6 +95,10 @@ struct Cli {
     /// Available: aes256-gcm, aes128-ctr, aes256-ctr, chacha20-poly1305
     #[arg(long, env = "CIPHERS", value_delimiter = ',')]
     ciphers: Option<Vec<String>>,
+
+    /// Enable compression (disabled by default for better throughput)
+    #[arg(long, env = "COMPRESSION")]
+    compression: bool,
 }
 
 /// Parse an OpenSSH public key line
@@ -202,6 +206,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         config = config.with_ciphers(ciphers.clone());
         eprintln!("Using ciphers: {:?}", cipher_names);
+    }
+
+    // Enable compression if requested (disabled by default)
+    if cli.compression {
+        config = config.with_compression();
+        eprintln!("Compression enabled");
     }
 
     // Parse credentials
