@@ -21,7 +21,7 @@ RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profi
 # Disable set -e for perf since Ctrl-C causes non-zero exit
 set +e
 perf record -g --call-graph fp -F 997 \
-  target/profiling/sftp-s3 --backend local --port 2223 --user mjc:pass --root . --ciphers aes256-gcm --no-compression
+  target/profiling/sftp-s3 --backend local --port 2223 --user mjc:pass --root . #--ciphers aes256-gcm
 set -e
 
 echo ""

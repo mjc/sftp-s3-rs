@@ -12,7 +12,7 @@ s3 = ["aws-sdk-s3", "aws-config"]
 
 [dependencies]
 # SSH/SFTP
-russh = { version = "0.56", default-features = false, features = ["aws-lc-rs", "flate2"] }
+russh = { version = "0.57", default-features = false, features = ["aws-lc-rs", "flate2"] }
 russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 # Async runtime
@@ -39,12 +39,12 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio-test = "0.4"
 tempfile = "3"
 proptest = "1.4"
-criterion = { version = "0.6", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 iai-callgrind = "0.16"
 
 [profile.release]
 lto = true
-#codegen-units = 1
+codegen-units = 1
 panic = "abort"
 debug = false
 strip = true
