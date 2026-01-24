@@ -181,6 +181,14 @@ impl<B: Backend> Server<B> {
         let mut preferred = Preferred::DEFAULT;
         if let Some(ref ciphers) = self.config.ciphers {
             preferred.cipher = Cow::Owned(ciphers.clone());
+        } else {
+            // Default to ChaCha20-Poly1305 first (faster with AVX2), then AES-GCM
+            preferred.cipher = Cow::Borrowed(&[
+                cipher::CHACHA20_POLY1305,
+                cipher::AES_256_GCM,
+                cipher::AES_256_CTR,
+                cipher::AES_128_CTR,
+            ]);
         }
         if !self.config.compression {
             preferred.compression = Cow::Borrowed(&[compression::NONE]);
