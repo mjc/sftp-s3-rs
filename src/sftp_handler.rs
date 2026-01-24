@@ -211,10 +211,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::Eof);
         }
 
-        Ok(Data {
-            id,
-            data: data.to_vec(),
-        })
+        Ok(Data { id, data })
     }
 
     async fn write(
