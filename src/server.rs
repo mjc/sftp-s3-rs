@@ -96,6 +96,40 @@ impl ServerConfig {
             Ok(self.with_generated_key())
         }
     }
+
+    /// Load host keys from standard system locations (/etc/ssh/ssh_host_*_key)
+    /// Returns self unchanged if no keys are found (doesn't fail)
+    pub fn with_system_keys(mut self) -> Self {
+        const SYSTEM_KEY_PATHS: &[&str] = &[
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/etc/ssh/ssh_host_rsa_key",
+            "/etc/ssh/ssh_host_ecdsa_key",
+        ];
+
+        for path in SYSTEM_KEY_PATHS {
+            if let Ok(key) = russh::keys::load_secret_key(path, None) {
+                self.keys.push(key);
+            }
+        }
+        self
+    }
+
+    /// Load host key from env, then system, then generate if none found
+    pub fn with_default_keys(self) -> Result<Self, russh::keys::Error> {
+        if let Ok(key_data) = std::env::var("HOST_KEY") {
+            return self.with_key_data(&key_data);
+        }
+        if let Ok(key_path) = std::env::var("HOST_KEY_FILE") {
+            return self.with_key_file(&key_path);
+        }
+
+        let with_system = self.with_system_keys();
+        if with_system.keys.is_empty() {
+            Ok(with_system.with_generated_key())
+        } else {
+            Ok(with_system)
+        }
+    }
 }
 
 /// SFTP server builder
