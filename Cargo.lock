@@ -1459,7 +1459,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2038,7 +2038,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2639,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#6ff759b406becdba6160fe39f3dd580b0d2e5cc1"
+source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3134,7 +3134,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.56.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#6ff759b406becdba6160fe39f3dd580b0d2e5cc1"
+source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3193,7 +3193,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#6ff759b406becdba6160fe39f3dd580b0d2e5cc1"
+source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
 dependencies = [
  "libc",
  "log",
@@ -3221,7 +3221,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#6ff759b406becdba6160fe39f3dd580b0d2e5cc1"
+source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
 dependencies = [
  "chrono",
  "tokio",
@@ -3248,7 +3248,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3792,7 +3792,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4328,7 +4328,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
