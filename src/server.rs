@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Server configuration
 #[derive(Clone)]
@@ -114,8 +114,8 @@ impl ServerConfig {
         self
     }
 
-    /// Load host key from env, then system, then generate if none found
-    pub fn with_default_keys(self) -> Result<Self, russh::keys::Error> {
+    /// Load host key from env, then system, then cwd, then generate (and save to cwd)
+    pub fn with_default_keys(mut self) -> Result<Self, russh::keys::Error> {
         if let Ok(key_data) = std::env::var("HOST_KEY") {
             return self.with_key_data(&key_data);
         }
@@ -123,12 +123,55 @@ impl ServerConfig {
             return self.with_key_file(&key_path);
         }
 
-        let with_system = self.with_system_keys();
-        if with_system.keys.is_empty() {
-            Ok(with_system.with_generated_key())
-        } else {
-            Ok(with_system)
+        self = self.with_system_keys();
+        if !self.keys.is_empty() {
+            return Ok(self);
         }
+
+        // Try loading from cwd
+        const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
+        if let Ok(key) = russh::keys::load_secret_key(CWD_KEY_PATH, None) {
+            self.keys.push(key);
+            return Ok(self);
+        }
+
+        // Generate and try to save to cwd
+        let key =
+            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
+
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let key_str = key
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap();
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(CWD_KEY_PATH)
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(key_str.as_bytes()) {
+                    warn!(
+                        "Generated host key but failed to write to {}: {}",
+                        CWD_KEY_PATH, e
+                    );
+                } else {
+                    info!("Generated and saved host key to {}", CWD_KEY_PATH);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Generated host key but failed to create {}: {}",
+                    CWD_KEY_PATH, e
+                );
+            }
+        }
+
+        self.keys.push(key);
+        Ok(self)
     }
 }
 
