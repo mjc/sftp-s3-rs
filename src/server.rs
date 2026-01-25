@@ -264,13 +264,20 @@ impl<B: Backend> Server<B> {
     }
 
     /// Run the server
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut keys = self.config.keys.clone();
         if keys.is_empty() {
             keys.push(russh::keys::PrivateKey::random(
                 &mut OsRng,
                 russh::keys::Algorithm::Ed25519,
             )?);
+        }
+
+        // If no auth configured, try ~/.ssh/authorized_keys
+        if self.auth_config.password_callback.is_none()
+            && self.auth_config.pubkey_callback.is_none()
+        {
+            self = self.with_default_auth();
         }
 
         // Determine which auth methods to advertise
@@ -281,7 +288,7 @@ impl<B: Backend> Server<B> {
         if self.auth_config.pubkey_callback.is_some() {
             methods.push(russh::MethodKind::PublicKey);
         }
-        // Default to password if nothing configured
+        // Default to password if nothing configured (and no authorized_keys found)
         if methods.is_empty() {
             methods.push(russh::MethodKind::Password);
         }
