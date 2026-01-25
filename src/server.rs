@@ -232,6 +232,37 @@ impl<B: Backend> Server<B> {
         self.with_password_auth(move |user, pass| users.iter().any(|(u, p)| u == user && p == pass))
     }
 
+    /// Load authorized keys from ~/.ssh/authorized_keys
+    /// Returns self unchanged if file not found or not readable (doesn't fail)
+    pub fn with_default_auth(self) -> Self {
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = Path::new(&home).join(".ssh/authorized_keys");
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                let keys: Vec<PublicKey> = contents
+                    .lines()
+                    .filter_map(|line| {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            return None;
+                        }
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() < 2 {
+                            return None;
+                        }
+                        russh::keys::parse_public_key_base64(parts[1]).ok()
+                    })
+                    .collect();
+
+                if !keys.is_empty() {
+                    info!("Loaded {} key(s) from ~/.ssh/authorized_keys", keys.len());
+                    let keys = Arc::new(keys);
+                    return self.with_pubkey_auth(move |_user, key| keys.iter().any(|k| k == key));
+                }
+            }
+        }
+        self
+    }
+
     /// Run the server
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut keys = self.config.keys.clone();
