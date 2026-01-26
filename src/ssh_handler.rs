@@ -204,13 +204,15 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
         // Handle session operations synchronously
         let is_scp = command.starts_with("scp ");
         let result = if is_scp {
+            debug!(channel_id = ?channel_id, command = %command, "Accepting SCP command");
             session.channel_success(channel_id)
         } else {
+            warn!(channel_id = ?channel_id, command = %command, "Rejecting non-SCP exec request");
             session.channel_failure(channel_id)
         };
 
         async move {
-            debug!(channel_id = ?channel_id, command = %command, "Exec request");
+            debug!(channel_id = ?channel_id, command = %command, "Exec request processed");
             result?;
 
             if is_scp {
