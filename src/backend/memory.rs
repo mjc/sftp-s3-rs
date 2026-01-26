@@ -506,4 +506,42 @@ mod tests {
             })?
         }
     }
+
+    #[tokio::test]
+    async fn test_rsync_temp_file_pattern() {
+        // Simulate rsync's atomic write pattern:
+        // 1. Create temp file with dot prefix
+        // 2. Write data
+        // 3. Rename to final name
+        let backend = MemoryBackend::new();
+
+        // Create temp file like rsync does
+        let temp_path = ".file_123.bin.wU0ylU";
+        let final_path = "file_123.bin";
+        let content = Bytes::from(vec![0xABu8; 1024]);
+
+        // Open for write (should create the file)
+        let mut handle = backend.open_write(temp_path).await.unwrap();
+
+        // Write data
+        handle.write_at(0, &content).await.unwrap();
+
+        // Finish (commit)
+        handle.finish().await.unwrap();
+
+        // Verify temp file exists
+        let read = backend.read_file(temp_path).await.unwrap();
+        assert_eq!(read.len(), 1024);
+
+        // Rename to final
+        backend.rename(temp_path, final_path).await.unwrap();
+
+        // Verify final file exists
+        let final_read = backend.read_file(final_path).await.unwrap();
+        assert_eq!(final_read.len(), 1024);
+
+        // Verify temp file is gone
+        let temp_result = backend.read_file(temp_path).await;
+        assert!(matches!(temp_result, Err(BackendError::NotFound)));
+    }
 }
