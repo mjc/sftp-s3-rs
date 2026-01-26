@@ -202,7 +202,10 @@ impl Backend for LocalBackend {
         let size = metadata.len();
 
         Ok(Box::new(LocalReadHandle {
-            file: Arc::new(Mutex::new(file)),
+            inner: Mutex::new(LocalReadHandleInner {
+                file,
+                buf: bytes::BytesMut::with_capacity(64 * 1024), // Pre-allocate typical read size
+            }),
             size,
         }))
     }
@@ -221,28 +224,40 @@ impl Backend for LocalBackend {
     }
 }
 
-/// Read handle for local filesystem - uses seek + read for random access
+/// Read handle for local filesystem - uses seek + read for random access.
+/// Includes a reusable buffer to avoid repeated allocations and page faults.
 struct LocalReadHandle {
-    file: Arc<Mutex<File>>,
+    /// File and buffer are combined in the mutex to ensure synchronized access.
+    inner: Mutex<LocalReadHandleInner>,
     size: u64,
+}
+
+struct LocalReadHandleInner {
+    file: File,
+    /// Reusable read buffer - cleared between reads but capacity is retained.
+    buf: bytes::BytesMut,
 }
 
 #[async_trait]
 impl ReadHandle for LocalReadHandle {
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
-        let mut file = self.file.lock().await;
+        let mut inner = self.inner.lock().await;
+        let LocalReadHandleInner { file, buf } = &mut *inner;
+
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(LocalBackend::map_io_error)?;
 
-        let mut buf = vec![0u8; len as usize];
-        let n = file
-            .read(&mut buf)
+        buf.clear(); // Reset length to 0, keeps capacity
+        buf.reserve(len as usize); // Ensure capacity, reuses existing allocation
+
+        file.read_buf(buf)
             .await
             .map_err(LocalBackend::map_io_error)?;
-        buf.truncate(n);
 
-        Ok(Bytes::from(buf))
+        // split() transfers the buffer to a new BytesMut, then freeze() makes it Bytes.
+        // This avoids a copy but the buffer needs to be re-allocated next read.
+        Ok(buf.split().freeze())
     }
 
     fn size(&self) -> u64 {
