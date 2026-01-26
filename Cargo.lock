@@ -1459,7 +1459,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2038,7 +2038,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tokio",
  "tower-service",
  "tracing",
@@ -2639,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
+source = "git+https://github.com/EpicEric/russh.git?branch=cryptovec-performance#c68e647ef05708cd566c0ae30d3a050b3e602c1b"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3134,7 +3134,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.56.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
+source = "git+https://github.com/EpicEric/russh.git?branch=cryptovec-performance#c68e647ef05708cd566c0ae30d3a050b3e602c1b"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3193,7 +3193,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
+source = "git+https://github.com/EpicEric/russh.git?branch=cryptovec-performance#c68e647ef05708cd566c0ae30d3a050b3e602c1b"
 dependencies = [
  "libc",
  "log",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "russh-sftp"
 version = "2.1.1"
-source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#4c884462c61a7ce00bf1d0824916df84d22a10df"
+source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#80ad3f306dd3b3d9359ec3a366da34369a6ad97f"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3221,7 +3221,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=cryptovec-allocations#ae015ae3cc0522b48cd8a1ea502fe617f0017af8"
+source = "git+https://github.com/EpicEric/russh.git?branch=cryptovec-performance#c68e647ef05708cd566c0ae30d3a050b3e602c1b"
 dependencies = [
  "chrono",
  "tokio",
@@ -3248,7 +3248,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3530,7 +3530,6 @@ dependencies = [
  "parking_lot",
  "proptest",
  "russh",
- "russh-cryptovec",
  "russh-sftp",
  "tempfile",
  "thiserror 2.0.18",
@@ -3792,7 +3791,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4328,7 +4327,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4646,18 +4645,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.33"
+version = "0.8.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "668f5168d10b9ee831de31933dc111a459c97ec93225beb307aed970d1372dfd"
+checksum = "71ddd76bcebeed25db614f82bf31a9f4222d3fbba300e6fb6c00afa26cbd4d9d"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.33"
+version = "0.8.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c7962b26b0a8685668b671ee4b54d007a67d4eaf05fda79ac0ecf41e32270f1"
+checksum = "d8187381b52e32220d50b255276aa16a084ec0a9017a0ca2152a1f55c539758d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4746,6 +4745,6 @@ checksum = "40990edd51aae2c2b6907af74ffb635029d5788228222c4bb811e9351c0caad3"
 
 [[package]]
 name = "zmij"
-version = "1.0.16"
+version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfcd145825aace48cff44a8844de64bf75feec3080e0aa5cdbde72961ae51a65"
+checksum = "02aae0f83f69aafc94776e879363e9771d7ecbffe2c7fbb6c14c5e00dfe88439"

@@ -165,10 +165,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
 
     // Initialize logging
+    // Use RUST_LOG=sftp_s3=debug to see operation latencies
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("sftp_s3=info"));
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive("sftp_s3=info".parse().unwrap()),
-        )
+        .with_env_filter(env_filter)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .init();
 
     // Build server config

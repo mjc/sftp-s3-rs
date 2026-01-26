@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
 # Trap Ctrl-C and continue with flamegraph generation
 trap 'echo ""; echo "Stopping perf record, generating flamegraph..."' INT
 
@@ -20,8 +24,10 @@ RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profi
 # Record using frame pointers (not DWARF)
 # Disable set -e for perf since Ctrl-C causes non-zero exit
 set +e
+echo -ne "\033]0;sftp-s3 READY (profile CPU)\007"  # terminal title
+echo -ne "\033ksftp-s3 READY\033\\"                 # tmux window name
 perf record -g --call-graph fp -F 997 \
-  target/profiling/sftp-s3 --backend local --port 2223 --user mjc:pass --root . #--ciphers aes256-gcm
+  "$PROJECT_DIR/target/profiling/sftp-s3" --backend memory --port 2223 --root .
 set -e
 
 echo ""

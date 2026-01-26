@@ -23,6 +23,13 @@ pub struct ServerConfig {
     pub ciphers: Option<Vec<cipher::Name>>,
     /// Enable compression (disabled by default for better throughput)
     pub compression: bool,
+    /// Enable TCP_NODELAY (disable Nagle's algorithm) for lower latency
+    /// Enabled by default for better small file/packet performance
+    pub nodelay: bool,
+    /// SSH channel window size for flow control (default: 2MB)
+    pub window_size: u32,
+    /// Maximum SSH packet size (default: 32KB, max: 256KB)
+    pub maximum_packet_size: u32,
 }
 
 impl Default for ServerConfig {
@@ -33,6 +40,9 @@ impl Default for ServerConfig {
             auth_rejection_time: Duration::from_secs(3),
             ciphers: None,
             compression: false,
+            nodelay: true, // Enable by default for better small file performance
+            window_size: 2 * 1024 * 1024, // 2MB default
+            maximum_packet_size: 256 * 1024, // 256KB (max allowed) for fewer round trips
         }
     }
 }
@@ -315,6 +325,9 @@ impl<B: Backend> Server<B> {
             methods,
             keys,
             preferred,
+            nodelay: self.config.nodelay,
+            window_size: self.config.window_size,
+            maximum_packet_size: self.config.maximum_packet_size,
             ..Default::default()
         };
 

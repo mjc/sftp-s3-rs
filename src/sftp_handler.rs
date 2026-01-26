@@ -7,7 +7,7 @@ use russh_sftp::protocol::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 // Unix file type bits for SFTP
 const S_IFREG: u32 = 0o100000; // Regular file
@@ -94,9 +94,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(v)
     }
 
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn close(&mut self, id: u32, handle: Bytes) -> Result<Status, Self::Error> {
         let handle_str = String::from_utf8_lossy(&handle);
-        debug!(id, handle = %handle_str, "Closing handle");
 
         // If it's a write handle, finish it
         if let Some(write_handle_arc) = self.handles.take_write_handle(&handle_str) {
@@ -110,8 +110,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(ok_status(id))
     }
 
+    #[instrument(level = "debug", skip(self))]
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
-        debug!(id, path = %path, "Opening directory");
         let normalized = normalize_path(&path);
 
         // Verify it's a directory
@@ -129,9 +129,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Handle { id, handle })
     }
 
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn readdir(&mut self, id: u32, handle: Bytes) -> Result<Name, Self::Error> {
         let handle_str = String::from_utf8_lossy(&handle);
-        debug!(id, handle = %handle_str, "Reading directory");
 
         let (path, read_done) = self
             .handles
@@ -163,6 +163,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Name { id, files })
     }
 
+    #[instrument(level = "debug", skip(self, _attrs), fields(write = pflags.contains(OpenFlags::WRITE), create = pflags.contains(OpenFlags::CREATE)))]
     async fn open(
         &mut self,
         id: u32,
@@ -170,8 +171,6 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         pflags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
-        debug!(id, path = %path, ?pflags, write = pflags.contains(OpenFlags::WRITE),
-               create = pflags.contains(OpenFlags::CREATE), "Opening file");
         let normalized = normalize_path(&path);
 
         // Treat CREATE as implying write mode (some clients send CREATE without WRITE)
@@ -212,6 +211,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Handle { id, handle })
     }
 
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn read(
         &mut self,
         id: u32,
@@ -220,7 +220,6 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         len: u32,
     ) -> Result<Data, Self::Error> {
         let handle_str = String::from_utf8_lossy(&handle);
-        debug!(id, handle = %handle_str, offset, len, "Reading file");
 
         let (_path, read_handle, size) = self
             .handles
@@ -241,6 +240,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Data { id, data })
     }
 
+    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len()))]
     async fn write(
         &mut self,
         id: u32,
@@ -249,7 +249,6 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         data: Bytes,
     ) -> Result<Status, Self::Error> {
         let handle_str = String::from_utf8_lossy(&handle);
-        debug!(id, handle = %handle_str, offset, len = data.len(), "Writing file");
 
         let (_path, write_handle_arc) = self
             .handles
@@ -269,8 +268,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(ok_status(id))
     }
 
+    #[instrument(level = "debug", skip(self))]
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        debug!(id, path = %path, "Getting file stats");
         let info = self
             .backend
             .file_info(&normalize_path(&path))
@@ -333,13 +332,13 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
+    #[instrument(level = "debug", skip(self, _attrs))]
     async fn mkdir(
         &mut self,
         id: u32,
         path: String,
         _attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        debug!(id, path = %path, "Creating directory");
         self.backend
             .make_dir(&normalize_path(&path))
             .await
@@ -348,8 +347,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(ok_status(id))
     }
 
+    #[instrument(level = "debug", skip(self))]
     async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
-        debug!(id, path = %path, "Removing directory");
         self.backend
             .del_dir(&normalize_path(&path))
             .await
@@ -358,8 +357,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(ok_status(id))
     }
 
+    #[instrument(level = "debug", skip(self))]
     async fn remove(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
-        debug!(id, path = %path, "Removing file");
         self.backend
             .delete(&normalize_path(&path))
             .await
@@ -368,13 +367,13 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(ok_status(id))
     }
 
+    #[instrument(level = "debug", skip(self))]
     async fn rename(
         &mut self,
         id: u32,
         oldpath: String,
         newpath: String,
     ) -> Result<Status, Self::Error> {
-        debug!(id, from = %oldpath, to = %newpath, "Renaming");
         match self
             .backend
             .rename(&normalize_path(&oldpath), &normalize_path(&newpath))
