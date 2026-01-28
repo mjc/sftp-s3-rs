@@ -43,9 +43,10 @@ if [ -f "$HOST_KEY_FILE" ]; then
     ARGS+=("--host-key-file=$HOST_KEY_FILE")
 elif [ -n "$HOST_KEY" ]; then
     # If HOST_KEY env var is set, write it to temp file
+    # Use printf to preserve backslashes in key content
     TEMP_KEY=$(mktemp)
     TEMP_FILES+=("$TEMP_KEY")
-    echo "$HOST_KEY" > "$TEMP_KEY"
+    printf '%s\n' "$HOST_KEY" > "$TEMP_KEY"
     chmod 600 "$TEMP_KEY"
     ARGS+=("--host-key-file=$TEMP_KEY")
 else
@@ -68,9 +69,10 @@ fi
 if [ -f "$AUTHORIZED_KEYS_FILE" ]; then
     ARGS+=("--authorized-keys-file=$AUTHORIZED_KEYS_FILE")
 elif [ -n "$AUTHORIZED_KEYS" ]; then
+    # Use printf to preserve backslashes in key content
     TEMP_KEYS=$(mktemp)
     TEMP_FILES+=("$TEMP_KEYS")
-    echo "$AUTHORIZED_KEYS" > "$TEMP_KEYS"
+    printf '%s\n' "$AUTHORIZED_KEYS" > "$TEMP_KEYS"
     ARGS+=("--authorized-keys-file=$TEMP_KEYS")
 fi
 
@@ -106,7 +108,11 @@ esac
 echo "Configuration:"
 echo "  Backend: $BACKEND"
 echo "  Port: $PORT"
-echo "  Users: $(echo "$SFTP_USERS" | cut -d: -f1)"
+if [ -n "$SFTP_USERS" ]; then
+    echo "  Auth: password (user: $(printf '%s' "$SFTP_USERS" | cut -d: -f1))"
+else
+    echo "  Auth: public key only"
+fi
 echo ""
 
 # Export logging

@@ -201,9 +201,9 @@ aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
 | `RUST_LOG` | `sftp_s3=info` | All | Logging level |
 | `HOST_KEY_FILE` | `/keys/ssh_host_ed25519_key` | All | Path to SSH host key |
 | `AUTHORIZED_KEYS_FILE` | `/config/authorized_keys` | All | Path to authorized public keys |
-| `LOCAL_ROOT` | - | local | Root directory for local filesystem backend |
+| `LOCAL_ROOT` | `.` | local | Root directory for local filesystem backend |
 | `S3_BUCKET` | - | s3 | AWS S3 bucket name |
-| `S3_PREFIX` | `sftp/` | s3 | Prefix for objects in S3 |
+| `S3_PREFIX` | (empty) | s3 | Prefix for objects in S3 |
 | `S3_ENDPOINT` | - | s3 | Custom S3-compatible endpoint (LocalStack, MinIO) |
 | `AWS_REGION` | `us-east-1` | s3 | AWS region |
 | `AWS_ACCESS_KEY_ID` | - | s3 | AWS access key |
@@ -251,29 +251,33 @@ docker build -f Dockerfile.alpine -t sftp-s3:alpine .
 ./scripts/generate-host-key.sh
 ```
 
-#### Using Existing Key
+#### Using Existing Host Key
+
+If you have an existing SSH **host key** (not your personal key), you can use it:
 
 ```bash
-# Copy your key to ./keys/ssh_host_ed25519_key
-cp ~/.ssh/id_ed25519 ./keys/ssh_host_ed25519_key
+# Copy an existing HOST key (not your personal ~/.ssh/id_ed25519!)
+cp /path/to/existing/host_key ./keys/ssh_host_ed25519_key
 chmod 600 ./keys/ssh_host_ed25519_key
 ```
+
+**Warning:** Never use your personal SSH key as a host key. Always generate a dedicated host key using `./scripts/generate-host-key.sh`.
 
 ### Authentication
 
 #### Password Authentication
 
-All services require explicit SFTP user credentials. Update `docker-compose.yml` with your desired credentials before starting services:
+Configure SFTP user credentials in `docker-compose.yml` or `.env`:
 
 ```yaml
 environment:
-  SFTP_USERS: "username:strong-password"
+  SFTP_USERS: "myuser:strong-password"
 ```
 
 Then connect:
 
 ```bash
-sftp -P 2222 user@localhost
+sftp -P 2222 myuser@localhost
 ```
 
 #### Public Key Authentication
