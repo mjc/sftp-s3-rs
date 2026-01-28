@@ -10,49 +10,57 @@ NC='\033[0m' # No Color
 # Configuration defaults
 BACKEND="${BACKEND:-memory}"
 PORT="${PORT:-2222}"
-SFTP_USERS="${SFTP_USERS:-user:pass}"
+# Note: SFTP_USERS has no default - must be explicitly set for security
 RUST_LOG="${RUST_LOG:-sftp_s3=info}"
 
 # Host key handling
 HOST_KEY_FILE="${HOST_KEY_FILE:-/keys/ssh_host_ed25519_key}"
 AUTHORIZED_KEYS_FILE="${AUTHORIZED_KEYS_FILE:-/config/authorized_keys}"
 
-# Prepare arguments
-ARGS="--backend=$BACKEND --port=$PORT"
+# Prepare arguments as array to handle spaces properly
+ARGS=("--backend=$BACKEND" "--port=$PORT")
 
-# Add users
-if [ -n "$SFTP_USERS" ]; then
-    ARGS="$ARGS --users=$SFTP_USERS"
+# Add users (required for security - must be explicitly set)
+if [ -z "$SFTP_USERS" ]; then
+    echo -e "${RED}Error: SFTP_USERS must be explicitly set. Do not use default credentials in production.${NC}"
+    exit 1
 fi
+ARGS+=("--user=$SFTP_USERS")
 
 # Handle host key
 if [ -f "$HOST_KEY_FILE" ]; then
-    ARGS="$ARGS --host-key=$HOST_KEY_FILE"
+    ARGS+=("--host-key-file=$HOST_KEY_FILE")
 elif [ -n "$HOST_KEY" ]; then
     # If HOST_KEY env var is set, write it to temp file
     TEMP_KEY=$(mktemp)
-    trap "rm -f $TEMP_KEY" EXIT
+    trap "rm -f '$TEMP_KEY'" EXIT
     echo "$HOST_KEY" > "$TEMP_KEY"
     chmod 600 "$TEMP_KEY"
-    ARGS="$ARGS --host-key=$TEMP_KEY"
+    ARGS+=("--host-key-file=$TEMP_KEY")
 else
     # Generate temporary key if none provided
-    TEMP_KEY=$(mktemp)
-    trap "rm -f $TEMP_KEY" EXIT
-    ssh-keygen -t ed25519 -f "$TEMP_KEY" -N "" -q
-    ARGS="$ARGS --host-key=$TEMP_KEY"
-    echo -e "${YELLOW}Warning: Using generated temporary host key. SSH clients may warn about changed keys.${NC}"
-    echo -e "${YELLOW}To avoid this, mount a persistent key at /keys/ssh_host_ed25519_key${NC}"
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        TEMP_KEY=$(mktemp)
+        trap "rm -f '$TEMP_KEY'" EXIT
+        ssh-keygen -t ed25519 -f "$TEMP_KEY" -N "" -q
+        ARGS+=("--host-key-file=$TEMP_KEY")
+        echo -e "${YELLOW}Warning: Using generated temporary host key. SSH clients may warn about changed keys.${NC}"
+        echo -e "${YELLOW}To avoid this, mount a persistent key at /keys/ssh_host_ed25519_key${NC}"
+    else
+        echo -e "${RED}Error: ssh-keygen is not available in this container image, and no host key was provided.${NC}"
+        echo -e "${RED}Please either mount a host key at /keys/ssh_host_ed25519_key or set the HOST_KEY/HOST_KEY_FILE environment variable.${NC}"
+        exit 1
+    fi
 fi
 
 # Handle authorized keys
 if [ -f "$AUTHORIZED_KEYS_FILE" ]; then
-    ARGS="$ARGS --authorized-keys=$AUTHORIZED_KEYS_FILE"
+    ARGS+=("--authorized-keys-file=$AUTHORIZED_KEYS_FILE")
 elif [ -n "$AUTHORIZED_KEYS" ]; then
     TEMP_KEYS=$(mktemp)
-    trap "rm -f $TEMP_KEYS" EXIT
+    trap "rm -f '$TEMP_KEYS'" EXIT
     echo "$AUTHORIZED_KEYS" > "$TEMP_KEYS"
-    ARGS="$ARGS --authorized-keys=$TEMP_KEYS"
+    ARGS+=("--authorized-keys-file=$TEMP_KEYS")
 fi
 
 # Backend-specific configuration
@@ -65,7 +73,7 @@ case "$BACKEND" in
             echo -e "${RED}Error: LOCAL_ROOT must be set for local backend${NC}"
             exit 1
         fi
-        ARGS="$ARGS --local-root=$LOCAL_ROOT"
+        ARGS+=("--root=$LOCAL_ROOT")
         echo -e "${GREEN}Starting SFTP server with local backend (root: $LOCAL_ROOT)${NC}"
         ;;
     s3)
@@ -73,9 +81,9 @@ case "$BACKEND" in
             echo -e "${RED}Error: S3_BUCKET must be set for S3 backend${NC}"
             exit 1
         fi
-        ARGS="$ARGS --s3-bucket=$S3_BUCKET"
-        [ -n "$S3_PREFIX" ] && ARGS="$ARGS --s3-prefix=$S3_PREFIX"
-        [ -n "$S3_ENDPOINT" ] && ARGS="$ARGS --s3-endpoint=$S3_ENDPOINT"
+        ARGS+=("--bucket=$S3_BUCKET")
+        [ -n "$S3_PREFIX" ] && ARGS+=("--prefix=$S3_PREFIX")
+        [ -n "$S3_ENDPOINT" ] && ARGS+=("--endpoint=$S3_ENDPOINT")
         echo -e "${GREEN}Starting SFTP server with S3 backend (bucket: $S3_BUCKET)${NC}"
         ;;
     *)
@@ -93,5 +101,5 @@ echo ""
 # Export logging
 export RUST_LOG="$RUST_LOG"
 
-# Execute the SFTP server
-exec sftp-s3 $ARGS
+# Execute the SFTP server with proper argument expansion
+exec sftp-s3 "${ARGS[@]}"

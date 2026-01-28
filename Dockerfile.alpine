@@ -23,7 +23,8 @@ FROM alpine:latest
 # Install runtime dependencies
 RUN apk add --no-cache \
     ca-certificates \
-    bash
+    bash \
+    openssh-client
 
 # Create non-root user
 RUN addgroup -S sftp && adduser -S sftp -G sftp -u 1000

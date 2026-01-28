@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # In-memory backend for testing
   sftp-memory:
@@ -10,7 +8,7 @@ services:
     environment:
       BACKEND: memory
       PORT: "2222"
-      SFTP_USERS: "user:pass"
+      SFTP_USERS: "user:changeme"
       RUST_LOG: "sftp_s3=info"
     volumes:
       - ./keys:/keys:ro
@@ -32,7 +30,7 @@ services:
     environment:
       BACKEND: local
       PORT: "2223"
-      SFTP_USERS: "user:pass"
+      SFTP_USERS: "user:changeme"
       LOCAL_ROOT: "/data"
       RUST_LOG: "sftp_s3=info"
     volumes:
@@ -56,7 +54,7 @@ services:
     environment:
       BACKEND: s3
       PORT: "2224"
-      SFTP_USERS: "user:pass"
+      SFTP_USERS: "${SFTP_USERS}"
       S3_BUCKET: "${S3_BUCKET}"
       S3_PREFIX: "${S3_PREFIX:-sftp/}"
       AWS_REGION: "${AWS_REGION:-us-east-1}"
@@ -73,8 +71,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-    depends_on:
-      - sftp-memory  # Just to ensure network is ready
 
   # LocalStack for local S3 testing
   localstack:
@@ -87,13 +83,11 @@ services:
       SERVICES: "s3"
       DEBUG: "0"
       DATA_DIR: "/tmp/localstack/data"
-      DOCKER_HOST: "unix:///var/run/docker.sock"
       AWS_DEFAULT_REGION: "us-east-1"
       AWS_ACCESS_KEY_ID: "test"
       AWS_SECRET_ACCESS_KEY: "test"
     volumes:
       - localstack-data:/tmp/localstack
-      - "/var/run/docker.sock:/var/run/docker.sock"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "awslocal", "s3", "ls"]
@@ -111,7 +105,7 @@ services:
     environment:
       BACKEND: s3
       PORT: "2225"
-      SFTP_USERS: "user:pass"
+      SFTP_USERS: "user:localstacktest"
       S3_BUCKET: "test-bucket"
       S3_PREFIX: "sftp/"
       S3_ENDPOINT: "http://localstack:4566"

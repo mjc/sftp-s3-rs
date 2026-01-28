@@ -133,11 +133,14 @@ sftp -P 2222 user@localhost
 # Set up directories and host key
 ./scripts/docker-setup.sh
 
+# Update docker-compose.yml with your desired SFTP credentials
+# Edit sftp-memory service SFTP_USERS variable
+
 # Start the memory backend
 docker-compose up -d sftp-memory
 
 # Connect
-sftp -P 2222 user@localhost  # password: pass
+sftp -P 2222 user@localhost
 ```
 
 #### Local Filesystem Backend
@@ -146,7 +149,7 @@ sftp -P 2222 user@localhost  # password: pass
 docker-compose up -d sftp-local
 
 # Files are stored in ./data/ directory
-sftp -P 2223 user@localhost  # password: pass
+sftp -P 2223 user@localhost
 ```
 
 #### AWS S3 Backend
@@ -171,7 +174,8 @@ docker-compose up -d localstack sftp-s3-local
 ./scripts/localstack-init.sh
 
 # Connect via SFTP
-sftp -P 2225 user@localhost  # password: pass
+sftp -P 2225 user@localhost
+# Password: localstacktest
 
 # Verify files in LocalStack S3
 aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
@@ -219,17 +223,10 @@ docker build -t sftp-s3:latest .
 docker build -f Dockerfile.alpine -t sftp-s3:alpine .
 ```
 
-#### Distroless Build (Maximum Security)
-
-```bash
-docker build -f Dockerfile.distroless -t sftp-s3:distroless .
-```
-
 ### Image Sizes
 
 - **Standard (Debian)**: ~20MB
 - **Alpine**: ~8MB
-- **Distroless**: ~15MB (most secure)
 
 ### Host Key Management
 
@@ -256,11 +253,19 @@ chmod 600 ./keys/ssh_host_ed25519_key
 
 ### Authentication
 
-#### Password Authentication (Default)
+#### Password Authentication
+
+All services require explicit SFTP user credentials. Update `docker-compose.yml` with your desired credentials before starting services:
+
+```yaml
+environment:
+  SFTP_USERS: "username:strong-password"
+```
+
+Then connect:
 
 ```bash
 sftp -P 2222 user@localhost
-# Password: pass
 ```
 
 #### Public Key Authentication
@@ -329,6 +334,14 @@ services:
           memory: 256M
 ```
 
+### Security Considerations
+
+1. **SFTP_USERS**: Must be explicitly set in docker-compose.yml or environment. No default credentials.
+2. **Persistent Host Keys**: Use `./scripts/docker-setup.sh` to generate host keys. Ensures consistent server identity.
+3. **SSH Key Authentication**: Preferred over passwords. Add public keys to `./config/authorized_keys`.
+4. **Non-root Execution**: All containers run as UID 1000 for reduced attack surface.
+5. **Read-only Config**: Host keys and authorized_keys mounted as read-only to prevent tampering.
+
 ### Troubleshooting
 
 #### Connection Refused
@@ -342,6 +355,14 @@ docker-compose logs sftp-s3
 
 # Test TCP connection
 nc -zv localhost 2224
+```
+
+#### SFTP_USERS Not Set Error
+
+```bash
+# Error: SFTP_USERS must be explicitly set
+# Solution: Set SFTP_USERS in docker-compose.yml before starting
+docker-compose up -d
 ```
 
 #### Permission Denied
