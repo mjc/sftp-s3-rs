@@ -1,6 +1,6 @@
 # Multi-stage Docker build for SFTP-S3 server
-# Stage 1: Builder
-FROM rust:latest AS builder
+# Stage 1: Builder (use bookworm to match runtime glibc version)
+FROM rust:bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

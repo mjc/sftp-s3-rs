@@ -52,8 +52,8 @@ elif [ -n "$HOST_KEY" ]; then
 else
     # Generate temporary key if none provided
     if command -v ssh-keygen >/dev/null 2>&1; then
-        TEMP_KEY=$(mktemp)
-        TEMP_FILES+=("$TEMP_KEY")
+        TEMP_KEY=$(mktemp -u)  # -u creates name only, doesn't create file
+        TEMP_FILES+=("$TEMP_KEY" "${TEMP_KEY}.pub")
         ssh-keygen -t ed25519 -f "$TEMP_KEY" -N "" -q
         ARGS+=("--host-key-file=$TEMP_KEY")
         echo -e "${YELLOW}Warning: Using generated temporary host key. SSH clients may warn about changed keys.${NC}"
