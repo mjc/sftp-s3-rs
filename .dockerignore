@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+debug/
+*.rlib
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and profiling
+*.log
+flamegraph*.svg
+strace.log
+span-stats/
+
+# Test files
+tests/
+examples/
+
+# CI
+.github/
+
+# Misc
+*.tmp
+node_modules/
