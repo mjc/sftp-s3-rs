@@ -36,6 +36,10 @@ ENV_FILE="$PROJECT_ROOT/.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo "Creating example .env file..."
     cat > "$ENV_FILE" << 'EOF'
+# SFTP User credentials (REQUIRED for sftp-s3 service)
+# Format: username:password
+SFTP_USERS=user:your-secure-password-here
+
 # AWS S3 Configuration (for sftp-s3 service)
 S3_BUCKET=my-bucket
 S3_PREFIX=sftp/
@@ -78,21 +82,21 @@ echo "1. Start services:"
 echo "   docker-compose up -d"
 echo ""
 echo "2. Test memory backend:"
-echo "   sftp -P 2222 user@localhost  # password: pass"
+echo "   sftp -P 2222 user@localhost  # password: changeme"
 echo ""
 echo "3. Test local backend:"
-echo "   sftp -P 2223 user@localhost  # password: pass"
+echo "   sftp -P 2223 user@localhost  # password: changeme"
 echo "   # Files are stored in ./data/"
 echo ""
 echo "4. Test S3 with LocalStack:"
 echo "   docker-compose up -d localstack sftp-s3-local"
 echo "   bash $SCRIPT_DIR/localstack-init.sh"
-echo "   sftp -P 2225 user@localhost  # password: pass"
+echo "   sftp -P 2225 user@localhost  # password: localstacktest"
 echo ""
 echo "5. Use real AWS S3:"
-echo "   Edit .env with your AWS credentials"
+echo "   Edit .env with your AWS credentials and SFTP_USERS"
 echo "   docker-compose up -d sftp-s3"
-echo "   sftp -P 2224 user@localhost"
+echo "   sftp -P 2224 user@localhost  # uses password from .env"
 echo ""
 echo "6. View logs:"
 echo "   docker-compose logs -f [service-name]"

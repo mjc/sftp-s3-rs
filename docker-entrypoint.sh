@@ -17,15 +17,26 @@ RUST_LOG="${RUST_LOG:-sftp_s3=info}"
 HOST_KEY_FILE="${HOST_KEY_FILE:-/keys/ssh_host_ed25519_key}"
 AUTHORIZED_KEYS_FILE="${AUTHORIZED_KEYS_FILE:-/config/authorized_keys}"
 
+# Track temp files for cleanup
+TEMP_FILES=()
+cleanup() {
+    for f in "${TEMP_FILES[@]}"; do
+        rm -f "$f"
+    done
+}
+trap cleanup EXIT
+
 # Prepare arguments as array to handle spaces properly
 ARGS=("--backend=$BACKEND" "--port=$PORT")
 
-# Add users (required for security - must be explicitly set)
-if [ -z "$SFTP_USERS" ]; then
-    echo -e "${RED}Error: SFTP_USERS must be explicitly set. Do not use default credentials in production.${NC}"
+# Add users (required unless using authorized_keys for authentication)
+if [ -n "$SFTP_USERS" ]; then
+    ARGS+=("--user=$SFTP_USERS")
+elif [ ! -f "$AUTHORIZED_KEYS_FILE" ] && [ -z "$AUTHORIZED_KEYS" ]; then
+    echo -e "${RED}Error: Either SFTP_USERS or authorized_keys must be configured.${NC}"
+    echo -e "${RED}Set SFTP_USERS environment variable or mount an authorized_keys file.${NC}"
     exit 1
 fi
-ARGS+=("--user=$SFTP_USERS")
 
 # Handle host key
 if [ -f "$HOST_KEY_FILE" ]; then
@@ -33,7 +44,7 @@ if [ -f "$HOST_KEY_FILE" ]; then
 elif [ -n "$HOST_KEY" ]; then
     # If HOST_KEY env var is set, write it to temp file
     TEMP_KEY=$(mktemp)
-    trap "rm -f '$TEMP_KEY'" EXIT
+    TEMP_FILES+=("$TEMP_KEY")
     echo "$HOST_KEY" > "$TEMP_KEY"
     chmod 600 "$TEMP_KEY"
     ARGS+=("--host-key-file=$TEMP_KEY")
@@ -41,7 +52,7 @@ else
     # Generate temporary key if none provided
     if command -v ssh-keygen >/dev/null 2>&1; then
         TEMP_KEY=$(mktemp)
-        trap "rm -f '$TEMP_KEY'" EXIT
+        TEMP_FILES+=("$TEMP_KEY")
         ssh-keygen -t ed25519 -f "$TEMP_KEY" -N "" -q
         ARGS+=("--host-key-file=$TEMP_KEY")
         echo -e "${YELLOW}Warning: Using generated temporary host key. SSH clients may warn about changed keys.${NC}"
@@ -58,7 +69,7 @@ if [ -f "$AUTHORIZED_KEYS_FILE" ]; then
     ARGS+=("--authorized-keys-file=$AUTHORIZED_KEYS_FILE")
 elif [ -n "$AUTHORIZED_KEYS" ]; then
     TEMP_KEYS=$(mktemp)
-    trap "rm -f '$TEMP_KEYS'" EXIT
+    TEMP_FILES+=("$TEMP_KEYS")
     echo "$AUTHORIZED_KEYS" > "$TEMP_KEYS"
     ARGS+=("--authorized-keys-file=$TEMP_KEYS")
 fi

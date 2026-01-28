@@ -146,27 +146,36 @@ sftp -P 2222 user@localhost
 #### Local Filesystem Backend
 
 ```bash
+# Set up directories and host key (if not already done)
+./scripts/docker-setup.sh
+
 docker-compose up -d sftp-local
 
 # Files are stored in ./data/ directory
-sftp -P 2223 user@localhost
+sftp -P 2223 user@localhost  # password: changeme
 ```
 
 #### AWS S3 Backend
 
 ```bash
-# Edit .env with your AWS credentials
+# Set up directories and host key (if not already done)
+./scripts/docker-setup.sh
+
+# Edit .env with your AWS credentials and SFTP_USERS
 nano .env
 
 # Start the S3 backend
 docker-compose up -d sftp-s3
 
-sftp -P 2224 user@localhost  # password: pass
+sftp -P 2224 user@localhost  # uses password from .env SFTP_USERS
 ```
 
 #### LocalStack Testing (Local S3)
 
 ```bash
+# Set up directories and host key (if not already done)
+./scripts/docker-setup.sh
+
 # Start LocalStack and SFTP
 docker-compose up -d localstack sftp-s3-local
 
@@ -174,8 +183,7 @@ docker-compose up -d localstack sftp-s3-local
 ./scripts/localstack-init.sh
 
 # Connect via SFTP
-sftp -P 2225 user@localhost
-# Password: localstacktest
+sftp -P 2225 user@localhost  # password: localstacktest
 
 # Verify files in LocalStack S3
 aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
@@ -189,7 +197,7 @@ aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
 |----------|---------|---------|---------|
 | `BACKEND` | `memory` | All | Storage backend: `memory`, `local`, or `s3` |
 | `PORT` | `2222` | All | SFTP listening port |
-| `SFTP_USERS` | `user:pass` | All | Comma-separated user:password pairs |
+| `SFTP_USERS` | - | All | Comma-separated user:password pairs (required unless using authorized_keys) |
 | `RUST_LOG` | `sftp_s3=info` | All | Logging level |
 | `HOST_KEY_FILE` | `/keys/ssh_host_ed25519_key` | All | Path to SSH host key |
 | `AUTHORIZED_KEYS_FILE` | `/config/authorized_keys` | All | Path to authorized public keys |

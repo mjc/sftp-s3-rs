@@ -48,9 +48,9 @@ USER sftp
 # Expose SFTP port
 EXPOSE 2222
 
-# Health check
+# Health check: verify TCP connection on SFTP port (uses PORT env var, defaults to 2222)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD timeout 5 bash -c '</dev/tcp/127.0.0.1/2222' || exit 1
+    CMD timeout 5 bash -c "</dev/tcp/127.0.0.1/\${PORT:-2222}" || exit 1
 
 # Default entrypoint
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
