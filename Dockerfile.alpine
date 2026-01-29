@@ -1,0 +1,56 @@
+# Alpine-based Docker build for minimal image size
+# Stage 1: Builder
+FROM rust:alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig \
+    openssl-dev \
+    openssl-libs-static
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY benches ./benches
+
+# Build release binary with optimizations
+RUN cargo build --release
+
+# Stage 2: Runtime
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    bash \
+    openssh-client
+
+# Create non-root user
+RUN addgroup -S sftp && adduser -S sftp -G sftp -u 1000
+
+# Create application directories
+RUN mkdir -p /data /keys /config && \
+    chown sftp:sftp /data /keys /config
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/sftp-s3 /usr/local/bin/sftp-s3
+
+# Copy entrypoint script
+COPY --chown=sftp:sftp docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Set user to non-root
+USER sftp
+
+# Expose SFTP port
+EXPOSE 2222
+
+# Health check: verify TCP connection on SFTP port (uses PORT env var, defaults to 2222)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD timeout 5 bash -c "</dev/tcp/127.0.0.1/\${PORT:-2222}" || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

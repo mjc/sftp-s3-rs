@@ -1,0 +1,131 @@
+services:
+  # In-memory backend for testing
+  sftp-memory:
+    build: .
+    container_name: sftp-memory
+    ports:
+      - "2222:2222"
+    environment:
+      BACKEND: memory
+      PORT: "2222"
+      SFTP_USERS: "user:changeme"
+      RUST_LOG: "sftp_s3=info"
+    volumes:
+      - ./keys:/keys:ro
+      - ./config:/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "timeout", "5", "bash", "-c", "</dev/tcp/127.0.0.1/2222"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Local filesystem backend
+  sftp-local:
+    build: .
+    container_name: sftp-local
+    ports:
+      - "2223:2223"
+    environment:
+      BACKEND: local
+      PORT: "2223"
+      SFTP_USERS: "user:changeme"
+      LOCAL_ROOT: "/data"
+      RUST_LOG: "sftp_s3=info"
+    volumes:
+      - ./keys:/keys:ro
+      - ./config:/config:ro
+      - sftp-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "timeout", "5", "bash", "-c", "</dev/tcp/127.0.0.1/2223"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # AWS S3 backend (requires AWS credentials)
+  sftp-s3:
+    build: .
+    container_name: sftp-s3
+    ports:
+      - "2224:2224"
+    environment:
+      BACKEND: s3
+      PORT: "2224"
+      SFTP_USERS: "${SFTP_USERS}"
+      S3_BUCKET: "${S3_BUCKET}"
+      S3_PREFIX: "${S3_PREFIX:-sftp/}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+      RUST_LOG: "sftp_s3=info"
+    volumes:
+      - ./keys:/keys:ro
+      - ./config:/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "timeout", "5", "bash", "-c", "</dev/tcp/127.0.0.1/2224"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # LocalStack for local S3 testing
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: "s3"
+      DEBUG: "0"
+      DATA_DIR: "/tmp/localstack/data"
+      AWS_DEFAULT_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+    volumes:
+      - localstack-data:/tmp/localstack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "awslocal", "s3", "ls"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # SFTP connected to LocalStack S3
+  sftp-s3-local:
+    build: .
+    container_name: sftp-s3-local
+    ports:
+      - "2225:2225"
+    environment:
+      BACKEND: s3
+      PORT: "2225"
+      SFTP_USERS: "user:localstacktest"
+      S3_BUCKET: "test-bucket"
+      S3_PREFIX: "sftp/"
+      S3_ENDPOINT: "http://localstack:4566"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      RUST_LOG: "sftp_s3=info"
+    volumes:
+      - ./keys:/keys:ro
+      - ./config:/config:ro
+    restart: unless-stopped
+    depends_on:
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "timeout", "5", "bash", "-c", "</dev/tcp/127.0.0.1/2225"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  sftp-data:
+  localstack-data:
