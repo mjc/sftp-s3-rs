@@ -36,22 +36,26 @@ ENV_FILE="$PROJECT_ROOT/.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo "Creating example .env file..."
     cat > "$ENV_FILE" << 'EOF'
-# SFTP User credentials (REQUIRED for sftp-s3 service)
+# SFTP User credentials (REQUIRED for sftp-s3 service only)
 # Format: username:password
-SFTP_USERS=user:your-secure-password-here
+# IMPORTANT: Change this to a strong password before production use!
+SFTP_USERS=user:change-me-to-strong-password
 
-# AWS S3 Configuration (for sftp-s3 service)
+# AWS S3 Configuration (REQUIRED for sftp-s3 service only)
+# Replace with your actual bucket and credentials
 S3_BUCKET=my-bucket
 S3_PREFIX=sftp/
 AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
+AWS_ACCESS_KEY_ID=replace-with-your-access-key
+AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 
 # Optional: Use custom S3-compatible endpoint (LocalStack, MinIO, etc.)
+# Uncomment and set if using non-AWS S3:
 # S3_ENDPOINT=http://localstack:4566
 EOF
     echo -e "${GREEN}Created $ENV_FILE${NC}"
-    echo "  Edit this file with your AWS credentials before using sftp-s3 service"
+    echo "  WARNING: .env contains placeholder values that MUST be edited before production use"
+    echo "  Edit this file with your AWS credentials and secure passwords"
 else
     echo -e "${YELLOW}.env file already exists${NC}"
 fi

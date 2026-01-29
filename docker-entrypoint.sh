@@ -43,10 +43,10 @@ if [ -f "$HOST_KEY_FILE" ]; then
     ARGS+=("--host-key-file=$HOST_KEY_FILE")
 elif [ -n "$HOST_KEY" ]; then
     # If HOST_KEY env var is set, write it to temp file
-    # Use printf to preserve backslashes in key content
+    # Use printf without newline to preserve exact key content
     TEMP_KEY=$(mktemp)
     TEMP_FILES+=("$TEMP_KEY")
-    printf '%s\n' "$HOST_KEY" > "$TEMP_KEY"
+    printf '%s' "$HOST_KEY" > "$TEMP_KEY"
     chmod 600 "$TEMP_KEY"
     ARGS+=("--host-key-file=$TEMP_KEY")
 else
@@ -69,10 +69,10 @@ fi
 if [ -f "$AUTHORIZED_KEYS_FILE" ]; then
     ARGS+=("--authorized-keys-file=$AUTHORIZED_KEYS_FILE")
 elif [ -n "$AUTHORIZED_KEYS" ]; then
-    # Use printf to preserve backslashes in key content
+    # Use printf without newline to preserve exact key content
     TEMP_KEYS=$(mktemp)
     TEMP_FILES+=("$TEMP_KEYS")
-    printf '%s\n' "$AUTHORIZED_KEYS" > "$TEMP_KEYS"
+    printf '%s' "$AUTHORIZED_KEYS" > "$TEMP_KEYS"
     ARGS+=("--authorized-keys-file=$TEMP_KEYS")
 fi
 
@@ -82,12 +82,13 @@ case "$BACKEND" in
         echo -e "${GREEN}Starting SFTP server with memory backend${NC}"
         ;;
     local)
-        if [ -z "$LOCAL_ROOT" ]; then
-            echo -e "${RED}Error: LOCAL_ROOT must be set for local backend${NC}"
-            exit 1
+        # Use LOCAL_ROOT if set, otherwise use default "." from application
+        if [ -n "$LOCAL_ROOT" ]; then
+            ARGS+=("--root=$LOCAL_ROOT")
+            echo -e "${GREEN}Starting SFTP server with local backend (root: $LOCAL_ROOT)${NC}"
+        else
+            echo -e "${GREEN}Starting SFTP server with local backend (root: .)${NC}"
         fi
-        ARGS+=("--root=$LOCAL_ROOT")
-        echo -e "${GREEN}Starting SFTP server with local backend (root: $LOCAL_ROOT)${NC}"
         ;;
     s3)
         if [ -z "$S3_BUCKET" ]; then

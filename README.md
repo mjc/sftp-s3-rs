@@ -133,15 +133,17 @@ sftp -P 2222 user@localhost
 # Set up directories and host key
 ./scripts/docker-setup.sh
 
-# Update docker-compose.yml with your desired SFTP credentials
-# Edit sftp-memory service SFTP_USERS variable
-
-# Start the memory backend
+# Start the memory backend (uses default credentials from docker-compose.yml)
 docker-compose up -d sftp-memory
 
-# Connect
+# Connect with default credentials
 sftp -P 2222 user@localhost
+# password: changeme
 ```
+
+To use custom credentials, either:
+1. Edit `docker-compose.yml` and set the SFTP_USERS variable for sftp-memory
+2. Or use environment variables: `SFTP_USERS=myuser:mypass docker-compose up -d sftp-memory`
 
 #### Local Filesystem Backend
 
@@ -201,7 +203,7 @@ aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
 | `RUST_LOG` | `sftp_s3=info` | All | Logging level |
 | `HOST_KEY_FILE` | `/keys/ssh_host_ed25519_key` | All | Path to SSH host key |
 | `AUTHORIZED_KEYS_FILE` | `/config/authorized_keys` | All | Path to authorized public keys |
-| `LOCAL_ROOT` | `.` | local | Root directory for local filesystem backend |
+| `LOCAL_ROOT` | `.` (optional) | local | Root directory for local filesystem backend |
 | `S3_BUCKET` | - | s3 | AWS S3 bucket name |
 | `S3_PREFIX` | (empty) | s3 | Prefix for objects in S3 |
 | `S3_ENDPOINT` | - | s3 | Custom S3-compatible endpoint (LocalStack, MinIO) |
