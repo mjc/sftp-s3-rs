@@ -153,7 +153,7 @@ To use custom credentials, either:
 
 docker-compose up -d sftp-local
 
-# Files are stored in ./data/ directory
+# Files are stored in the 'sftp-data' Docker volume
 sftp -P 2223 user@localhost  # password: changeme
 ```
 
@@ -350,9 +350,9 @@ services:
 
 ### Security Considerations
 
-1. **SFTP_USERS**: Must be explicitly set in docker-compose.yml or environment. No default credentials.
-2. **Persistent Host Keys**: Use `./scripts/docker-setup.sh` to generate host keys. Ensures consistent server identity.
-3. **SSH Key Authentication**: Preferred over passwords. Add public keys to `./config/authorized_keys`.
+1. **Credentials**: The example docker-compose.yml includes test credentials (`user:changeme`) for development. **Change these before production use** or use public key authentication.
+2. **Public Key Auth**: When using `authorized_keys`, SFTP_USERS can be omitted entirely for password-less authentication.
+3. **Persistent Host Keys**: Use `./scripts/docker-setup.sh` to generate host keys. Ensures consistent server identity.
 4. **Non-root Execution**: All containers run as UID 1000 for reduced attack surface.
 5. **Read-only Config**: Host keys and authorized_keys mounted as read-only to prevent tampering.
 

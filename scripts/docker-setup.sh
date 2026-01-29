@@ -54,8 +54,8 @@ AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 # S3_ENDPOINT=http://localstack:4566
 EOF
     echo -e "${GREEN}Created $ENV_FILE${NC}"
-    echo "  WARNING: .env contains placeholder values that MUST be edited before production use"
-    echo "  Edit this file with your AWS credentials and secure passwords"
+    echo "  Note: .env is only needed for the sftp-s3 (AWS S3) service"
+    echo "  Edit with your AWS credentials before using 'docker-compose up sftp-s3'"
 else
     echo -e "${YELLOW}.env file already exists${NC}"
 fi
@@ -90,7 +90,7 @@ echo "   sftp -P 2222 user@localhost  # password: changeme"
 echo ""
 echo "3. Test local backend:"
 echo "   sftp -P 2223 user@localhost  # password: changeme"
-echo "   # Files are stored in ./data/"
+echo "   # Files are stored in the 'sftp-data' Docker volume"
 echo ""
 echo "4. Test S3 with LocalStack:"
 echo "   docker-compose up -d localstack sftp-s3-local"
