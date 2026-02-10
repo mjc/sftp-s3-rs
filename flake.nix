@@ -69,16 +69,22 @@
           sshpass
           bc
           openssh  # sftp client
+
+          # Build optimization
+          sccache
         ]
         ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
           perf
           cargo-llvm-cov
           valgrind  # Required for IAI benchmarks
+          mold
         ];
 
       buildInputs = with pkgs; [
         openssl
       ];
+
+      cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform);
     in {
       devShells.default = pkgs.mkShell {
         inherit nativeBuildInputs buildInputs;
@@ -86,6 +92,9 @@
         shellHook = ''
           export RUST_SRC_PATH="${rustToolchain}/lib/rustlib/src/rust/library"
           export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
+          export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+          export "CARGO_TARGET_''${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.mold}/bin/mold -run "}${pkgs.stdenv.cc}/bin/cc"
+          export "CARGO_TARGET_''${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native"
 
           echo "sftp-s3-rs development environment"
           echo "  Rust: $(rustc --version)"
