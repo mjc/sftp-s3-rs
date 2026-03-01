@@ -62,6 +62,8 @@ impl From<BackendError> for StatusCode {
 }
 
 fn ok_status(id: u32) -> Status {
+    // TODO(perf): Status.error_message/language_tag are String; change to Cow<'static, str>
+    // in russh-sftp fork to eliminate 2 small allocations per successful operation.
     Status {
         id,
         status_code: StatusCode::Ok,
@@ -96,17 +98,15 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn close(&mut self, id: u32, handle: Bytes) -> Result<Status, Self::Error> {
-        let handle_str = String::from_utf8_lossy(&handle);
-
         // If it's a write handle, finish it
-        if let Some(write_handle_arc) = self.handles.take_write_handle(&handle_str) {
+        if let Some(write_handle_arc) = self.handles.take_write_handle(&handle) {
             let mut guard = write_handle_arc.lock().await;
             if let Some(write_handle) = guard.take() {
                 write_handle.finish().await.map_err(StatusCode::from)?;
             }
         }
 
-        self.handles.remove(&handle_str);
+        self.handles.remove(&handle);
         Ok(ok_status(id))
     }
 
@@ -131,11 +131,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn readdir(&mut self, id: u32, handle: Bytes) -> Result<Name, Self::Error> {
-        let handle_str = String::from_utf8_lossy(&handle);
-
         let (path, read_done) = self
             .handles
-            .get_dir_handle(&handle_str)
+            .get_dir_handle(&handle)
             .ok_or(StatusCode::Failure)?;
 
         if read_done {
@@ -149,7 +147,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             .map_err(StatusCode::from)?;
 
         // Mark as read
-        self.handles.mark_dir_read(&handle_str);
+        self.handles.mark_dir_read(&handle);
 
         let files: Vec<File> = entries
             .into_iter()
@@ -219,11 +217,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
-        let handle_str = String::from_utf8_lossy(&handle);
-
         let (_path, read_handle, size) = self
             .handles
-            .get_read_handle(&handle_str)
+            .get_read_handle(&handle)
             .ok_or(StatusCode::Failure)?;
 
         if offset >= size {
@@ -248,11 +244,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         offset: u64,
         data: Bytes,
     ) -> Result<Status, Self::Error> {
-        let handle_str = String::from_utf8_lossy(&handle);
-
         let (_path, write_handle_arc) = self
             .handles
-            .get_write_handle(&handle_str)
+            .get_write_handle(&handle)
             .ok_or(StatusCode::Failure)?;
 
         let mut guard = write_handle_arc.lock().await;
@@ -288,10 +282,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
     }
 
     async fn fstat(&mut self, id: u32, handle: Bytes) -> Result<Attrs, Self::Error> {
-        let handle_str = String::from_utf8_lossy(&handle);
         let info = self
             .handles
-            .get_handle_info(&handle_str)
+            .get_handle_info(&handle)
             .ok_or(StatusCode::Failure)?;
 
         let attrs = match info {
@@ -485,7 +478,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
     }
 }
 
-/// Helper to read a length-prefixed string from bytes
+/// Helper to read a length-prefixed string from bytes.
+/// Tries valid UTF-8 first (owned), falls back to lossy conversion.
 fn read_string(bytes: &mut Bytes) -> Option<String> {
     if bytes.len() < 4 {
         return None;
@@ -495,7 +489,402 @@ fn read_string(bytes: &mut Bytes) -> Option<String> {
     if bytes.len() < len {
         return None;
     }
-    let s = String::from_utf8_lossy(&bytes[..len]).to_string();
-    bytes.advance(len);
+    let raw = bytes.split_to(len);
+    let s = match String::from_utf8(raw.to_vec()) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
     Some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::MemoryBackend;
+    use russh_sftp::protocol::{FileAttributes, OpenFlags};
+    use russh_sftp::server::Handler as SftpHandlerTrait;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_handler() -> SftpHandler<MemoryBackend> {
+        SftpHandler::new(Arc::new(MemoryBackend::new()))
+    }
+
+    // Helper: init the SFTP session
+    async fn init_handler(handler: &mut SftpHandler<MemoryBackend>) {
+        handler.init(3, HashMap::new()).await.expect("init failed");
+    }
+
+    #[tokio::test]
+    async fn test_init_returns_version_with_extensions() {
+        let mut handler = make_handler();
+        let version = handler.init(3, HashMap::new()).await.unwrap();
+        assert!(version.extensions.contains_key("posix-rename@openssh.com"));
+        assert!(version.extensions.contains_key("fsync@openssh.com"));
+        assert!(version.extensions.contains_key("statvfs@openssh.com"));
+    }
+
+    #[tokio::test]
+    async fn test_open_write_close_open_read_roundtrip() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        // Write file
+        let write_handle = handler
+            .open(
+                1,
+                "/test.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+
+        let handle_bytes = Bytes::from(write_handle.handle.clone().into_bytes());
+        handler
+            .write(
+                1,
+                handle_bytes.clone(),
+                0,
+                Bytes::from_static(b"hello world"),
+            )
+            .await
+            .unwrap();
+        handler.close(1, handle_bytes).await.unwrap();
+
+        // Read file back
+        let read_handle = handler
+            .open(
+                2,
+                "/test.txt".to_string(),
+                OpenFlags::READ,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+
+        let handle_bytes = Bytes::from(read_handle.handle.into_bytes());
+        let data = handler.read(2, handle_bytes.clone(), 0, 64).await.unwrap();
+        assert_eq!(data.data, Bytes::from_static(b"hello world"));
+
+        handler.close(2, handle_bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stat_nonexistent_returns_error() {
+        let mut handler = make_handler();
+        let result = handler.stat(1, "/nonexistent.txt".to_string()).await;
+        assert!(matches!(result, Err(StatusCode::NoSuchFile)));
+    }
+
+    #[tokio::test]
+    async fn test_mkdir_opendir_readdir_sees_entry() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        // Create a dir and a file in it
+        handler
+            .mkdir(1, "/mydir".to_string(), FileAttributes::default())
+            .await
+            .unwrap();
+
+        // Write a file into the dir
+        let wh = handler
+            .open(
+                2,
+                "/mydir/file.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        handler
+            .write(2, wh_bytes.clone(), 0, Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        handler.close(2, wh_bytes).await.unwrap();
+
+        // Open dir and read entries
+        let dir_handle = handler.opendir(3, "/mydir".to_string()).await.unwrap();
+        let dir_bytes = Bytes::from(dir_handle.handle.into_bytes());
+
+        let entries = handler.readdir(3, dir_bytes.clone()).await.unwrap();
+        let names: Vec<&str> = entries.files.iter().map(|f| f.filename.as_str()).collect();
+        assert!(names.contains(&"."));
+        assert!(names.contains(&".."));
+        assert!(names.contains(&"file.txt"));
+
+        // Second readdir should return EOF
+        let eof = handler.readdir(3, dir_bytes).await;
+        assert!(matches!(eof, Err(StatusCode::Eof)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_then_stat_fails() {
+        let mut handler = make_handler();
+
+        // Write a file then remove it
+        let wh = handler
+            .open(
+                1,
+                "/todel.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        handler
+            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        handler.remove(2, "/todel.txt".to_string()).await.unwrap();
+
+        let result = handler.stat(3, "/todel.txt".to_string()).await;
+        assert!(matches!(result, Err(StatusCode::NoSuchFile)));
+    }
+
+    #[tokio::test]
+    async fn test_rename_preserves_content() {
+        let mut handler = make_handler();
+
+        let wh = handler
+            .open(
+                1,
+                "/src.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        handler
+            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"content"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        handler
+            .rename(2, "/src.txt".to_string(), "/dst.txt".to_string())
+            .await
+            .unwrap();
+
+        // dst exists with content
+        let rh = handler
+            .open(
+                3,
+                "/dst.txt".to_string(),
+                OpenFlags::READ,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let rh_bytes = Bytes::from(rh.handle.into_bytes());
+        let data = handler.read(3, rh_bytes.clone(), 0, 64).await.unwrap();
+        assert_eq!(data.data, Bytes::from_static(b"content"));
+        handler.close(3, rh_bytes).await.unwrap();
+
+        // src is gone
+        let result = handler.stat(4, "/src.txt".to_string()).await;
+        assert!(matches!(result, Err(StatusCode::NoSuchFile)));
+    }
+
+    #[tokio::test]
+    async fn test_realpath_normalizes() {
+        let mut handler = make_handler();
+
+        let result = handler.realpath(1, "/".to_string()).await.unwrap();
+        assert_eq!(result.files[0].filename, "/");
+
+        let result = handler.realpath(2, "foo/bar".to_string()).await.unwrap();
+        assert_eq!(result.files[0].filename, "/foo/bar");
+
+        let result = handler.realpath(3, String::new()).await.unwrap();
+        assert_eq!(result.files[0].filename, "/");
+    }
+
+    #[tokio::test]
+    async fn test_extended_posix_rename() {
+        let mut handler = make_handler();
+
+        // Write a file first
+        let wh = handler
+            .open(
+                1,
+                "/old.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        handler
+            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        // Build posix-rename payload: [4-byte len][old][4-byte len][new]
+        let mut payload = Vec::new();
+        let old = b"/old.txt";
+        let new = b"/new.txt";
+        payload.extend_from_slice(&(old.len() as u32).to_be_bytes());
+        payload.extend_from_slice(old);
+        payload.extend_from_slice(&(new.len() as u32).to_be_bytes());
+        payload.extend_from_slice(new);
+
+        let result = handler
+            .extended(2, "posix-rename@openssh.com".to_string(), payload)
+            .await
+            .unwrap();
+        assert!(matches!(result, russh_sftp::protocol::Packet::Status(_)));
+
+        // old is gone, new exists
+        assert!(matches!(
+            handler.stat(3, "/old.txt".to_string()).await,
+            Err(StatusCode::NoSuchFile)
+        ));
+        assert!(handler.stat(4, "/new.txt".to_string()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_extended_fsync() {
+        let mut handler = make_handler();
+
+        // fsync just needs a handle string payload
+        let handle = b"1";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(handle.len() as u32).to_be_bytes());
+        payload.extend_from_slice(handle);
+
+        let result = handler
+            .extended(1, "fsync@openssh.com".to_string(), payload)
+            .await
+            .unwrap();
+        assert!(matches!(result, russh_sftp::protocol::Packet::Status(_)));
+    }
+
+    #[tokio::test]
+    async fn test_extended_statvfs() {
+        let mut handler = make_handler();
+
+        let path = b"/";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        payload.extend_from_slice(path);
+
+        let result = handler
+            .extended(1, "statvfs@openssh.com".to_string(), payload)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            russh_sftp::protocol::Packet::ExtendedReply(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_extended_unsupported() {
+        let mut handler = make_handler();
+        let result = handler
+            .extended(1, "unknown@example.com".to_string(), vec![])
+            .await;
+        assert!(matches!(result, Err(StatusCode::OpUnsupported)));
+    }
+
+    #[tokio::test]
+    async fn test_fstat_read_handle_returns_size() {
+        let mut handler = make_handler();
+
+        // Write a known file
+        let wh = handler
+            .open(
+                1,
+                "/sized.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        handler
+            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"12345"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        // Open for read and fstat
+        let rh = handler
+            .open(
+                2,
+                "/sized.txt".to_string(),
+                OpenFlags::READ,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let rh_bytes = Bytes::from(rh.handle.clone().into_bytes());
+
+        let attrs = handler.fstat(2, rh_bytes.clone()).await.unwrap();
+        assert_eq!(attrs.attrs.size, Some(5));
+
+        handler.close(2, rh_bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_readdir_second_call_returns_eof() {
+        let mut handler = make_handler();
+
+        let dir_handle = handler.opendir(1, "/".to_string()).await.unwrap();
+        let dir_bytes = Bytes::from(dir_handle.handle.into_bytes());
+
+        // First call succeeds (may return empty list with just . and ..)
+        let _ = handler.readdir(1, dir_bytes.clone()).await.unwrap();
+
+        // Second call returns EOF
+        let result = handler.readdir(1, dir_bytes).await;
+        assert!(matches!(result, Err(StatusCode::Eof)));
+    }
+
+    #[tokio::test]
+    async fn test_read_past_eof_returns_eof() {
+        let mut handler = make_handler();
+
+        // Write 5 bytes
+        let wh = handler
+            .open(
+                1,
+                "/small.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        handler
+            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        // Open and read past end
+        let rh = handler
+            .open(
+                2,
+                "/small.txt".to_string(),
+                OpenFlags::READ,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let rh_bytes = Bytes::from(rh.handle.into_bytes());
+
+        let result = handler.read(2, rh_bytes.clone(), 100, 64).await;
+        assert!(matches!(result, Err(StatusCode::Eof)));
+
+        handler.close(2, rh_bytes).await.unwrap();
+    }
 }

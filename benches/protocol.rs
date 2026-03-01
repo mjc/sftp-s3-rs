@@ -19,7 +19,7 @@ fn bench_write_serialize(c: &mut Criterion) {
             b.iter(|| {
                 let packet = Packet::Write(Write {
                     id: 1,
-                    handle: "h".to_string(),
+                    handle: Bytes::from_static(b"h"),
                     offset: 0,
                     data: data.clone(),
                 });
@@ -41,7 +41,7 @@ fn bench_write_deserialize(c: &mut Criterion) {
 
         let packet = Packet::Write(Write {
             id: 1,
-            handle: "h".to_string(),
+            handle: Bytes::from_static(b"h"),
             offset: 0,
             data: data.clone(),
         });

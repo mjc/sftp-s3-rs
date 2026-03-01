@@ -67,7 +67,8 @@ impl Backend for MemoryBackend {
         };
 
         let files = self.files.read();
-        let mut seen = HashSet::new();
+        // Use &str in seen to avoid double-allocation (one alloc per unique name instead of two)
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut entries = vec![
             DirEntry {
                 name: ".".to_string(),
@@ -95,7 +96,7 @@ impl Backend for MemoryBackend {
                 continue;
             }
 
-            if seen.insert(name.to_string()) {
+            if seen.insert(name) {
                 let is_dir = relative.contains('/');
                 let attrs = if is_dir {
                     FileInfo::directory_with_mtime(data.mtime)

@@ -41,7 +41,7 @@ impl LocalBackend {
             std::io::ErrorKind::AlreadyExists => BackendError::AlreadyExists,
             std::io::ErrorKind::DirectoryNotEmpty => BackendError::DirectoryNotEmpty,
             std::io::ErrorKind::IsADirectory => BackendError::IsADirectory,
-            _ => BackendError::Io(err.to_string()),
+            _ => BackendError::Io(err),
         }
     }
 

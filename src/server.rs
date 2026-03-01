@@ -387,3 +387,113 @@ pub const AVAILABLE_CIPHERS: &[&str] = &[
     "aes256-cbc",
     "chacha20-poly1305",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- ServerConfig defaults and builder ---
+
+    #[test]
+    fn test_server_config_defaults() {
+        let config = ServerConfig::default();
+        assert_eq!(config.port, 2222);
+        assert!(config.keys.is_empty());
+        assert_eq!(config.auth_rejection_time, Duration::from_secs(3));
+        assert!(config.ciphers.is_none());
+        assert!(!config.compression);
+        assert!(config.nodelay);
+        assert_eq!(config.window_size, 2 * 1024 * 1024);
+        assert_eq!(config.maximum_packet_size, 256 * 1024);
+    }
+
+    #[test]
+    fn test_server_config_builder_chaining() {
+        let config = ServerConfig::new()
+            .port(2345)
+            .with_compression()
+            .with_generated_key();
+        assert_eq!(config.port, 2345);
+        assert!(config.compression);
+        assert_eq!(config.keys.len(), 1);
+    }
+
+    #[test]
+    fn test_server_config_port_override() {
+        let config = ServerConfig::new().port(9999);
+        assert_eq!(config.port, 9999);
+    }
+
+    #[test]
+    fn test_server_config_with_ciphers() {
+        let ciphers = vec![cipher::CHACHA20_POLY1305, cipher::AES_256_GCM];
+        let config = ServerConfig::new().with_ciphers(ciphers.clone());
+        assert!(config.ciphers.is_some());
+        assert_eq!(config.ciphers.as_ref().unwrap().len(), 2);
+    }
+
+    // --- parse_cipher ---
+
+    #[test]
+    fn test_parse_cipher_known() {
+        assert!(parse_cipher("aes256-gcm").is_some());
+        assert!(parse_cipher("aes256-gcm@openssh.com").is_some());
+        assert!(parse_cipher("aes128-ctr").is_some());
+        assert!(parse_cipher("aes192-ctr").is_some());
+        assert!(parse_cipher("aes256-ctr").is_some());
+        assert!(parse_cipher("aes128-cbc").is_some());
+        assert!(parse_cipher("aes192-cbc").is_some());
+        assert!(parse_cipher("aes256-cbc").is_some());
+        assert!(parse_cipher("chacha20-poly1305").is_some());
+        assert!(parse_cipher("chacha20-poly1305@openssh.com").is_some());
+    }
+
+    #[test]
+    fn test_parse_cipher_unknown() {
+        assert!(parse_cipher("unknown-cipher").is_none());
+        assert!(parse_cipher("").is_none());
+        assert!(parse_cipher("aes512-gcm").is_none());
+    }
+
+    #[test]
+    fn test_parse_cipher_trims_whitespace() {
+        assert!(parse_cipher("  aes256-gcm  ").is_some());
+    }
+
+    // --- Server builder ---
+
+    #[test]
+    fn test_server_with_users() {
+        use crate::backend::MemoryBackend;
+
+        let server = Server::new(MemoryBackend::new())
+            .with_users(vec![("alice".to_string(), "pass".to_string())]);
+
+        // Auth config should have a password callback
+        assert!(server.auth_config.password_callback.is_some());
+        assert!(server.auth_config.pubkey_callback.is_none());
+
+        // Verify callback works
+        let cb = server.auth_config.password_callback.as_ref().unwrap();
+        assert!(cb("alice", "pass"));
+        assert!(!cb("alice", "wrong"));
+        assert!(!cb("bob", "pass"));
+    }
+
+    #[test]
+    fn test_server_with_authorized_keys() {
+        use crate::backend::MemoryBackend;
+        use russh::keys::ssh_key::rand_core::OsRng;
+
+        let key =
+            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
+        let pubkey = key.public_key().clone();
+
+        let server = Server::new(MemoryBackend::new())
+            .with_authorized_keys(vec![("user".to_string(), vec![pubkey.clone()])]);
+
+        assert!(server.auth_config.pubkey_callback.is_some());
+        let cb = server.auth_config.pubkey_callback.as_ref().unwrap();
+        assert!(cb("user", &pubkey));
+    }
+}

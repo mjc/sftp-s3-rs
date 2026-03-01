@@ -94,7 +94,7 @@ impl S3Backend {
         } else if msg.contains("AccessDenied") || msg.contains("403") {
             BackendError::PermissionDenied
         } else {
-            BackendError::Io(msg)
+            BackendError::Other(msg)
         }
     }
 
@@ -324,7 +324,7 @@ impl Backend for S3Backend {
             .body
             .collect()
             .await
-            .map_err(|e| BackendError::Io(e.to_string()))?
+            .map_err(|e| BackendError::Other(e.to_string()))?
             .into_bytes();
 
         Ok(bytes) // No .to_vec() needed - already Bytes!
@@ -431,7 +431,7 @@ impl ReadHandle for S3ReadHandle {
             .body
             .collect()
             .await
-            .map_err(|e| BackendError::Io(e.to_string()))?
+            .map_err(|e| BackendError::Other(e.to_string()))?
             .into_bytes();
 
         Ok(bytes)

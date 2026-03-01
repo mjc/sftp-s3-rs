@@ -241,18 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let expanded_root = expand_tilde(&cli.root);
             let root = expanded_root.canonicalize()?;
             eprintln!("Backend: local filesystem at {}", root.display());
-
-            let mut server = Server::new(LocalBackend::new(&root)).config(config);
-
-            if !users.is_empty() {
-                server = server.with_users(users);
-            }
-            if !authorized_keys.is_empty() {
-                server = server
-                    .with_pubkey_auth(move |_user, key| authorized_keys.iter().any(|k| k == key));
-            }
-
-            server.run().await
+            run_server(LocalBackend::new(&root), config, users, authorized_keys).await
         }
         #[cfg(feature = "s3")]
         Backend::S3 => {
@@ -267,32 +256,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 sftp_s3::S3Backend::from_env(s3_config).await
             };
 
-            let mut server = Server::new(backend).config(config);
-
-            if !users.is_empty() {
-                server = server.with_users(users);
-            }
-            if !authorized_keys.is_empty() {
-                server = server
-                    .with_pubkey_auth(move |_user, key| authorized_keys.iter().any(|k| k == key));
-            }
-
-            server.run().await
+            run_server(backend, config, users, authorized_keys).await
         }
         Backend::Memory => {
             eprintln!("Backend: in-memory (data will be lost on exit)");
-
-            let mut server = Server::new(MemoryBackend::new()).config(config);
-
-            if !users.is_empty() {
-                server = server.with_users(users);
-            }
-            if !authorized_keys.is_empty() {
-                server = server
-                    .with_pubkey_auth(move |_user, key| authorized_keys.iter().any(|k| k == key));
-            }
-
-            server.run().await
+            run_server(MemoryBackend::new(), config, users, authorized_keys).await
         }
     }
+}
+
+/// Start the server with the given backend, applying credential configuration.
+async fn run_server<B: sftp_s3::Backend>(
+    backend: B,
+    config: ServerConfig,
+    users: Vec<(String, String)>,
+    authorized_keys: Vec<russh::keys::PublicKey>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut server = Server::new(backend).config(config);
+
+    if !users.is_empty() {
+        server = server.with_users(users);
+    }
+    if !authorized_keys.is_empty() {
+        server =
+            server.with_pubkey_auth(move |_user, key| authorized_keys.iter().any(|k| k == key));
+    }
+
+    server.run().await
 }

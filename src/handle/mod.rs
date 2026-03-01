@@ -14,16 +14,16 @@ pub type SharedWriteHandle = Arc<Mutex<Option<Box<dyn WriteHandle + Send>>>>;
 /// Types of file handles
 pub enum HandleType {
     /// Directory handle for listing
-    Dir { path: String, read_done: bool },
+    Dir { path: Arc<str>, read_done: bool },
     /// Read handle (streaming)
     Read {
-        path: String,
+        path: Arc<str>,
         handle: SharedReadHandle,
         size: u64,
     },
     /// Write handle (streaming)
     Write {
-        path: String,
+        path: Arc<str>,
         handle: SharedWriteHandle,
     },
 }
@@ -46,12 +46,17 @@ impl HandleManager {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Parse a handle from raw bytes (ASCII decimal string from SFTP Handle response)
+    fn parse_handle(handle: &[u8]) -> Option<u64> {
+        std::str::from_utf8(handle).ok()?.parse().ok()
+    }
+
     pub fn create_dir_handle(&self, path: String) -> String {
         let id = self.generate_handle();
         self.handles.write().insert(
             id,
             HandleType::Dir {
-                path,
+                path: Arc::from(path.as_str()),
                 read_done: false,
             },
         );
@@ -64,7 +69,7 @@ impl HandleManager {
         self.handles.write().insert(
             id,
             HandleType::Read {
-                path,
+                path: Arc::from(path.as_str()),
                 handle: Arc::new(Mutex::new(handle)),
                 size,
             },
@@ -77,7 +82,7 @@ impl HandleManager {
         self.handles.write().insert(
             id,
             HandleType::Write {
-                path,
+                path: Arc::from(path.as_str()),
                 handle: Arc::new(Mutex::new(Some(handle))),
             },
         );
@@ -85,38 +90,40 @@ impl HandleManager {
     }
 
     /// Get a reference to the handle for read operations
-    pub fn get_read_handle(&self, handle: &str) -> Option<(String, SharedReadHandle, u64)> {
-        let id: u64 = handle.parse().ok()?;
+    pub fn get_read_handle(&self, handle: &[u8]) -> Option<(Arc<str>, SharedReadHandle, u64)> {
+        let id = Self::parse_handle(handle)?;
         let handles = self.handles.read();
         match handles.get(&id)? {
-            HandleType::Read { path, handle, size } => Some((path.clone(), handle.clone(), *size)),
+            HandleType::Read { path, handle, size } => {
+                Some((Arc::clone(path), handle.clone(), *size))
+            }
             _ => None,
         }
     }
 
     /// Get a reference to the write handle
-    pub fn get_write_handle(&self, handle: &str) -> Option<(String, SharedWriteHandle)> {
-        let id: u64 = handle.parse().ok()?;
+    pub fn get_write_handle(&self, handle: &[u8]) -> Option<(Arc<str>, SharedWriteHandle)> {
+        let id = Self::parse_handle(handle)?;
         let handles = self.handles.read();
         match handles.get(&id)? {
-            HandleType::Write { path, handle } => Some((path.clone(), handle.clone())),
+            HandleType::Write { path, handle } => Some((Arc::clone(path), handle.clone())),
             _ => None,
         }
     }
 
     /// Get directory handle info
-    pub fn get_dir_handle(&self, handle: &str) -> Option<(String, bool)> {
-        let id: u64 = handle.parse().ok()?;
+    pub fn get_dir_handle(&self, handle: &[u8]) -> Option<(Arc<str>, bool)> {
+        let id = Self::parse_handle(handle)?;
         let handles = self.handles.read();
         match handles.get(&id)? {
-            HandleType::Dir { path, read_done } => Some((path.clone(), *read_done)),
+            HandleType::Dir { path, read_done } => Some((Arc::clone(path), *read_done)),
             _ => None,
         }
     }
 
     /// Mark directory as read
-    pub fn mark_dir_read(&self, handle: &str) {
-        if let Ok(id) = handle.parse::<u64>() {
+    pub fn mark_dir_read(&self, handle: &[u8]) {
+        if let Some(id) = Self::parse_handle(handle) {
             let mut handles = self.handles.write();
             if let Some(HandleType::Dir { read_done, .. }) = handles.get_mut(&id) {
                 *read_done = true;
@@ -125,8 +132,8 @@ impl HandleManager {
     }
 
     /// Take the write handle out (for finish/abort)
-    pub fn take_write_handle(&self, handle: &str) -> Option<SharedWriteHandle> {
-        let id: u64 = handle.parse().ok()?;
+    pub fn take_write_handle(&self, handle: &[u8]) -> Option<SharedWriteHandle> {
+        let id = Self::parse_handle(handle)?;
         let handles = self.handles.read();
         match handles.get(&id)? {
             HandleType::Write { handle, .. } => Some(handle.clone()),
@@ -134,32 +141,36 @@ impl HandleManager {
         }
     }
 
-    pub fn remove(&self, handle: &str) {
-        if let Ok(id) = handle.parse::<u64>() {
+    pub fn remove(&self, handle: &[u8]) {
+        if let Some(id) = Self::parse_handle(handle) {
             self.handles.write().remove(&id);
         }
     }
 
     /// Check if handle exists and return its type for fstat
-    pub fn get_handle_info(&self, handle: &str) -> Option<HandleInfo> {
-        let id: u64 = handle.parse().ok()?;
+    pub fn get_handle_info(&self, handle: &[u8]) -> Option<HandleInfo> {
+        let id = Self::parse_handle(handle)?;
         let handles = self.handles.read();
         match handles.get(&id)? {
-            HandleType::Dir { path, .. } => Some(HandleInfo::Dir { path: path.clone() }),
+            HandleType::Dir { path, .. } => Some(HandleInfo::Dir {
+                path: Arc::clone(path),
+            }),
             HandleType::Read { path, size, .. } => Some(HandleInfo::Read {
-                path: path.clone(),
+                path: Arc::clone(path),
                 size: *size,
             }),
-            HandleType::Write { path, .. } => Some(HandleInfo::Write { path: path.clone() }),
+            HandleType::Write { path, .. } => Some(HandleInfo::Write {
+                path: Arc::clone(path),
+            }),
         }
     }
 }
 
 /// Info about a handle for fstat
 pub enum HandleInfo {
-    Dir { path: String },
-    Read { path: String, size: u64 },
-    Write { path: String },
+    Dir { path: Arc<str> },
+    Read { path: Arc<str>, size: u64 },
+    Write { path: Arc<str> },
 }
 
 impl Default for HandleManager {
@@ -196,11 +207,11 @@ mod tests {
         let read_handle = Box::new(BufferedReadHandle::new(content));
         let handle = manager.create_read_handle("test.txt".to_string(), read_handle);
 
-        let info = manager.get_handle_info(&handle);
+        let info = manager.get_handle_info(handle.as_bytes());
         assert!(info.is_some());
         match info.unwrap() {
             HandleInfo::Read { path, size } => {
-                assert_eq!(path, "test.txt");
+                assert_eq!(&*path, "test.txt");
                 assert_eq!(size, 5);
             }
             _ => panic!("Wrong handle type"),
@@ -213,9 +224,22 @@ mod tests {
         let read_handle = Box::new(BufferedReadHandle::new(Bytes::new()));
         let handle = manager.create_read_handle("test.txt".to_string(), read_handle);
 
-        assert!(manager.get_handle_info(&handle).is_some());
-        manager.remove(&handle);
-        assert!(manager.get_handle_info(&handle).is_none());
+        assert!(manager.get_handle_info(handle.as_bytes()).is_some());
+        manager.remove(handle.as_bytes());
+        assert!(manager.get_handle_info(handle.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn test_arc_path_is_same_allocation() {
+        // Verify that get_read_handle returns Arc<str> clone (cheap, no heap alloc)
+        let manager = HandleManager::new();
+        let read_handle = Box::new(BufferedReadHandle::new(Bytes::from_static(b"data")));
+        let handle = manager.create_read_handle("mypath".to_string(), read_handle);
+
+        let (path1, _, _) = manager.get_read_handle(handle.as_bytes()).unwrap();
+        let (path2, _, _) = manager.get_read_handle(handle.as_bytes()).unwrap();
+        // Both should point to the same allocation
+        assert!(Arc::ptr_eq(&path1, &path2));
     }
 
     proptest! {
@@ -236,10 +260,10 @@ mod tests {
         fn prop_get_returns_created_path(path in "[a-z][a-z0-9]{0,20}") {
             let manager = HandleManager::new();
             let handle = manager.create_dir_handle(path.clone());
-            let data = manager.get_dir_handle(&handle);
+            let data = manager.get_dir_handle(handle.as_bytes());
             prop_assert!(data.is_some());
             let (p, _) = data.unwrap();
-            prop_assert_eq!(p, path);
+            prop_assert_eq!(&*p, path.as_str());
         }
 
         #[test]
@@ -247,15 +271,15 @@ mod tests {
             let manager = HandleManager::new();
             let read_handle = Box::new(BufferedReadHandle::new(Bytes::new()));
             let handle = manager.create_read_handle(path.clone(), read_handle);
-            manager.remove(&handle);
-            prop_assert!(manager.get_handle_info(&handle).is_none());
+            manager.remove(handle.as_bytes());
+            prop_assert!(manager.get_handle_info(handle.as_bytes()).is_none());
         }
 
         #[test]
         fn prop_invalid_handle_returns_none(handle in "[a-z]+") {
             let manager = HandleManager::new();
             // Numeric handles only, so alphabetic strings should return None
-            prop_assert!(manager.get_handle_info(&handle).is_none());
+            prop_assert!(manager.get_handle_info(handle.as_bytes()).is_none());
         }
     }
 }

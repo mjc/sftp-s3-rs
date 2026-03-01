@@ -431,33 +431,183 @@ impl<B: Backend> ScpHandler<B> {
 }
 
 /// SCP error types
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ScpError {
-    Io(std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Backend error: {0}")]
     Backend(String),
+    #[error("Protocol error: {0}")]
     Protocol(String),
+    #[error("Invalid SCP command: {0}")]
     InvalidCommand(String),
+    #[error("SCP mode not specified (-t or -f required)")]
     NoMode,
+    #[error("Unexpected end of file")]
     UnexpectedEof,
 }
 
-impl std::fmt::Display for ScpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ScpError::Io(e) => write!(f, "IO error: {}", e),
-            ScpError::Backend(e) => write!(f, "Backend error: {}", e),
-            ScpError::Protocol(e) => write!(f, "Protocol error: {}", e),
-            ScpError::InvalidCommand(cmd) => write!(f, "Invalid SCP command: {}", cmd),
-            ScpError::NoMode => write!(f, "SCP mode not specified (-t or -f required)"),
-            ScpError::UnexpectedEof => write!(f, "Unexpected end of file"),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::MemoryBackend;
+    use std::sync::Arc;
+
+    fn make_handler() -> ScpHandler<MemoryBackend> {
+        ScpHandler::new(Arc::new(MemoryBackend::new()))
+    }
+
+    // --- parse_command ---
+
+    #[test]
+    fn test_parse_command_receive() {
+        let (mode, rec, ptime, path) =
+            ScpHandler::<MemoryBackend>::parse_command("scp -t /remote/file.txt").unwrap();
+        assert!(matches!(mode, ScpMode::Receive));
+        assert!(!rec);
+        assert!(!ptime);
+        assert_eq!(path, "/remote/file.txt");
+    }
+
+    #[test]
+    fn test_parse_command_send() {
+        let (mode, rec, ptime, path) =
+            ScpHandler::<MemoryBackend>::parse_command("scp -f /source.txt").unwrap();
+        assert!(matches!(mode, ScpMode::Send));
+        assert!(!rec);
+        assert!(!ptime);
+        assert_eq!(path, "/source.txt");
+    }
+
+    #[test]
+    fn test_parse_command_recursive_preserve() {
+        let (mode, rec, ptime, path) =
+            ScpHandler::<MemoryBackend>::parse_command("scp -r -p -t /dir/").unwrap();
+        assert!(matches!(mode, ScpMode::Receive));
+        assert!(rec);
+        assert!(ptime);
+        assert_eq!(path, "/dir/");
+    }
+
+    #[test]
+    fn test_parse_command_no_mode_error() {
+        let result = ScpHandler::<MemoryBackend>::parse_command("scp /file.txt");
+        assert!(matches!(result, Err(ScpError::NoMode)));
+    }
+
+    #[test]
+    fn test_parse_command_invalid_command_error() {
+        let result = ScpHandler::<MemoryBackend>::parse_command("rsync -t /file");
+        assert!(matches!(result, Err(ScpError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_parse_command_default_path() {
+        let (_, _, _, path) = ScpHandler::<MemoryBackend>::parse_command("scp -t").unwrap();
+        assert_eq!(path, "/");
+    }
+
+    // --- parse_file_message ---
+
+    #[test]
+    fn test_parse_file_message_valid() {
+        let msg = ScpHandler::<MemoryBackend>::parse_file_message("0644 12345 myfile.txt").unwrap();
+        match msg {
+            ScpMessage::File { mode, size, name } => {
+                assert_eq!(mode, "0644");
+                assert_eq!(size, 12345);
+                assert_eq!(name, "myfile.txt");
+            }
+            _ => panic!("Expected ScpMessage::File"),
         }
     }
-}
 
-impl std::error::Error for ScpError {}
+    #[test]
+    fn test_parse_file_message_filename_with_spaces() {
+        let msg =
+            ScpHandler::<MemoryBackend>::parse_file_message("0755 99 my file name.txt").unwrap();
+        match msg {
+            ScpMessage::File { name, .. } => assert_eq!(name, "my file name.txt"),
+            _ => panic!("Expected File"),
+        }
+    }
 
-impl From<std::io::Error> for ScpError {
-    fn from(e: std::io::Error) -> Self {
-        ScpError::Io(e)
+    #[test]
+    fn test_parse_file_message_invalid_size() {
+        let result = ScpHandler::<MemoryBackend>::parse_file_message("0644 notanumber file.txt");
+        assert!(matches!(result, Err(ScpError::Protocol(_))));
+    }
+
+    #[test]
+    fn test_parse_file_message_too_few_parts() {
+        let result = ScpHandler::<MemoryBackend>::parse_file_message("0644 123");
+        assert!(matches!(result, Err(ScpError::Protocol(_))));
+    }
+
+    // --- parse_dir_message ---
+
+    #[test]
+    fn test_parse_dir_message_valid() {
+        let msg = ScpHandler::<MemoryBackend>::parse_dir_message("0755 0 mydir").unwrap();
+        match msg {
+            ScpMessage::Dir { mode, name } => {
+                assert_eq!(mode, "0755");
+                assert_eq!(name, "mydir");
+            }
+            _ => panic!("Expected Dir"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dir_message_too_few_parts() {
+        let result = ScpHandler::<MemoryBackend>::parse_dir_message("0755 0");
+        assert!(matches!(result, Err(ScpError::Protocol(_))));
+    }
+
+    // --- expand_tilde ---
+
+    #[test]
+    fn test_expand_tilde_alone() {
+        let result = ScpHandler::<MemoryBackend>::expand_tilde("~");
+        assert_eq!(result, "/");
+    }
+
+    #[test]
+    fn test_expand_tilde_with_path() {
+        let result = ScpHandler::<MemoryBackend>::expand_tilde("~/docs/file.txt");
+        assert_eq!(result, "/docs/file.txt");
+    }
+
+    #[test]
+    fn test_expand_tilde_no_tilde() {
+        let result = ScpHandler::<MemoryBackend>::expand_tilde("/abs/path");
+        assert_eq!(result, "/abs/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_relative() {
+        let result = ScpHandler::<MemoryBackend>::expand_tilde("relative/path");
+        assert_eq!(result, "relative/path");
+    }
+
+    // --- ScpError display ---
+
+    #[test]
+    fn test_scp_error_display() {
+        assert_eq!(
+            ScpError::NoMode.to_string(),
+            "SCP mode not specified (-t or -f required)"
+        );
+        assert_eq!(
+            ScpError::UnexpectedEof.to_string(),
+            "Unexpected end of file"
+        );
+        assert!(ScpError::Backend("oops".into())
+            .to_string()
+            .contains("oops"));
+        assert!(ScpError::Protocol("bad".into()).to_string().contains("bad"));
+        assert!(ScpError::InvalidCommand("rsync".into())
+            .to_string()
+            .contains("rsync"));
     }
 }

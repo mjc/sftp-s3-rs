@@ -33,7 +33,7 @@ pub enum BackendError {
     #[error("Directory not empty")]
     DirectoryNotEmpty,
     #[error("I/O error: {0}")]
-    Io(String),
+    Io(#[from] std::io::Error),
     #[error("Backend error: {0}")]
     Other(String),
 }

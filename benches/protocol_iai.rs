@@ -7,7 +7,7 @@ fn setup_write_1kb() -> Packet {
     let data = Bytes::from(vec![0xABu8; 1024]);
     Packet::Write(Write {
         id: 1,
-        handle: "h".to_string(),
+        handle: Bytes::from_static(b"h"),
         offset: 0,
         data,
     })
@@ -17,7 +17,7 @@ fn setup_write_64kb() -> Packet {
     let data = Bytes::from(vec![0xABu8; 65536]);
     Packet::Write(Write {
         id: 1,
-        handle: "h".to_string(),
+        handle: Bytes::from_static(b"h"),
         offset: 0,
         data,
     })
