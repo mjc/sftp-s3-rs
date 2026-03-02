@@ -501,6 +501,7 @@ fn read_string(bytes: &mut Bytes) -> Option<String> {
 mod tests {
     use super::*;
     use crate::backend::MemoryBackend;
+    use proptest::prelude::*;
     use russh_sftp::protocol::{FileAttributes, OpenFlags};
     use russh_sftp::server::Handler as SftpHandlerTrait;
     use std::collections::HashMap;
@@ -847,6 +848,84 @@ mod tests {
         // Second call returns EOF
         let result = handler.readdir(1, dir_bytes).await;
         assert!(matches!(result, Err(StatusCode::Eof)));
+    }
+
+    // --- Property tests ---
+
+    proptest! {
+        #[test]
+        fn prop_write_read_roundtrip(
+            // Simple paths: no slashes so we don't create implicit directories
+            filename in "[a-z][a-z0-9_]{0,12}\\.[a-z]{1,4}",
+            content in proptest::collection::vec(any::<u8>(), 0..4096)
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let mut handler = make_handler();
+
+                let path = format!("/{}", filename);
+                let content_bytes = Bytes::from(content.clone());
+
+                // Write
+                let wh = handler
+                    .open(1, path.clone(), OpenFlags::WRITE | OpenFlags::CREATE, FileAttributes::default())
+                    .await
+                    .unwrap();
+                let wh_bytes = Bytes::from(wh.handle.into_bytes());
+                if !content.is_empty() {
+                    handler.write(1, wh_bytes.clone(), 0, content_bytes).await.unwrap();
+                }
+                handler.close(1, wh_bytes).await.unwrap();
+
+                // Read back
+                let rh = handler
+                    .open(2, path, OpenFlags::READ, FileAttributes::default())
+                    .await
+                    .unwrap();
+                let rh_bytes = Bytes::from(rh.handle.into_bytes());
+                let mut read_data = Vec::new();
+                let mut offset = 0u64;
+                loop {
+                    match handler.read(2, rh_bytes.clone(), offset, 32768).await {
+                        Ok(d) => {
+                            offset += d.data.len() as u64;
+                            read_data.extend_from_slice(&d.data);
+                        }
+                        Err(StatusCode::Eof) => break,
+                        Err(e) => panic!("read error: {:?}", e),
+                    }
+                }
+                handler.close(2, rh_bytes).await.unwrap();
+
+                prop_assert_eq!(read_data, content);
+                Ok(())
+            })?
+        }
+
+        #[test]
+        fn prop_mkdir_readdir_consistency(
+            dirname in "[a-z][a-z0-9]{0,12}"
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let mut handler = make_handler();
+
+                // Create dir
+                handler
+                    .mkdir(1, format!("/{}", dirname), FileAttributes::default())
+                    .await
+                    .unwrap();
+
+                // Open root dir and read
+                let dh = handler.opendir(2, "/".to_string()).await.unwrap();
+                let dh_bytes = Bytes::from(dh.handle.into_bytes());
+                let entries = handler.readdir(2, dh_bytes).await.unwrap();
+                let names: Vec<&str> = entries.files.iter().map(|f| f.filename.as_str()).collect();
+
+                prop_assert!(names.contains(&dirname.as_str()), "dirname {} not found in {:?}", dirname, names);
+                Ok(())
+            })?
+        }
     }
 
     #[tokio::test]

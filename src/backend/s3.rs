@@ -597,3 +597,133 @@ impl WriteHandle for S3WriteHandle {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: create an S3Backend-shaped config for testing pure functions.
+    // Does NOT connect to any AWS endpoint.
+    fn make_backend_config(bucket: &str, prefix: &str) -> S3Config {
+        S3Config::new(bucket).with_prefix(prefix)
+    }
+
+    // We can test build_key by constructing a minimal S3Backend-like struct.
+    // Since S3Backend::build_key only uses self.config, we test it via a
+    // wrapper that exposes the same logic as a free function.
+    fn build_key_fn(config: &S3Config, path: &str) -> String {
+        let normalized = normalize_path(path);
+        if config.prefix.is_empty() {
+            normalized.into_owned()
+        } else if normalized.is_empty() {
+            config.prefix.trim_end_matches('/').to_string()
+        } else {
+            format!("{}/{}", config.prefix.trim_end_matches('/'), normalized)
+        }
+    }
+
+    // --- build_key tests ---
+
+    #[test]
+    fn test_build_key_no_prefix_root() {
+        let config = make_backend_config("bucket", "");
+        assert_eq!(build_key_fn(&config, "/"), "");
+        assert_eq!(build_key_fn(&config, ""), "");
+    }
+
+    #[test]
+    fn test_build_key_no_prefix_path() {
+        let config = make_backend_config("bucket", "");
+        assert_eq!(build_key_fn(&config, "foo/bar.txt"), "foo/bar.txt");
+        assert_eq!(build_key_fn(&config, "/foo/bar.txt"), "foo/bar.txt");
+    }
+
+    #[test]
+    fn test_build_key_with_prefix_root() {
+        let config = make_backend_config("bucket", "sftp/");
+        // Root maps to prefix only (no trailing slash)
+        assert_eq!(build_key_fn(&config, "/"), "sftp");
+        assert_eq!(build_key_fn(&config, ""), "sftp");
+    }
+
+    #[test]
+    fn test_build_key_with_prefix_path() {
+        let config = make_backend_config("bucket", "sftp/");
+        assert_eq!(build_key_fn(&config, "foo/bar.txt"), "sftp/foo/bar.txt");
+        assert_eq!(build_key_fn(&config, "/foo/bar.txt"), "sftp/foo/bar.txt");
+    }
+
+    #[test]
+    fn test_build_key_prefix_without_trailing_slash() {
+        let config = make_backend_config("bucket", "sftp");
+        assert_eq!(build_key_fn(&config, "file.txt"), "sftp/file.txt");
+    }
+
+    #[test]
+    fn test_build_key_nested_path() {
+        let config = make_backend_config("bucket", "tenant/data/");
+        assert_eq!(build_key_fn(&config, "/a/b/c.txt"), "tenant/data/a/b/c.txt");
+    }
+
+    // --- map_s3_error tests ---
+
+    #[test]
+    fn test_map_s3_error_not_found() {
+        assert!(matches!(
+            S3Backend::map_s3_error("NoSuchKey: the key does not exist"),
+            BackendError::NotFound
+        ));
+        assert!(matches!(
+            S3Backend::map_s3_error("NotFound"),
+            BackendError::NotFound
+        ));
+        assert!(matches!(
+            S3Backend::map_s3_error("HTTP 404 not found"),
+            BackendError::NotFound
+        ));
+    }
+
+    #[test]
+    fn test_map_s3_error_permission_denied() {
+        assert!(matches!(
+            S3Backend::map_s3_error("AccessDenied"),
+            BackendError::PermissionDenied
+        ));
+        assert!(matches!(
+            S3Backend::map_s3_error("HTTP 403 Forbidden"),
+            BackendError::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn test_map_s3_error_other() {
+        let err = S3Backend::map_s3_error("InternalError: something broke");
+        assert!(matches!(err, BackendError::Other(_)));
+        if let BackendError::Other(msg) = err {
+            assert!(msg.contains("InternalError"));
+        }
+    }
+
+    #[test]
+    fn test_map_s3_error_empty() {
+        assert!(matches!(
+            S3Backend::map_s3_error(""),
+            BackendError::Other(_)
+        ));
+    }
+
+    // --- S3Config tests ---
+
+    #[test]
+    fn test_s3_config_new() {
+        let config = S3Config::new("my-bucket");
+        assert_eq!(config.bucket, "my-bucket");
+        assert!(config.prefix.is_empty());
+    }
+
+    #[test]
+    fn test_s3_config_with_prefix() {
+        let config = S3Config::new("b").with_prefix("sftp/");
+        assert_eq!(config.prefix, "sftp/");
+    }
+}

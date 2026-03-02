@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 /// Server configuration
@@ -273,8 +274,12 @@ impl<B: Backend> Server<B> {
         self
     }
 
-    /// Run the server
-    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Build SSH config and server from current settings (shared setup for run/run_on_socket)
+    #[allow(clippy::type_complexity)]
+    fn prepare(
+        mut self,
+    ) -> Result<(u16, SshServer<B>, Arc<SshConfig>), Box<dyn std::error::Error + Send + Sync>> {
+        let port = self.config.port;
         let mut keys = self.config.keys.clone();
         if keys.is_empty() {
             keys.push(russh::keys::PrivateKey::random(
@@ -319,7 +324,7 @@ impl<B: Backend> Server<B> {
             preferred.compression = Cow::Borrowed(&[compression::NONE]);
         }
 
-        let ssh_config = SshConfig {
+        let ssh_config = Arc::new(SshConfig {
             auth_rejection_time: self.config.auth_rejection_time,
             auth_rejection_time_initial: Some(Duration::from_secs(0)),
             methods,
@@ -329,18 +334,28 @@ impl<B: Backend> Server<B> {
             window_size: self.config.window_size,
             maximum_packet_size: self.config.maximum_packet_size,
             ..Default::default()
-        };
+        });
 
-        let ssh_config = Arc::new(ssh_config);
-        let mut server = SshServer::new(self.backend, self.auth_config);
+        let server = SshServer::new(self.backend, self.auth_config);
+        Ok((port, server, ssh_config))
+    }
 
-        let addr = format!("0.0.0.0:{}", self.config.port);
+    /// Run the server
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (port, mut server, ssh_config) = self.prepare()?;
+        let addr = format!("0.0.0.0:{port}");
         info!(addr = %addr, "Starting SFTP server");
+        server.run_on_address(ssh_config, ("0.0.0.0", port)).await?;
+        Ok(())
+    }
 
-        server
-            .run_on_address(ssh_config, ("0.0.0.0", self.config.port))
-            .await?;
-
+    /// Run the server on a pre-bound TcpListener (useful for testing with dynamic ports)
+    pub async fn run_on_socket(
+        self,
+        socket: &TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_, mut server, ssh_config) = self.prepare()?;
+        server.run_on_socket(ssh_config, socket).await?;
         Ok(())
     }
 }

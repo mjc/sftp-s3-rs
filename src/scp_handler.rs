@@ -93,27 +93,25 @@ impl<B: Backend> ScpHandler<B> {
             return Err(ScpError::InvalidCommand(command.to_string()));
         }
 
-        let args = command[4..].split_whitespace().collect::<Vec<_>>();
-        let mut mode = None;
-        let mut recursive = false;
-        let mut preserve_times = false;
-        let mut target_path = String::from("/");
+        let args: Vec<&str> = command[4..].split_whitespace().collect();
 
-        for arg in &args {
-            match *arg {
-                "-t" => mode = Some(ScpMode::Receive),
-                "-f" => mode = Some(ScpMode::Send),
-                "-r" => recursive = true,
-                "-p" => preserve_times = true,
-                "-d" | "-v" => {} // Ignore other flags
-                path if !path.starts_with('-') => {
-                    target_path = Self::expand_tilde(path).into_owned();
-                }
-                _ => {}
-            }
-        }
+        let mode = args
+            .iter()
+            .fold(None, |acc, &arg| match arg {
+                "-t" => Some(ScpMode::Receive),
+                "-f" => Some(ScpMode::Send),
+                _ => acc,
+            })
+            .ok_or(ScpError::NoMode)?;
 
-        let mode = mode.ok_or(ScpError::NoMode)?;
+        let recursive = args.contains(&"-r");
+        let preserve_times = args.contains(&"-p");
+        let target_path = args
+            .iter()
+            .rfind(|a| !a.starts_with('-'))
+            .map(|p| Self::expand_tilde(p).into_owned())
+            .unwrap_or_else(|| "/".to_string());
+
         Ok((mode, recursive, preserve_times, target_path))
     }
 
