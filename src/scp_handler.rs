@@ -200,11 +200,10 @@ impl<B: Backend> ScpHandler<B> {
 
                         debug!("Starting to read {} bytes of file data", size);
                         while remaining > 0 {
-                            let to_read = std::cmp::min(remaining, transfer_buf.capacity() as u64) as usize;
+                            let to_read =
+                                std::cmp::min(remaining, transfer_buf.capacity() as u64) as usize;
                             transfer_buf.resize(to_read, 0);
-                            stream
-                                .read_exact(&mut transfer_buf[..to_read])
-                                .await?;
+                            stream.read_exact(&mut transfer_buf[..to_read]).await?;
 
                             // Split without copying: transfer_buf chunk becomes independent Bytes
                             // The underlying memory is shared, but split_to handles the reference counting

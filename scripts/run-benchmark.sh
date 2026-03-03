@@ -30,9 +30,12 @@ if [[ ! -f "$BINARY" ]]; then
     exit 1
 fi
 
-# Create test data
-echo "Creating ${SIZE_MB}MB test file..."
-dd if=/dev/urandom of="/tmp/$TESTFILE" bs=1M count=$SIZE_MB status=progress 2>&1 | tail -1
+# Create test data in RAM (use /dev/zero for instant creation, cache it)
+echo "Creating ${SIZE_MB}MB test file in RAM..."
+dd if=/dev/zero of="/dev/shm/$TESTFILE" bs=1M count=$SIZE_MB status=none 2>&1
+# Warm cache by reading it
+cat "/dev/shm/$TESTFILE" > /dev/null
+TESTFILE="/dev/shm/$TESTFILE"
 
 # Start the memory server in background
 echo ""
@@ -64,7 +67,7 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     kill $SERVER_PID 2>/dev/null || true
-    rm -f "/tmp/$TESTFILE" "/tmp/${TESTFILE}.downloaded"
+    rm -f "/dev/shm/testfile_"* "/dev/shm/"*.downloaded
 }
 trap cleanup EXIT
 
@@ -73,7 +76,7 @@ echo ""
 echo "=== Upload Benchmark ==="
 UPLOAD_START=$(date +%s.%N)
 sshpass -p "$PASS" sftp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $PORT "$USER@localhost" <<EOF
-put /tmp/$TESTFILE
+put $TESTFILE
 bye
 EOF
 UPLOAD_END=$(date +%s.%N)
@@ -84,9 +87,10 @@ echo "Upload: ${SIZE_MB}MB in ${UPLOAD_TIME}s = ${UPLOAD_SPEED} MB/s"
 # Run download benchmark
 echo ""
 echo "=== Download Benchmark ==="
+REMOTE_FILE="${TESTFILE##*/}"  # Just the basename
 DOWNLOAD_START=$(date +%s.%N)
 sshpass -p "$PASS" sftp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $PORT "$USER@localhost" <<EOF
-get $TESTFILE /tmp/${TESTFILE}.downloaded
+get $REMOTE_FILE /dev/shm/${REMOTE_FILE}.downloaded
 bye
 EOF
 DOWNLOAD_END=$(date +%s.%N)
