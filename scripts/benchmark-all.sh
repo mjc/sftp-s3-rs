@@ -1,11 +1,14 @@
 #!/bin/bash
 # Comprehensive benchmark harness
-# Tests 4 configs × 4 sizes × 100 iterations each
-# Configs:
-#   1. russh:main        + russh-sftp:master
-#   2. russh:main        + russh-sftp:zero-copy-serialize
-#   3. russh:write-path  + russh-sftp:master
-#   4. russh:write-path  + russh-sftp:zero-copy-serialize (full optimized)
+# 6 configs × 4 sizes × 100 iterations each
+#
+# Config matrix (russh × russh-sftp, sftp-s3-rs branch follows russh-sftp compat):
+#   1. russh:main         + russh-sftp:master                   → sftp-s3-rs:baseline
+#   2. russh:main         + russh-sftp:deserialize-bytes-optim  → sftp-s3-rs:baseline
+#   3. russh:main         + russh-sftp:zero-copy-serialize      → sftp-s3-rs:main
+#   4. russh:write-path   + russh-sftp:master                   → sftp-s3-rs:baseline
+#   5. russh:write-path   + russh-sftp:deserialize-bytes-optim  → sftp-s3-rs:baseline
+#   6. russh:write-path   + russh-sftp:zero-copy-serialize      → sftp-s3-rs:main
 
 set -e
 
@@ -19,18 +22,18 @@ RESULTS_DIR="$SFTP_DIR/benchmark_results"
 mkdir -p "$RESULTS_DIR"
 
 build_config() {
-    local russh_branch=$1
-    local sftp_branch=$2
+    local s3_branch=$1
+    local russh_branch=$2
+    local sftp_branch=$3
 
-    echo "  Switching russh -> $russh_branch ..."
-    git -C "$RUSSH_DIR" checkout "$russh_branch" --quiet
+    echo "  sftp-s3-rs=$s3_branch  russh=$russh_branch  russh-sftp=$sftp_branch"
+    git -C "/home/mjc/projects/sftp-s3-rs"      checkout "$s3_branch"    --quiet
+    git -C "/home/mjc/projects/russh"            checkout "$russh_branch" --quiet
+    git -C "/home/mjc/projects/russh-sftp"       checkout "$sftp_branch"  --quiet
 
-    echo "  Switching russh-sftp -> $sftp_branch ..."
-    git -C "$RUSSH_SFTP_DIR" checkout "$sftp_branch" --quiet
-
-    echo "  Building sftp-s3-rs with target-cpu=native ..."
-    cd "$SFTP_DIR"
-    RUSTFLAGS="-C target-cpu=native" cargo build --release -q 2>&1
+    cd "/home/mjc/projects/sftp-s3-rs"
+    unset NIX_ENFORCE_NO_NATIVE
+    RUSTFLAGS="-C target-cpu=native" cargo build --release -q
     echo "  Build done."
 }
 
@@ -80,26 +83,15 @@ PY
 }
 
 # ── Configs ───────────────────────────────────────────────────────────────────
+# Each entry: "label|s3_branch|russh_branch|sftp_branch"
 
-ORDERED=(
-    "1_russh-main_sftp-master"
-    "2_russh-main_sftp-zerocopy"
-    "3_russh-branch_sftp-master"
-    "4_russh-branch_sftp-zerocopy"
-)
-
-declare -A RUSSH_BRANCH=(
-    ["1_russh-main_sftp-master"]="main"
-    ["2_russh-main_sftp-zerocopy"]="main"
-    ["3_russh-branch_sftp-master"]="write-path-refactor"
-    ["4_russh-branch_sftp-zerocopy"]="write-path-refactor"
-)
-
-declare -A SFTP_BRANCH=(
-    ["1_russh-main_sftp-master"]="master"
-    ["2_russh-main_sftp-zerocopy"]="zero-copy-serialize"
-    ["3_russh-branch_sftp-master"]="master"
-    ["4_russh-branch_sftp-zerocopy"]="zero-copy-serialize"
+CONFIGS=(
+    "1_russh-main_sftp-master|baseline|main|master"
+    "2_russh-main_sftp-deserialize|baseline|main|deserialize-bytes-optimization"
+    "3_russh-main_sftp-zerocopy|main|main|zero-copy-serialize"
+    "4_russh-write_sftp-master|baseline|write-path-refactor|master"
+    "5_russh-write_sftp-deserialize|baseline|write-path-refactor|deserialize-bytes-optimization"
+    "6_russh-write_sftp-zerocopy|main|write-path-refactor|zero-copy-serialize"
 )
 
 echo "=== Comprehensive Benchmark Suite ==="
@@ -107,41 +99,39 @@ echo "Sizes: ${SIZES[*]} MB  |  Iterations: $ITERS  |  RUSTFLAGS: -C target-cpu=
 echo "Results: $RESULTS_DIR"
 echo ""
 
-for config_label in "${ORDERED[@]}"; do
-    russh_branch="${RUSSH_BRANCH[$config_label]}"
-    sftp_branch="${SFTP_BRANCH[$config_label]}"
+for config in "${CONFIGS[@]}"; do
+    IFS='|' read -r label s3_branch russh_branch sftp_branch <<< "$config"
 
     echo ""
     echo "══════════════════════════════════════════════"
-    echo "CONFIG: $config_label"
-    echo "  russh=$russh_branch  russh-sftp=$sftp_branch"
-    echo "══════════════════════════════════════════════"
-
-    build_config "$russh_branch" "$sftp_branch"
+    echo "CONFIG: $label"
+    build_config "$s3_branch" "$russh_branch" "$sftp_branch"
 
     for size in "${SIZES[@]}"; do
-        run_size "$config_label" "$size"
+        run_size "$label" "$size"
     done
 done
 
 # ── Final summary table ───────────────────────────────────────────────────────
 echo ""
 echo "=== FINAL SUMMARY ==="
-python3 - "$RESULTS_DIR" <<PY
+python3 - "$RESULTS_DIR" <<'PY'
 import sys, os, statistics
 
 results_dir = sys.argv[1]
 
 configs = [
     "1_russh-main_sftp-master",
-    "2_russh-main_sftp-zerocopy",
-    "3_russh-branch_sftp-master",
-    "4_russh-branch_sftp-zerocopy",
+    "2_russh-main_sftp-deserialize",
+    "3_russh-main_sftp-zerocopy",
+    "4_russh-write_sftp-master",
+    "5_russh-write_sftp-deserialize",
+    "6_russh-write_sftp-zerocopy",
 ]
 sizes = [1, 256, 512, 1024]
 
-print(f"\n{'Config':<40}  {'Size':>6}  {'Upload':>9}  {'Download':>9}  {'Roundtrip':>9}")
-print("-" * 85)
+print(f"\n{'Config':<35}  {'Size':>6}  {'Upload':>9}  {'Download':>9}  {'Roundtrip':>9}")
+print("-" * 80)
 
 for config in configs:
     for size in sizes:
@@ -154,14 +144,16 @@ for config in configs:
         rts   = [float(r[3]) for r in rows if len(r)==4]
         if not rts:
             continue
-        print(f"{config:<40}  {size:>4}MB  {statistics.mean(ups):>8.1f}  {statistics.mean(downs):>8.1f}  {statistics.mean(rts):>8.1f}")
+        print(f"{config:<35}  {size:>4}MB  {statistics.mean(ups):>8.1f}  {statistics.mean(downs):>8.1f}  {statistics.mean(rts):>8.1f}")
 PY
 
-# Restore to optimized branches
+# Restore to fully-optimized state
 echo ""
-echo "Restoring to optimized branches..."
-git -C "$RUSSH_DIR" checkout write-path-refactor --quiet
-git -C "$RUSSH_SFTP_DIR" checkout zero-copy-serialize --quiet
-cd "$SFTP_DIR"
-RUSTFLAGS="-C target-cpu=native" cargo build --release -q 2>&1
+echo "Restoring optimized branches..."
+git -C "/home/mjc/projects/sftp-s3-rs"   checkout main                        --quiet
+git -C "/home/mjc/projects/russh"         checkout write-path-refactor          --quiet
+git -C "/home/mjc/projects/russh-sftp"    checkout zero-copy-serialize          --quiet
+cd "/home/mjc/projects/sftp-s3-rs"
+unset NIX_ENFORCE_NO_NATIVE
+RUSTFLAGS="-C target-cpu=native" cargo build --release -q
 echo "Done."
