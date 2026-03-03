@@ -1,0 +1,124 @@
+   Compiling russh-sftp v2.1.1 (/home/mjc/projects/russh-sftp)
+warning: unused variable: `sec`
+  --> /home/mjc/projects/russh/russh/src/keys/format/pkcs5.rs:18:13
+   |
+18 |         let sec = match enc {
+   |             ^^^ help: if this is intentional, prefix it with an underscore: `_sec`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `russh` (lib) generated 1 warning (run `cargo fix --lib -p russh` to apply 1 suggestion)
+warning: unused import: `std::io::IoSlice`
+  --> /home/mjc/projects/russh-sftp/src/protocol/mod.rs:31:5
+   |
+31 | use std::io::IoSlice;
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling sftp-s3 v0.1.0 (/home/mjc/projects/sftp-s3-rs)
+warning: `russh-sftp` (lib) generated 1 warning (run `cargo fix --lib -p russh-sftp` to apply 1 suggestion)
+    Finished `profiling` profile [optimized + debuginfo] target(s) in 21.37s
+Starting server under perf...
+Warning: Using generated host key (clients will see key change warnings)
+         Set HOST_KEY_FILE or HOST_KEY for persistent keys
+Starting SFTP server on port 2223
+Backend: in-memory (data will be lost on exit)
+[2m2026-03-03T17:29:47.389012Z[0m [32m INFO[0m [2msftp_s3::server[0m[2m:[0m Starting SFTP server [3maddr[0m[2m=[0m0.0.0.0:2223
+[2m2026-03-03T17:29:47.439805Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:50478)
+Server ready. Running 8 benchmark rounds (256 MB each)...
+[2m2026-03-03T17:29:47.964058Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:50480)
+[2m2026-03-03T17:29:47.966418Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:50486)
+[2m2026-03-03T17:29:47.978541Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:50492)
+[2m2026-03-03T17:29:47.984709Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:48.398841Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:50498)
+[2m2026-03-03T17:29:48.445354Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 655.96 MB/s
+[2m2026-03-03T17:29:49.293487Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56358)
+[2m2026-03-03T17:29:49.295694Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56374)
+[2m2026-03-03T17:29:49.307643Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56376)
+[2m2026-03-03T17:29:49.352558Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:49.762841Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56388)
+[2m2026-03-03T17:29:49.808202Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 631.02 MB/s
+[2m2026-03-03T17:29:50.676378Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56398)
+[2m2026-03-03T17:29:50.678265Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56414)
+[2m2026-03-03T17:29:50.690205Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56420)
+[2m2026-03-03T17:29:50.735275Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:51.139087Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56436)
+[2m2026-03-03T17:29:51.185689Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 643.83 MB/s
+[2m2026-03-03T17:29:51.999995Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56452)
+[2m2026-03-03T17:29:52.001819Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56466)
+[2m2026-03-03T17:29:52.014171Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56478)
+[2m2026-03-03T17:29:52.060170Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:52.457362Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56480)
+[2m2026-03-03T17:29:52.502174Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 636.27 MB/s
+[2m2026-03-03T17:29:53.330754Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56486)
+[2m2026-03-03T17:29:53.332841Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56492)
+[2m2026-03-03T17:29:53.344996Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56494)
+[2m2026-03-03T17:29:53.390294Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:53.791478Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56496)
+[2m2026-03-03T17:29:53.837604Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 635.84 MB/s
+[2m2026-03-03T17:29:54.662252Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56500)
+[2m2026-03-03T17:29:54.664240Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56508)
+[2m2026-03-03T17:29:54.675657Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56514)
+[2m2026-03-03T17:29:54.720372Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:55.118328Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56526)
+[2m2026-03-03T17:29:55.163180Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 641.38 MB/s
+[2m2026-03-03T17:29:56.032607Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56538)
+[2m2026-03-03T17:29:56.034620Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56554)
+[2m2026-03-03T17:29:56.045881Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56566)
+[2m2026-03-03T17:29:56.091594Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:56.484240Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56568)
+[2m2026-03-03T17:29:56.530417Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 645.99 MB/s
+[2m2026-03-03T17:29:57.358458Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56582)
+[2m2026-03-03T17:29:57.360617Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56586)
+[2m2026-03-03T17:29:57.373064Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56596)
+[2m2026-03-03T17:29:57.418442Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+[2m2026-03-03T17:29:57.817342Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m New SSH connection [3maddr[0m[2m=[0mSome(127.0.0.1:56602)
+[2m2026-03-03T17:29:57.862218Z[0m [32m INFO[0m [2msftp_s3::ssh_handler[0m[2m:[0m Password authentication successful [3muser[0m[2m=[0mbenchmark
+Roundtrip: 625.56 MB/s
+
+Stopping perf...
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 1.056 MB perf.data (5485 samples) ]
+Generating flamegraph...
+
+Top leaf functions:
+4508397440 aws_lc_0_38_0_CRYPTO_poly1305_update
+4394459618 aws_lc_0_38_0_ChaCha20_ctr32_avx2
+1523752230 __memmove_avx_unaligned_erms
+921942391 clear_page_erms
+577061792 asm_exc_page_fault
+246409517 __memset_avx2_unaligned_erms
+229787509 _copy_from_iter
+226206707 aws_lc_0_38_0_ChaCha20_ctr32_nohw
+225289548 _copy_to_iter
+177335604 nft_do_chain
+162767296 __list_del_entry_valid_or_report
+162315328 aws_lc_0_38_0_CRYPTO_poly1305_finish
+153967534 <core::pin::Pin<P> as core::future::future::Future>::poll
+143441981 __vdso_clock_gettime
+143211120 __rmqueue_pcplist
+117352086 unmap_page_range
+113369050 get_page_from_freelist
+100697714 tokio::runtime::scheduler::multi_thread::worker::run
+96823478 __handle_mm_fault
+88245450 __pgalloc_tag_sub
+78064034 read_tsc
+77071137 fdget
+75066946 __lruvec_stat_mod_folio
+69993492 entry_SYSCALL_64
+67367154 tokio::sync::mpsc::list::Rx<T>::pop
+65924124 mas_walk
+65397716 do_anonymous_page
+64763781 __alloc_tagging_slab_alloc_hook
+61322514 _int_malloc
+61317077 ip_finish_output2
+
+Done: flamegraph.svg  perf-folded.txt

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::backend::Backend;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -196,23 +196,26 @@ impl<B: Backend> ScpHandler<B> {
                         // Read and write file data
                         let mut remaining = size;
                         let mut offset = 0u64;
-                        let mut transfer_buf = vec![0u8; 65536];
+                        let mut transfer_buf = BytesMut::with_capacity(65536);
 
                         debug!("Starting to read {} bytes of file data", size);
                         while remaining > 0 {
-                            let to_read = std::cmp::min(remaining, transfer_buf.len() as u64);
+                            let to_read = std::cmp::min(remaining, transfer_buf.capacity() as u64) as usize;
+                            transfer_buf.resize(to_read, 0);
                             stream
-                                .read_exact(&mut transfer_buf[..to_read as usize])
+                                .read_exact(&mut transfer_buf[..to_read])
                                 .await?;
-                            let n = to_read as usize;
 
+                            // Split without copying: transfer_buf chunk becomes independent Bytes
+                            // The underlying memory is shared, but split_to handles the reference counting
+                            let data = transfer_buf.split_to(to_read).freeze();
                             handle
-                                .write_at(offset, Bytes::copy_from_slice(&transfer_buf[..n]))
+                                .write_at(offset, data)
                                 .await
                                 .map_err(|e| ScpError::Backend(e.to_string()))?;
-                            offset += n as u64;
-                            remaining -= n as u64;
-                            debug!("Read {} bytes, remaining: {}", n, remaining);
+                            offset += to_read as u64;
+                            remaining -= to_read as u64;
+                            debug!("Read {} bytes, remaining: {}", to_read, remaining);
                         }
                         debug!("Finished reading file data, total: {} bytes", offset);
 
