@@ -49,9 +49,9 @@ run_size() {
     for iter in $(seq 1 $ITERS); do
         result=$(bash "$SFTP_DIR/scripts/run-benchmark.sh" "$size" "${config_label}" 2>&1)
 
-        upload=$(echo "$result"   | grep "^Upload:"    | grep -oP '[0-9]+\.[0-9]+(?= MB/s)')
-        download=$(echo "$result" | grep "^Download:"  | grep -oP '[0-9]+\.[0-9]+(?= MB/s)')
-        rt=$(echo "$result"       | grep "^Roundtrip:" | grep -oP '[0-9]+\.[0-9]+(?= MB/s)')
+        upload=$(echo "$result"   | grep -m1 "^Upload:"    | grep -oP '[0-9]+\.[0-9]+(?= MB/s)')
+        download=$(echo "$result" | grep -m1 "^Download:"  | grep -oP '[0-9]+\.[0-9]+(?= MB/s)')
+        rt=$(echo "$result"       | grep -m1 "^Roundtrip:" | grep -oP '[0-9]+\.[0-9]+(?= MB/s)')
 
         echo "$iter,$upload,$download,$rt" >> "$outfile"
 
@@ -60,26 +60,23 @@ run_size() {
         fi
     done
 
-    python3 - "$outfile" "$config_label" "$size" <<'PY'
-import sys, statistics
-
-path, label, size = sys.argv[1], sys.argv[2], sys.argv[3]
-rows = [line.strip().split(",") for line in open(path) if line.strip()]
-ups   = [float(r[1]) for r in rows if len(r)==4]
-downs = [float(r[2]) for r in rows if len(r)==4]
-rts   = [float(r[3]) for r in rows if len(r)==4]
-
-def fmt(name, vals):
-    m = statistics.mean(vals)
-    s = statistics.stdev(vals) if len(vals)>1 else 0
-    cv = s/m*100 if m else 0
-    print(f"  {name:12s}  mean={m:7.2f}  stdev={s:6.2f}  cv={cv:4.1f}%  min={min(vals):7.2f}  max={max(vals):7.2f}  MB/s")
-
-print(f"\n=== {label} | {size}MB | n={len(rts)} ===")
-fmt("upload",    ups)
-fmt("download",  downs)
-fmt("roundtrip", rts)
-PY
+    echo ""
+    echo "=== ${config_label} | ${size}MB ==="
+    awk -F, 'NF==4 {
+        up+=$2; down+=$3; rt+=$4;
+        up2+=$2*$2; down2+=$3*$3; rt2+=$4*$4;
+        if(NR==1||$2<umin) umin=$2; if($2>umax) umax=$2;
+        if(NR==1||$3<dmin) dmin=$3; if($3>dmax) dmax=$3;
+        if(NR==1||$4<rmin) rmin=$4; if($4>rmax) rmax=$4;
+        n++
+    } END {
+        um=up/n;   us=sqrt(up2/n   - um*um);
+        dm=down/n; ds=sqrt(down2/n - dm*dm);
+        rm=rt/n;   rs=sqrt(rt2/n   - rm*rm);
+        printf "  upload     mean=%7.2f  stdev=%6.2f  cv=%4.1f%%  min=%7.2f  max=%7.2f  MB/s\n", um, us, us/um*100, umin, umax;
+        printf "  download   mean=%7.2f  stdev=%6.2f  cv=%4.1f%%  min=%7.2f  max=%7.2f  MB/s\n", dm, ds, ds/dm*100, dmin, dmax;
+        printf "  roundtrip  mean=%7.2f  stdev=%6.2f  cv=%4.1f%%  min=%7.2f  max=%7.2f  MB/s\n", rm, rs, rs/rm*100, rmin, rmax;
+    }' "$outfile"
 }
 
 # ── Configs ───────────────────────────────────────────────────────────────────
@@ -115,37 +112,18 @@ done
 # ── Final summary table ───────────────────────────────────────────────────────
 echo ""
 echo "=== FINAL SUMMARY ==="
-python3 - "$RESULTS_DIR" <<'PY'
-import sys, os, statistics
-
-results_dir = sys.argv[1]
-
-configs = [
-    "1_russh-main_sftp-master",
-    "2_russh-main_sftp-deserialize",
-    "3_russh-main_sftp-zerocopy",
-    "4_russh-write_sftp-master",
-    "5_russh-write_sftp-deserialize",
-    "6_russh-write_sftp-zerocopy",
-]
-sizes = [1, 256, 512, 1024]
-
-print(f"\n{'Config':<35}  {'Size':>6}  {'Upload':>9}  {'Download':>9}  {'Roundtrip':>9}")
-print("-" * 80)
-
-for config in configs:
-    for size in sizes:
-        path = os.path.join(results_dir, f"{config}_{size}mb.txt")
-        if not os.path.exists(path):
-            continue
-        rows = [line.strip().split(",") for line in open(path) if line.strip()]
-        ups   = [float(r[1]) for r in rows if len(r)==4]
-        downs = [float(r[2]) for r in rows if len(r)==4]
-        rts   = [float(r[3]) for r in rows if len(r)==4]
-        if not rts:
-            continue
-        print(f"{config:<35}  {size:>4}MB  {statistics.mean(ups):>8.1f}  {statistics.mean(downs):>8.1f}  {statistics.mean(rts):>8.1f}")
-PY
+printf "\n%-35s  %6s  %9s  %9s  %9s\n" "Config" "Size" "Upload" "Download" "Roundtrip"
+printf '%0.s-' {1..80}; echo
+for config in 1_russh-main_sftp-master 2_russh-main_sftp-deserialize 3_russh-main_sftp-zerocopy 4_russh-write_sftp-master 5_russh-write_sftp-deserialize 6_russh-write_sftp-zerocopy; do
+    for size in 1 256 512 1024; do
+        f="$RESULTS_DIR/${config}_${size}mb.txt"
+        [[ -f "$f" ]] || continue
+        awk -F, -v cfg="$config" -v sz="$size" '
+            NF==4 { up+=$2; down+=$3; rt+=$4; n++ }
+            END { if(n>0) printf "%-35s  %4dMB  %8.1f  %8.1f  %8.1f\n", cfg, sz, up/n, down/n, rt/n }
+        ' "$f"
+    done
+done
 
 # Restore to fully-optimized state
 echo ""
