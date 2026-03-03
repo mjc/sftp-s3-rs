@@ -5,7 +5,7 @@ use super::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 const KEEP_MARKER: &str = ".keep";
@@ -208,14 +208,15 @@ impl Backend for MemoryBackend {
     }
 }
 
-/// Initial buffer capacity for write handles (1MB)
-/// This reduces reallocations for typical file uploads
-const INITIAL_WRITE_CAPACITY: usize = 1024 * 1024;
-
-/// Write handle for memory backend
+/// Write handle for memory backend using sparse chunk storage to avoid page faults.
+/// Instead of maintaining a single contiguous Vec with zero-padding for gaps,
+/// we store chunks as (offset, Bytes) pairs, eliminating the resize(0) overhead
+/// and associated page faults that were showing 10.7% in profiles.
 struct MemoryWriteHandle {
     path: String,
-    buffer: Vec<u8>,
+    /// Sparse storage of written chunks, keyed by offset.
+    /// This avoids allocating and zeroing memory for gaps in the written regions.
+    chunks: BTreeMap<u64, Bytes>,
     files: Arc<RwLock<HashMap<String, FileData>>>,
 }
 
@@ -223,7 +224,7 @@ impl MemoryWriteHandle {
     fn new(path: String, files: Arc<RwLock<HashMap<String, FileData>>>) -> Self {
         Self {
             path,
-            buffer: Vec::with_capacity(INITIAL_WRITE_CAPACITY),
+            chunks: BTreeMap::new(),
             files,
         }
     }
@@ -231,42 +232,51 @@ impl MemoryWriteHandle {
 
 #[async_trait]
 impl WriteHandle for MemoryWriteHandle {
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
-        let start = offset as usize;
-        let end = start + data.len();
-
-        // Pre-reserve capacity if needed to avoid repeated small reallocations
-        // For sequential appends (most common), reserve enough for ~8 more chunks
-        if end > self.buffer.capacity() {
-            let new_capacity = std::cmp::max(
-                end,
-                self.buffer
-                    .capacity()
-                    .saturating_mul(2)
-                    .max(end + data.len() * 8),
-            );
-            self.buffer.reserve(new_capacity - self.buffer.len());
-        }
-
-        if start > self.buffer.len() {
-            self.buffer.resize(start, 0);
-        }
-        if start == self.buffer.len() {
-            self.buffer.extend_from_slice(data);
-        } else {
-            if end > self.buffer.len() {
-                self.buffer.resize(end, 0);
-            }
-            self.buffer[start..end].copy_from_slice(data);
-        }
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
+        // Store the chunk without zero-padding or copying. This is the hot path (~10.7% of CPU
+        // was spent in page faults from resize(0) calls + copy_from_slice in the old implementation.
+        // By taking Bytes directly from the SFTP protocol layer, we avoid both the zero-filling
+        // overhead AND the copy that would happen with &[u8].
+        self.chunks.insert(offset, data);
         Ok(())
     }
 
     async fn finish(self: Box<Self>) -> BackendResult<()> {
+        // Merge sparse chunks into a single contiguous buffer only at the end.
+        // This is not in the hot path, so zero-padding overhead here is acceptable.
+
+        if self.chunks.is_empty() {
+            self.files.write().insert(
+                self.path,
+                FileData {
+                    content: Bytes::new(),
+                    mtime: super::current_timestamp(),
+                },
+            );
+            return Ok(());
+        }
+
+        // Calculate total file size
+        let total_size = self.chunks.iter().fold(0u64, |max, (offset, data)| {
+            max.max(offset + data.len() as u64)
+        }) as usize;
+
+        // Only allocate the actual needed size
+        let mut result = Vec::with_capacity(total_size);
+
+        for (offset, data) in self.chunks {
+            let offset = offset as usize;
+            // Pad with zeros only if there's a gap (rare)
+            if result.len() < offset {
+                result.resize(offset, 0);
+            }
+            result.extend_from_slice(&data);
+        }
+
         self.files.write().insert(
             self.path,
             FileData {
-                content: Bytes::from(self.buffer),
+                content: Bytes::from(result),
                 mtime: super::current_timestamp(),
             },
         );

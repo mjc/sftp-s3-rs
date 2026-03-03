@@ -251,8 +251,9 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
 
         let mut guard = write_handle_arc.lock().await;
         if let Some(ref mut write_handle) = *guard {
+            // Pass Bytes directly to avoid slice conversion and potential copy
             write_handle
-                .write_at(offset, &data)
+                .write_at(offset, data)
                 .await
                 .map_err(StatusCode::from)?;
         } else {

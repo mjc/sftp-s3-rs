@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
-# Benchmark SFTP transfer performance
-# Usage: ./scripts/benchmark-sftp.sh [size_mb]
+# Benchmark SFTP transfer performance using pre-built binary
+# Usage: ./scripts/run-benchmark.sh [size_mb] [label]
 
 set -e
 
-SIZE_MB=${1:-1024}  # Default 1GB
+SIZE_MB=${1:-256}
+LABEL=${2:-""}
 PORT=2223
 USER="benchmark"
 PASS="benchmark"
 TESTFILE="testfile_${SIZE_MB}mb.bin"
+BINARY="./target/release/sftp-s3"
 
-echo "=== SFTP Benchmark: ${SIZE_MB}MB file ==="
+if [[ -n "$LABEL" ]]; then
+    echo "=== SFTP Benchmark: ${SIZE_MB}MB file (${LABEL}) ==="
+else
+    echo "=== SFTP Benchmark: ${SIZE_MB}MB file ==="
+fi
 echo ""
 
 # Check if server is already running
-if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
+if lsof -i :$PORT >/dev/null 2>&1; then
     echo "Error: Port $PORT is already in use"
+    exit 1
+fi
+
+if [[ ! -f "$BINARY" ]]; then
+    echo "Error: Binary not found at $BINARY. Run 'cargo build --release' first."
     exit 1
 fi
 
@@ -26,22 +37,26 @@ dd if=/dev/urandom of="/tmp/$TESTFILE" bs=1M count=$SIZE_MB status=progress 2>&1
 # Start the memory server in background
 echo ""
 echo "Starting SFTP server on port $PORT..."
-cargo run --release --bin sftp-s3 -- --port $PORT --user "$USER:$PASS" --backend memory &
+"$BINARY" --port $PORT --user "$USER:$PASS" --backend memory &
 SERVER_PID=$!
 
-# Wait for server to start (may need time to compile on first run)
+# Wait for server to start
 echo "Waiting for server to start..."
-for i in {1..120}; do
-    if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
+for i in {1..30}; do
+    if nc -z localhost $PORT 2>/dev/null; then
         echo "Server is ready!"
         break
+    fi
+    if ! kill -0 $SERVER_PID 2>/dev/null; then
+        echo "Error: Server exited unexpectedly"
+        exit 1
     fi
     sleep 1
 done
 
-# Verify server is running
-if ! kill -0 $SERVER_PID 2>/dev/null; then
-    echo "Error: Server failed to start"
+if ! nc -z localhost $PORT 2>/dev/null; then
+    echo "Error: Server did not start in time"
+    kill $SERVER_PID 2>/dev/null || true
     exit 1
 fi
 

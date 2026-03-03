@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::backend::Backend;
+use bytes::Bytes;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -206,7 +207,7 @@ impl<B: Backend> ScpHandler<B> {
                             let n = to_read as usize;
 
                             handle
-                                .write_at(offset, &transfer_buf[..n])
+                                .write_at(offset, Bytes::copy_from_slice(&transfer_buf[..n]))
                                 .await
                                 .map_err(|e| ScpError::Backend(e.to_string()))?;
                             offset += n as u64;

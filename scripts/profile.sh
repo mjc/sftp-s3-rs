@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-# Trap Ctrl-C and continue with flamegraph generation
-trap 'echo ""; echo "Stopping perf record, generating flamegraph..."' INT
+ROUNDS=${1:-8}
+SIZE_MB=${2:-256}
+PORT=2223
 
 # Check deps
 if ! command -v inferno-collapse-perf &> /dev/null; then
@@ -17,28 +18,41 @@ fi
 # Fix perf permissions
 echo 0 | sudo tee /proc/sys/kernel/kptr_restrict > /dev/null
 echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid > /dev/null
+echo 8192 | sudo tee /proc/sys/kernel/perf_event_mlock_kb > /dev/null
 
 # Build with native CPU + frame pointers
 RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profile profiling
 
-# Record using frame pointers (not DWARF)
-# Disable set -e for perf since Ctrl-C causes non-zero exit
-set +e
-echo -ne "\033]0;sftp-s3 READY (profile CPU)\007"  # terminal title
-echo -ne "\033ksftp-s3 READY\033\\"                 # tmux window name
-perf record -g --call-graph fp -F 997 \
-  "$PROJECT_DIR/target/profiling/sftp-s3" --backend memory --port 2223 --root .
-set -e
+# Start server under perf record; output goes to perf.data in project root
+echo "Starting server under perf..."
+perf record -F 997 -m 4096 -g --call-graph fp -o perf.data \
+  "$PROJECT_DIR/target/profiling/sftp-s3" --backend memory --port $PORT --user "benchmark:benchmark" &
+PERF_PID=$!
+
+# Wait for server to be ready
+for i in $(seq 1 20); do
+    nc -z localhost $PORT 2>/dev/null && break
+    sleep 0.2
+done
+echo "Server ready. Running $ROUNDS benchmark rounds (${SIZE_MB} MB each)..."
+
+for i in $(seq 1 "$ROUNDS"); do
+    bash scripts/run-benchmark.sh "$SIZE_MB" "r$i" 2>&1 | grep Roundtrip
+done
 
 echo ""
-echo "Generating flamegraph from perf.data..."
+echo "Stopping perf..."
+kill -INT "$PERF_PID"
+wait "$PERF_PID" 2>/dev/null || true
 
-# Generate flamegraph
-if [ ! -f perf.data ]; then
-    echo "Error: perf.data not found"
-    exit 1
-fi
+echo "Generating flamegraph..."
+perf script -i perf.data 2>/dev/null | inferno-collapse-perf > perf-folded.txt
+inferno-flamegraph < perf-folded.txt > flamegraph.svg
 
-perf script 2>/dev/null | inferno-collapse-perf | inferno-flamegraph > flamegraph.svg
+echo ""
+echo "Top leaf functions:"
+awk '{n=split($0,a,";"); weight=$NF; leaf=a[n]; gsub(/ [0-9]+$/,"",leaf); counts[leaf]+=weight} END{for(f in counts) print counts[f], f}' \
+    perf-folded.txt | sort -rn | head -30
 
-echo "Done: flamegraph.svg"
+echo ""
+echo "Done: flamegraph.svg  perf-folded.txt"

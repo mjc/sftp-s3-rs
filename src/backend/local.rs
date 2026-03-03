@@ -272,12 +272,12 @@ struct LocalWriteHandle {
 
 #[async_trait]
 impl WriteHandle for LocalWriteHandle {
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
         let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(LocalBackend::map_io_error)?;
-        file.write_all(data)
+        file.write_all(&data)
             .await
             .map_err(LocalBackend::map_io_error)?;
         Ok(())

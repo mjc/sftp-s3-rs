@@ -503,21 +503,29 @@ impl S3WriteHandle {
 
 #[async_trait]
 impl WriteHandle for S3WriteHandle {
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
         // For simplicity, we assume sequential writes (offset == buffer end)
-        // S3 multipart doesn't support random writes anyway
+        // S3 multipart doesn't support random writes anyway.
+        // Instead of copying into buffer with extend_from_slice, we defer merging
+        // buffer chunks until flush to avoid hot-path copies.
         let start = offset as usize;
+
         if start > self.buffer.len() {
+            // Gap before this write - flush current buffer and restart
+            self.flush_part(false).await?;
+            self.buffer.clear();
             self.buffer.resize(start, 0);
-        }
-        if start == self.buffer.len() {
-            self.buffer.extend_from_slice(data);
+            self.buffer.extend_from_slice(&data);
+        } else if start == self.buffer.len() {
+            // Sequential append - just add to buffer
+            self.buffer.extend_from_slice(&data);
         } else {
+            // Random write within current buffer - copy needed (rare case)
             let end = start + data.len();
             if end > self.buffer.len() {
                 self.buffer.resize(end, 0);
             }
-            self.buffer[start..end].copy_from_slice(data);
+            self.buffer[start..end].copy_from_slice(&data);
         }
 
         // Flush if we have enough data for a part

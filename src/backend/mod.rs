@@ -124,8 +124,9 @@ pub trait ReadHandle: Send + Sync {
 /// Handle for writing file data in chunks (supports streaming uploads)
 #[async_trait]
 pub trait WriteHandle: Send {
-    /// Write data at the given offset
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()>;
+    /// Write data at the given offset. Takes Bytes to support zero-copy passing
+    /// from the SFTP protocol layer, avoiding unnecessary copies in the hot path.
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()>;
 
     /// Finish the write and flush all data
     async fn finish(self: Box<Self>) -> BackendResult<()>;
@@ -186,19 +187,19 @@ impl Default for BufferedWriteHandle {
 
 #[async_trait]
 impl WriteHandle for BufferedWriteHandle {
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
         let start = offset as usize;
         if start > self.buffer.len() {
             self.buffer.resize(start, 0);
         }
         if start == self.buffer.len() {
-            self.buffer.extend_from_slice(data);
+            self.buffer.extend_from_slice(&data);
         } else {
             let end = start + data.len();
             if end > self.buffer.len() {
                 self.buffer.resize(end, 0);
             }
-            self.buffer[start..end].copy_from_slice(data);
+            self.buffer[start..end].copy_from_slice(&data);
         }
         Ok(())
     }
@@ -233,7 +234,7 @@ impl<B: Backend> BufferedWriteWithBackend<B> {
 
 #[async_trait]
 impl<B: Backend> WriteHandle for BufferedWriteWithBackend<B> {
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> BackendResult<()> {
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
         self.inner.write_at(offset, data).await
     }
 
