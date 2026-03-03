@@ -30,12 +30,17 @@ if [[ ! -f "$BINARY" ]]; then
     exit 1
 fi
 
-# Create test data in RAM (use /dev/zero for instant creation, cache it)
-echo "Creating ${SIZE_MB}MB test file in RAM..."
-dd if=/dev/zero of="/dev/shm/$TESTFILE" bs=1M count=$SIZE_MB status=none 2>&1
-# Warm cache by reading it
-cat "/dev/shm/$TESTFILE" > /dev/null
-TESTFILE="/dev/shm/$TESTFILE"
+# Create test data on disk
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TESTFILE_PATH="$PROJECT_ROOT/$TESTFILE"
+if [[ ! -f "$TESTFILE_PATH" ]]; then
+    echo "Creating ${SIZE_MB}MB test file at $TESTFILE_PATH..."
+    dd if=/dev/zero of="$TESTFILE_PATH" bs=1M count=$SIZE_MB status=none 2>&1
+else
+    echo "Reusing existing test file $TESTFILE_PATH"
+fi
+TESTFILE="$TESTFILE_PATH"
 
 # Start the memory server in background
 echo ""
@@ -67,7 +72,7 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     kill $SERVER_PID 2>/dev/null || true
-    rm -f "/dev/shm/testfile_"* "/dev/shm/"*.downloaded
+    rm -f "$PROJECT_ROOT/"*.downloaded
 }
 trap cleanup EXIT
 
@@ -90,7 +95,7 @@ echo "=== Download Benchmark ==="
 REMOTE_FILE="${TESTFILE##*/}"  # Just the basename
 DOWNLOAD_START=$(date +%s.%N)
 sshpass -p "$PASS" sftp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $PORT "$USER@localhost" <<EOF
-get $REMOTE_FILE /dev/shm/${REMOTE_FILE}.downloaded
+get $REMOTE_FILE ${PROJECT_ROOT}/${REMOTE_FILE}.downloaded
 bye
 EOF
 DOWNLOAD_END=$(date +%s.%N)

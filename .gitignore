@@ -15,3 +15,5 @@ span-stats
 strace.log
 server.log
 benchmark_results/
+testfile_*.bin
+*.downloaded
