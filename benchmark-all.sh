@@ -74,11 +74,13 @@ for _cfg in "${_CONFIGS_BASE[@]}"; do
 done
 unset _CONFIGS_BASE _cfg _lbl _russh _sftp _feat
 
+# Iterations distributed across scenarios (total = iters / num_scenarios per scenario)
+# With 3 scenarios, each config gets iters/3 runs per scenario
 SIZES_ITERS=(
-    "1:200:2"
-    "32:50:3"
-    "256:20:5"
-    "1024:10:5"
+    "1:180:2"
+    "32:45:3"
+    "256:18:5"
+    "1024:9:5"
 )
 
 mkdir -p "$BINS_DIR"
