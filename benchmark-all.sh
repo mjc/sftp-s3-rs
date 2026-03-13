@@ -55,10 +55,10 @@ done
 unset _CONFIGS_BASE _cfg _lbl _russh _sftp _feat
 
 SIZES_ITERS=(
-    "1:200"
-    "32:50"
-    "256:20"
-    "1024:10"
+    "1:200:2"
+    "32:50:3"
+    "256:20:5"
+    "1024:10:5"
 )
 
 mkdir -p "$BINS_DIR"
@@ -97,7 +97,7 @@ _build_one() {
     echo "  $label (russh=$russh sftp=$sftp${features:+ features=$features})"
     (
         cd "$wt"
-        cargo update -p russh -p russh-sftp --quiet >>"$logfile" 2>&1 || true
+        cargo update --quiet >>"$logfile" 2>&1 || true
         unset NIX_ENFORCE_NO_NATIVE
         CARGO_TARGET_DIR="$tgt" RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache \
             cargo build --release ${features:+--features $features} -q >>"$logfile" 2>&1
@@ -188,12 +188,14 @@ echo "=== Benchmarks ==="
 
 for si in "${SIZES_ITERS[@]}"; do
     size=${si%%:*}
-    iters=${si##*:}
+    rest=${si#*:}
+    iters=${rest%%:*}
+    warmup=${rest##*:}
     testfile="$SFTP_DIR/testfile_${size}mb.bin"
     outjson="$RESULTS_DIR/${size}mb.json"
 
     echo ""
-    echo "--- ${size}MB × ${iters} runs ---"
+    echo "--- ${size}MB × ${iters} runs (${warmup} warmup) ---"
     start_servers || { echo "Skipping ${size}MB" >&2; continue; }
 
     cmd_names=()
@@ -214,7 +216,7 @@ for si in "${SIZES_ITERS[@]}"; do
     fi
 
     if ! hyperfine \
-        --warmup 3 \
+        --warmup "$warmup" \
         --runs "$iters" \
         --export-json "$outjson" \
         "${cmd_names[@]}" \
@@ -246,10 +248,10 @@ for config in "${CONFIGS[@]}"; do
     IFS='|' read -r label _ _ _ _ <<< "$config"
     printf "%-15s" "$label"
     for si in "${SIZES_ITERS[@]}"; do
-        size=${si%%:*}
-        outjson="$RESULTS_DIR/${size}mb.json"
+        size_str=${si%%:*}
+        outjson="$RESULTS_DIR/${size_str}mb.json"
         if [[ -f "$outjson" ]]; then
-            speed=$(jq -r --argjson mb "$((size * 2))" --arg lbl "$label" \
+            speed=$(jq -r --argjson mb "$((size_str * 2))" --arg lbl "$label" \
                 '.results[] | select(.command == $lbl) | $mb / .mean | . * 10 | round / 10' \
                 "$outjson" 2>/dev/null)
             printf "  %7s" "${speed:-n/a}"
