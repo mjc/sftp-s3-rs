@@ -535,7 +535,7 @@ mod tests {
         let mut handle = backend.open_write(temp_path).await.unwrap();
 
         // Write data
-        handle.write_at(0, &content).await.unwrap();
+        handle.write_at(0, content).await.unwrap();
 
         // Finish (commit)
         handle.finish().await.unwrap();

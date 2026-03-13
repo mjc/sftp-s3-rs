@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::backend::Backend;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

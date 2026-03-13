@@ -12,8 +12,8 @@ s3 = ["aws-sdk-s3", "aws-config"]
 
 [dependencies]
 # SSH/SFTP
-russh = { path = "/home/mjc/projects/russh/russh", default-features = false, features = ["aws-lc-rs", "flate2"] }
-russh-sftp = { path = "/home/mjc/projects/russh-sftp" }
+russh = { git = "https://github.com/mjc/russh.git", branch = "main", default-features = false, features = ["aws-lc-rs", "flate2"] }
+russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros"] }
@@ -41,8 +41,8 @@ tempfile = "3"
 proptest = "1.4"
 criterion = { version = "0.8", features = ["async_tokio"] }
 iai-callgrind = "0.16"
-russh = { path = "/home/mjc/projects/russh/russh", default-features = false, features = ["aws-lc-rs", "flate2"] }
-russh-sftp = { path = "/home/mjc/projects/russh-sftp" }
+russh = { git = "https://github.com/mjc/russh.git", branch = "main", default-features = false, features = ["aws-lc-rs", "flate2"] }
+russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 [profile.dev]
 split-debuginfo = "unpacked"
