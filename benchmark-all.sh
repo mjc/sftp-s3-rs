@@ -36,14 +36,17 @@ _CONFIGS_BASE=(
 )
 
 # label:size_mb combos to skip — format: "label:size"
-# main-master at 1024MB: mlock() exhaustion in russh main branch.
+# main-* branches at 256MB+: mlock() exhaustion in russh main branch.
 # CryptoVec is used for non-secret packet buffers (enc.write, PacketWriter) and mlock()s
-# all backing memory but never munlock()s on clear(). After the 256MB tier, accumulated
-# locked pages from prior connections exceed RLIMIT_MEMLOCK (8MB), causing
-# CryptoVec::alloc_zeroed() to panic and drop the connection.
-# write-path-refactor fixes this by using Vec<u8> for non-secret buffers.
+# all backing memory but never munlock()s on clear(). The 256MB tier alone (25 runs × 5
+# warmups) generates enough transfers to exceed RLIMIT_MEMLOCK (8MB), causing 17s±74s
+# variance and eventual timeouts. At 1024MB, servers crash on first warmup.
+# write-path-refactor and reduce-mlock-usage fix this.
 SKIP_AT=(
+    "main-master:256"
     "main-master:1024"
+    "main-deser:256"
+    "main-deser:1024"
 )
 
 # label|russh_branch|sftp_branch|port|extra_cargo_features
