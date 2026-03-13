@@ -14,10 +14,12 @@ mkdir -p "$RESULTS_DIR"
 exec > >(tee "$LOG") 2>&1
 echo "Logging to $LOG"
 
-# label|russh_branch|sftp_branch|port
+# label|russh_branch|sftp_branch|port|extra_cargo_features
 CONFIGS=(
-    "main|main|deserialize-bytes-optimization|2223"
-    "write-path|write-path-refactor|deserialize-bytes-optimization|2224"
+    "main-master|main|master|2223|sftp-master"
+    "main-deser|main|deserialize-bytes-optimization|2224|"
+    "write-master|write-path-refactor|master|2225|sftp-master"
+    "write-deser|write-path-refactor|deserialize-bytes-optimization|2226|"
 )
 
 SIZES_ITERS=(
@@ -46,16 +48,17 @@ done
 echo ""
 echo "=== Building ==="
 for config in "${CONFIGS[@]}"; do
-    IFS='|' read -r label russh sftp _port <<< "$config"
+    IFS='|' read -r label russh sftp _port features <<< "$config"
     bin="$BINS_DIR/sftp-s3-$label"
-    echo "  $label (russh=$russh sftp=$sftp)"
+    echo "  $label (russh=$russh sftp=$sftp${features:+ features=$features})"
     cd "$SFTP_DIR"
     sed -i "s|github\.com/mjc/russh\.git\", branch = \"[^\"]*\"|github.com/mjc/russh.git\", branch = \"$russh\"|g" Cargo.toml
     sed -i "s|github\.com/mjc/russh-sftp\.git\", branch = \"[^\"]*\"|github.com/mjc/russh-sftp.git\", branch = \"$sftp\"|g" Cargo.toml
     cargo update -p russh -p russh-sftp --quiet 2>/dev/null || true
     unset NIX_ENFORCE_NO_NATIVE
     cargo clean -q
-    RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache cargo build --release -q
+    CARGO_FEATURES="${features:+--features $features}"
+    RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache cargo build --release $CARGO_FEATURES -q
     cp target/release/sftp-s3 "$bin"
     echo "    -> $bin"
 done
@@ -63,17 +66,17 @@ echo "All builds done."
 
 start_servers() {
     for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r _label _russh _sftp port <<< "$config"
+        IFS='|' read -r _label _russh _sftp port _feat <<< "$config"
         fuser -k "$port/tcp" 2>/dev/null || true
     done
     sleep 0.3
     for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r label _russh _sftp port <<< "$config"
+        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
         "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory >/dev/null 2>&1 &
         echo $! > "/tmp/sftp-bench-$port.pid"
     done
     for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r label _russh _sftp port <<< "$config"
+        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
         for i in {1..50}; do
             nc -z localhost "$port" 2>/dev/null && break
             sleep 0.1
@@ -83,12 +86,12 @@ start_servers() {
             return 1
         fi
     done
-    echo "  Servers up on ports $(printf '%s ' "${CONFIGS[@]}" | tr '|' ' ' | awk '{print $4}' ORS=' ')"
+    echo "  Servers up: $(for c in "${CONFIGS[@]}"; do IFS='|' read -r lbl _ _ p _ <<< "$c"; echo -n "$lbl:$p "; done)"
 }
 
 stop_servers() {
     for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r _label _russh _sftp port <<< "$config"
+        IFS='|' read -r _label _russh _sftp port _feat <<< "$config"
         if [[ -f "/tmp/sftp-bench-$port.pid" ]]; then
             kill "$(cat "/tmp/sftp-bench-$port.pid")" 2>/dev/null || true
             rm -f "/tmp/sftp-bench-$port.pid"
@@ -114,7 +117,7 @@ for si in "${SIZES_ITERS[@]}"; do
     cmd_names=()
     cmds=()
     for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r label _russh _sftp port <<< "$config"
+        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
         cmd_names+=(--command-name "$label")
         cmds+=("bash $SFTP_DIR/run-one.sh $port $testfile")
     done
@@ -145,7 +148,7 @@ echo ""
 printf '%0.s─' {1..60}; echo
 
 for config in "${CONFIGS[@]}"; do
-    IFS='|' read -r label _ _ _ <<< "$config"
+    IFS='|' read -r label _ _ _ _ <<< "$config"
     printf "%-15s" "$label"
     for si in "${SIZES_ITERS[@]}"; do
         size=${si%%:*}

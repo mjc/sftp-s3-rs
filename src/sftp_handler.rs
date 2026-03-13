@@ -1,5 +1,56 @@
 use bytes::{Buf, Bytes};
 
+// russh-sftp master uses String handles and Vec<u8> data;
+// deserialize-bytes-optimization uses Bytes for both.
+#[cfg(feature = "sftp-master")]
+type SftpHandle = String;
+#[cfg(not(feature = "sftp-master"))]
+type SftpHandle = Bytes;
+
+#[cfg(feature = "sftp-master")]
+type SftpWriteData = Vec<u8>;
+#[cfg(not(feature = "sftp-master"))]
+type SftpWriteData = Bytes;
+
+fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
+    #[cfg(feature = "sftp-master")]
+    {
+        h.as_bytes()
+    }
+    #[cfg(not(feature = "sftp-master"))]
+    {
+        h.as_ref()
+    }
+}
+
+fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
+    #[cfg(feature = "sftp-master")]
+    {
+        Bytes::from(data)
+    }
+    #[cfg(not(feature = "sftp-master"))]
+    {
+        data
+    }
+}
+
+// The Data response struct also changed: master uses Vec<u8>, deser-opt uses Bytes.
+#[cfg(feature = "sftp-master")]
+type SftpResponseData = Vec<u8>;
+#[cfg(not(feature = "sftp-master"))]
+type SftpResponseData = Bytes;
+
+fn bytes_into_response_data(b: Bytes) -> SftpResponseData {
+    #[cfg(feature = "sftp-master")]
+    {
+        b.to_vec()
+    }
+    #[cfg(not(feature = "sftp-master"))]
+    {
+        b
+    }
+}
+
 use crate::backend::{normalize_path, Backend, BackendError, FileInfo};
 use crate::handle::{HandleInfo, HandleManager};
 use russh_sftp::protocol::{
@@ -96,17 +147,19 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(v)
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
-    async fn close(&mut self, id: u32, handle: Bytes) -> Result<Status, Self::Error> {
+    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle))))]
+    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self), fields(handle = %handle)))]
+    async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
+        let hb = handle_as_bytes(&handle);
         // If it's a write handle, finish it
-        if let Some(write_handle_arc) = self.handles.take_write_handle(&handle) {
+        if let Some(write_handle_arc) = self.handles.take_write_handle(hb) {
             let mut guard = write_handle_arc.lock().await;
             if let Some(write_handle) = guard.take() {
                 write_handle.finish().await.map_err(StatusCode::from)?;
             }
         }
 
-        self.handles.remove(&handle);
+        self.handles.remove(hb);
         Ok(ok_status(id))
     }
 
@@ -129,12 +182,11 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Handle { id, handle })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
-    async fn readdir(&mut self, id: u32, handle: Bytes) -> Result<Name, Self::Error> {
-        let (path, read_done) = self
-            .handles
-            .get_dir_handle(&handle)
-            .ok_or(StatusCode::Failure)?;
+    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle))))]
+    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self), fields(handle = %handle)))]
+    async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, Self::Error> {
+        let hb = handle_as_bytes(&handle);
+        let (path, read_done) = self.handles.get_dir_handle(hb).ok_or(StatusCode::Failure)?;
 
         if read_done {
             return Err(StatusCode::Eof);
@@ -147,7 +199,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             .map_err(StatusCode::from)?;
 
         // Mark as read
-        self.handles.mark_dir_read(&handle);
+        self.handles.mark_dir_read(hb);
 
         let files: Vec<File> = entries
             .into_iter()
@@ -209,17 +261,18 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Handle { id, handle })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
+    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle))))]
+    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self), fields(handle = %handle)))]
     async fn read(
         &mut self,
         id: u32,
-        handle: Bytes,
+        handle: SftpHandle,
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
         let (_path, read_handle, size) = self
             .handles
-            .get_read_handle(&handle)
+            .get_read_handle(handle_as_bytes(&handle))
             .ok_or(StatusCode::Failure)?;
 
         if offset >= size {
@@ -233,27 +286,30 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::Eof);
         }
 
-        Ok(Data { id, data })
+        Ok(Data {
+            id,
+            data: bytes_into_response_data(data),
+        })
     }
 
-    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len()))]
+    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len())))]
+    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self, data), fields(handle = %handle, len = data.len())))]
     async fn write(
         &mut self,
         id: u32,
-        handle: Bytes,
+        handle: SftpHandle,
         offset: u64,
-        data: Bytes,
+        data: SftpWriteData,
     ) -> Result<Status, Self::Error> {
         let (_path, write_handle_arc) = self
             .handles
-            .get_write_handle(&handle)
+            .get_write_handle(handle_as_bytes(&handle))
             .ok_or(StatusCode::Failure)?;
 
         let mut guard = write_handle_arc.lock().await;
         if let Some(ref mut write_handle) = *guard {
-            // Pass Bytes directly to avoid slice conversion and potential copy
             write_handle
-                .write_at(offset, data)
+                .write_at(offset, write_data_into_bytes(data))
                 .await
                 .map_err(StatusCode::from)?;
         } else {
@@ -282,10 +338,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         self.stat(id, path).await
     }
 
-    async fn fstat(&mut self, id: u32, handle: Bytes) -> Result<Attrs, Self::Error> {
+    async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, Self::Error> {
         let info = self
             .handles
-            .get_handle_info(&handle)
+            .get_handle_info(handle_as_bytes(&handle))
             .ok_or(StatusCode::Failure)?;
 
         let attrs = match info {
@@ -394,7 +450,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
     async fn fsetstat(
         &mut self,
         id: u32,
-        _handle: Bytes,
+        _handle: SftpHandle,
         _attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         // S3 doesn't support setting attributes, just acknowledge
@@ -512,6 +568,28 @@ mod tests {
         SftpHandler::new(Arc::new(MemoryBackend::new()))
     }
 
+    fn to_sftp_handle(s: String) -> SftpHandle {
+        #[cfg(feature = "sftp-master")]
+        {
+            s
+        }
+        #[cfg(not(feature = "sftp-master"))]
+        {
+            Bytes::from(s.into_bytes())
+        }
+    }
+
+    fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
+        #[cfg(feature = "sftp-master")]
+        {
+            v.into()
+        }
+        #[cfg(not(feature = "sftp-master"))]
+        {
+            Bytes::from(v.into())
+        }
+    }
+
     // Helper: init the SFTP session
     async fn init_handler(handler: &mut SftpHandler<MemoryBackend>) {
         handler.init(3, HashMap::new()).await.expect("init failed");
@@ -542,14 +620,9 @@ mod tests {
             .await
             .unwrap();
 
-        let handle_bytes = Bytes::from(write_handle.handle.clone().into_bytes());
+        let handle_bytes = to_sftp_handle(write_handle.handle.clone());
         handler
-            .write(
-                1,
-                handle_bytes.clone(),
-                0,
-                Bytes::from_static(b"hello world"),
-            )
+            .write(1, handle_bytes.clone(), 0, to_sftp_data(b"hello world"))
             .await
             .unwrap();
         handler.close(1, handle_bytes).await.unwrap();
@@ -565,7 +638,7 @@ mod tests {
             .await
             .unwrap();
 
-        let handle_bytes = Bytes::from(read_handle.handle.into_bytes());
+        let handle_bytes = to_sftp_handle(read_handle.handle);
         let data = handler.read(2, handle_bytes.clone(), 0, 64).await.unwrap();
         assert_eq!(data.data, Bytes::from_static(b"hello world"));
 
@@ -600,16 +673,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        let wh_bytes = to_sftp_handle(wh.handle);
         handler
-            .write(2, wh_bytes.clone(), 0, Bytes::from_static(b"data"))
+            .write(2, wh_bytes.clone(), 0, to_sftp_data(b"data"))
             .await
             .unwrap();
         handler.close(2, wh_bytes).await.unwrap();
 
         // Open dir and read entries
         let dir_handle = handler.opendir(3, "/mydir".to_string()).await.unwrap();
-        let dir_bytes = Bytes::from(dir_handle.handle.into_bytes());
+        let dir_bytes = to_sftp_handle(dir_handle.handle);
 
         let entries = handler.readdir(3, dir_bytes.clone()).await.unwrap();
         let names: Vec<&str> = entries.files.iter().map(|f| f.filename.as_str()).collect();
@@ -636,9 +709,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        let wh_bytes = to_sftp_handle(wh.handle);
         handler
-            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"x"))
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"x"))
             .await
             .unwrap();
         handler.close(1, wh_bytes).await.unwrap();
@@ -662,9 +735,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        let wh_bytes = to_sftp_handle(wh.handle);
         handler
-            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"content"))
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"content"))
             .await
             .unwrap();
         handler.close(1, wh_bytes).await.unwrap();
@@ -684,7 +757,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let rh_bytes = Bytes::from(rh.handle.into_bytes());
+        let rh_bytes = to_sftp_handle(rh.handle);
         let data = handler.read(3, rh_bytes.clone(), 0, 64).await.unwrap();
         assert_eq!(data.data, Bytes::from_static(b"content"));
         handler.close(3, rh_bytes).await.unwrap();
@@ -722,9 +795,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        let wh_bytes = to_sftp_handle(wh.handle);
         handler
-            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"data"))
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"data"))
             .await
             .unwrap();
         handler.close(1, wh_bytes).await.unwrap();
@@ -811,9 +884,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        let wh_bytes = to_sftp_handle(wh.handle);
         handler
-            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"12345"))
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"12345"))
             .await
             .unwrap();
         handler.close(1, wh_bytes).await.unwrap();
@@ -828,7 +901,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let rh_bytes = Bytes::from(rh.handle.clone().into_bytes());
+        let rh_bytes = to_sftp_handle(rh.handle.clone());
 
         let attrs = handler.fstat(2, rh_bytes.clone()).await.unwrap();
         assert_eq!(attrs.attrs.size, Some(5));
@@ -841,7 +914,7 @@ mod tests {
         let mut handler = make_handler();
 
         let dir_handle = handler.opendir(1, "/".to_string()).await.unwrap();
-        let dir_bytes = Bytes::from(dir_handle.handle.into_bytes());
+        let dir_bytes = to_sftp_handle(dir_handle.handle);
 
         // First call succeeds (may return empty list with just . and ..)
         let _ = handler.readdir(1, dir_bytes.clone()).await.unwrap();
@@ -865,16 +938,14 @@ mod tests {
                 let mut handler = make_handler();
 
                 let path = format!("/{}", filename);
-                let content_bytes = Bytes::from(content.clone());
-
                 // Write
                 let wh = handler
                     .open(1, path.clone(), OpenFlags::WRITE | OpenFlags::CREATE, FileAttributes::default())
                     .await
                     .unwrap();
-                let wh_bytes = Bytes::from(wh.handle.into_bytes());
+                let wh_bytes = to_sftp_handle(wh.handle);
                 if !content.is_empty() {
-                    handler.write(1, wh_bytes.clone(), 0, content_bytes).await.unwrap();
+                    handler.write(1, wh_bytes.clone(), 0, to_sftp_data(content.clone())).await.unwrap();
                 }
                 handler.close(1, wh_bytes).await.unwrap();
 
@@ -883,7 +954,7 @@ mod tests {
                     .open(2, path, OpenFlags::READ, FileAttributes::default())
                     .await
                     .unwrap();
-                let rh_bytes = Bytes::from(rh.handle.into_bytes());
+                let rh_bytes = to_sftp_handle(rh.handle);
                 let mut read_data = Vec::new();
                 let mut offset = 0u64;
                 loop {
@@ -919,7 +990,7 @@ mod tests {
 
                 // Open root dir and read
                 let dh = handler.opendir(2, "/".to_string()).await.unwrap();
-                let dh_bytes = Bytes::from(dh.handle.into_bytes());
+                let dh_bytes = to_sftp_handle(dh.handle);
                 let entries = handler.readdir(2, dh_bytes).await.unwrap();
                 let names: Vec<&str> = entries.files.iter().map(|f| f.filename.as_str()).collect();
 
@@ -943,9 +1014,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let wh_bytes = Bytes::from(wh.handle.into_bytes());
+        let wh_bytes = to_sftp_handle(wh.handle);
         handler
-            .write(1, wh_bytes.clone(), 0, Bytes::from_static(b"hello"))
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"hello"))
             .await
             .unwrap();
         handler.close(1, wh_bytes).await.unwrap();
@@ -960,7 +1031,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let rh_bytes = Bytes::from(rh.handle.into_bytes());
+        let rh_bytes = to_sftp_handle(rh.handle);
 
         let result = handler.read(2, rh_bytes.clone(), 100, 64).await;
         assert!(matches!(result, Err(StatusCode::Eof)));

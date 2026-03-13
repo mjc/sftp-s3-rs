@@ -9,6 +9,9 @@ repository = "https://github.com/elixir-ssh/sftp-s3-rs"
 [features]
 default = ["s3"]
 s3 = ["aws-sdk-s3", "aws-config"]
+# Compatibility with russh-sftp master (String handles, Vec<u8> data)
+# vs the default deserialize-bytes-optimization branch (Bytes handles, Bytes data)
+sftp-master = []
 
 [dependencies]
 # SSH/SFTP
