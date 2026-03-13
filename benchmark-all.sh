@@ -17,6 +17,23 @@ mkdir -p "$RESULTS_DIR"
 exec > >(tee "$LOG") 2>&1
 echo "Logging to $LOG"
 
+# Scenarios: (label_suffix|client_source|server_backend)
+# client_source: where client reads files from (disk directory or /dev/shm)
+# server_backend: memory or local
+SCENARIOS=(
+    "disk|$SFTP_DIR|memory"
+    "shm|/dev/shm|memory"
+    "disk-local|$SFTP_DIR|local"
+)
+# For now, test only disk+memory (current setup) to focus on russh differences
+# Uncomment to test all combinations
+#SCENARIOS=(
+#    "disk-mem|$SFTP_DIR|memory"
+#    "shm-mem|/dev/shm|memory"
+#    "disk-local|$SFTP_DIR|local"
+#    "shm-local|/dev/shm|local"
+#)
+
 pick_free_port() {
     local port
     while true; do
@@ -70,12 +87,25 @@ mkdir -p "$BINS_DIR"
 echo "=== Test files ==="
 for si in "${SIZES_ITERS[@]}"; do
     size=${si%%:*}
+
+    # Create in disk directory
     f="$SFTP_DIR/testfile_${size}mb.bin"
     if [[ ! -f "$f" ]]; then
-        echo "  Creating ${size}MB..."
+        echo "  Creating ${size}MB (disk)..."
         dd if=/dev/urandom of="$f" bs=1M count="$size" status=none
     else
-        echo "  ${size}MB exists"
+        echo "  ${size}MB (disk) exists"
+    fi
+
+    # Create in /dev/shm if available
+    if [[ -w /dev/shm ]]; then
+        f="/dev/shm/testfile_${size}mb.bin"
+        if [[ ! -f "$f" ]]; then
+            echo "  Creating ${size}MB (/dev/shm)..."
+            dd if=/dev/urandom of="$f" bs=1M count="$size" status=none
+        else
+            echo "  ${size}MB (/dev/shm) exists"
+        fi
     fi
 done
 
@@ -143,11 +173,19 @@ wait_for_port_release() {
 }
 
 start_servers() {
+    local backend=${1:-memory}
     stop_servers
     for config in "${CONFIGS[@]}"; do
         IFS='|' read -r label _russh _sftp port _feat <<< "$config"
-        "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory \
-            >"$RESULTS_DIR/server-$label.log" 2>&1 &
+        if [[ "$backend" == "local" ]]; then
+            local root="/tmp/sftp-bench-root-$label"
+            mkdir -p "$root"
+            "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend local --root "$root" \
+                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+        else
+            "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory \
+                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+        fi
         echo $! > "/tmp/sftp-bench-$port.pid"
     done
     for config in "${CONFIGS[@]}"; do
@@ -189,17 +227,23 @@ trap stop_servers EXIT INT TERM
 echo ""
 echo "=== Benchmarks ==="
 
+# Run benchmarks for each scenario
+for scenario in "${SCENARIOS[@]}"; do
+    IFS='|' read -r scenario_label client_source server_backend <<< "$scenario"
+    echo ""
+    echo "### Scenario: client=$scenario_label, backend=$server_backend ###"
+
 for si in "${SIZES_ITERS[@]}"; do
     size=${si%%:*}
     rest=${si#*:}
     iters=${rest%%:*}
     warmup=${rest##*:}
     testfile="$SFTP_DIR/testfile_${size}mb.bin"
-    outjson="$RESULTS_DIR/${size}mb.json"
+    outjson="$RESULTS_DIR/${size}mb-${scenario_label}.json"
 
     echo ""
     echo "--- ${size}MB × ${iters} runs (${warmup} warmup) ---"
-    start_servers || { echo "Skipping ${size}MB" >&2; continue; }
+    start_servers "$server_backend" || { echo "Skipping ${size}MB" >&2; continue; }
 
     cmd_names=()
     cmds=()
@@ -210,7 +254,7 @@ for si in "${SIZES_ITERS[@]}"; do
             continue
         fi
         cmd_names+=(--command-name "$label")
-        cmds+=("bash $SFTP_DIR/run-one.sh $port $testfile")
+        cmds+=("bash $SFTP_DIR/run-one.sh $port $testfile $client_source")
     done
 
     if [[ ${#cmds[@]} -eq 0 ]]; then
@@ -236,33 +280,39 @@ for si in "${SIZES_ITERS[@]}"; do
         '.results[] | "    \(.command): \($mb / .mean | . * 10 | round / 10) MB/s  (±\($mb * .stddev / (.mean * .mean) | . * 10 | round / 10))"' \
         "$outjson"
 done
+done  # End scenario loop
 
 echo ""
-echo "=== FINAL SUMMARY ==="
-printf "\n%-15s" "Config"
-for si in "${SIZES_ITERS[@]}"; do
-    size=${si%%:*}
-    printf "  %8s" "${size}MB"
-done
-echo ""
-printf '%0.s─' {1..60}; echo
-
-for config in "${CONFIGS[@]}"; do
-    IFS='|' read -r label _ _ _ _ <<< "$config"
-    printf "%-15s" "$label"
+echo "=== FINAL SUMMARY (by scenario) ==="
+for scenario in "${SCENARIOS[@]}"; do
+    IFS='|' read -r scenario_label _ _ <<< "$scenario"
+    echo ""
+    echo "Scenario: $scenario_label"
+    printf "%-15s" "Config"
     for si in "${SIZES_ITERS[@]}"; do
-        size_str=${si%%:*}
-        outjson="$RESULTS_DIR/${size_str}mb.json"
-        if [[ -f "$outjson" ]]; then
-            speed=$(jq -r --argjson mb "$((size_str * 2))" --arg lbl "$label" \
-                '.results[] | select(.command == $lbl) | $mb / .mean | . * 10 | round / 10' \
-                "$outjson" 2>/dev/null)
-            printf "  %7s" "${speed:-n/a}"
-        else
-            printf "  %7s" "n/a"
-        fi
+        size=${si%%:*}
+        printf "  %8s" "${size}MB"
     done
     echo ""
+    printf '%0.s─' {1..60}; echo
+
+    for config in "${CONFIGS[@]}"; do
+        IFS='|' read -r label _ _ _ _ <<< "$config"
+        printf "%-15s" "$label"
+        for si in "${SIZES_ITERS[@]}"; do
+            size_str=${si%%:*}
+            outjson="$RESULTS_DIR/${size_str}mb-${scenario_label}.json"
+            if [[ -f "$outjson" ]]; then
+                speed=$(jq -r --argjson mb "$((size_str * 2))" --arg lbl "$label" \
+                    '.results[] | select(.command == $lbl) | $mb / .mean | . * 10 | round / 10' \
+                    "$outjson" 2>/dev/null)
+                printf "  %7s" "${speed:-n/a}"
+            else
+                printf "  %7s" "n/a"
+            fi
+        done
+        echo ""
+    done
 done
 
 echo ""
