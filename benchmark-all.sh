@@ -8,6 +8,11 @@
 SFTP_DIR="/home/mjc/projects/sftp-s3-rs"
 RESULTS_DIR="$SFTP_DIR/benchmark_results"
 BINS_DIR="$SFTP_DIR/benchmark_bins"
+LOG="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
+
+mkdir -p "$RESULTS_DIR"
+exec > >(tee "$LOG") 2>&1
+echo "Logging to $LOG"
 
 # label|russh_branch|sftp_branch|port
 CONFIGS=(
@@ -22,7 +27,7 @@ SIZES_ITERS=(
     "1024:10"
 )
 
-mkdir -p "$RESULTS_DIR" "$BINS_DIR"
+mkdir -p "$BINS_DIR"
 
 # Pre-create test files from /dev/urandom (compresses poorly, reflecting real data)
 echo "=== Test files ==="
