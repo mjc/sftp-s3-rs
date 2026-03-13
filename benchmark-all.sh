@@ -5,22 +5,54 @@
 # then runs hyperfine with both commands per file size. Hyperfine interleaves runs
 # so CPU/memory/thermal conditions are equal for all configs.
 
+set -euo pipefail
+
 SFTP_DIR="/home/mjc/projects/sftp-s3-rs"
 RESULTS_DIR="$SFTP_DIR/benchmark_results"
 BINS_DIR="$SFTP_DIR/benchmark_bins"
 LOG="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
+SFTP_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compression=no)
 
 mkdir -p "$RESULTS_DIR"
 exec > >(tee "$LOG") 2>&1
 echo "Logging to $LOG"
 
-# label|russh_branch|sftp_branch|port|extra_cargo_features
-CONFIGS=(
-    "main-master|main|master|2223|sftp-master"
-    "main-deser|main|deserialize-bytes-optimization|2224|"
-    "write-master|write-path-refactor|master|2225|sftp-master"
-    "write-deser|write-path-refactor|deserialize-bytes-optimization|2226|"
+pick_free_port() {
+    local port
+    while true; do
+        port=$(( RANDOM % 16384 + 49152 ))
+        nc -z localhost "$port" 2>/dev/null || { echo "$port"; return; }
+    done
+}
+
+# label|russh_branch|sftp_branch|extra_cargo_features (ports assigned dynamically below)
+_CONFIGS_BASE=(
+    "main-master|main|master|sftp-master"
+    "main-deser|main|deserialize-bytes-optimization|"
+    "reduce-master|reduce-mlock-usage|master|sftp-master"
+    "reduce-deser|reduce-mlock-usage|deserialize-bytes-optimization|"
+    "write-master|write-path-refactor|master|sftp-master"
+    "write-deser|write-path-refactor|deserialize-bytes-optimization|"
 )
+
+# label:size_mb combos to skip — format: "label:size"
+# main-master at 1024MB: mlock() exhaustion in russh main branch.
+# CryptoVec is used for non-secret packet buffers (enc.write, PacketWriter) and mlock()s
+# all backing memory but never munlock()s on clear(). After the 256MB tier, accumulated
+# locked pages from prior connections exceed RLIMIT_MEMLOCK (8MB), causing
+# CryptoVec::alloc_zeroed() to panic and drop the connection.
+# write-path-refactor fixes this by using Vec<u8> for non-secret buffers.
+SKIP_AT=(
+    "main-master:1024"
+)
+
+# label|russh_branch|sftp_branch|port|extra_cargo_features
+CONFIGS=()
+for _cfg in "${_CONFIGS_BASE[@]}"; do
+    IFS='|' read -r _lbl _russh _sftp _feat <<< "$_cfg"
+    CONFIGS+=("$_lbl|$_russh|$_sftp|$(pick_free_port)|$_feat")
+done
+unset _CONFIGS_BASE _cfg _lbl _russh _sftp _feat
 
 SIZES_ITERS=(
     "1:200"
@@ -44,45 +76,91 @@ for si in "${SIZES_ITERS[@]}"; do
     fi
 done
 
-# Build all configs
+# Build all configs in parallel using git worktrees to avoid Cargo.toml patching races
 echo ""
-echo "=== Building ==="
+echo "=== Building (parallel) ==="
+
+_build_one() {
+    local label=$1 russh=$2 sftp=$3 features=$4
+    local wt="/tmp/bench-wt-$label"
+    local tgt="/tmp/bench-target-$label"
+    local bin="$BINS_DIR/sftp-s3-$label"
+    local logfile="$RESULTS_DIR/build-$label.log"
+
+    git -C "$SFTP_DIR" worktree remove --force "$wt" 2>/dev/null || true
+    rm -rf "$wt"
+    git -C "$SFTP_DIR" worktree add -q "$wt" HEAD
+
+    sed -i "s|github\.com/mjc/russh\.git\", branch = \"[^\"]*\"|github.com/mjc/russh.git\", branch = \"$russh\"|g" "$wt/Cargo.toml"
+    sed -i "s|github\.com/mjc/russh-sftp\.git\", branch = \"[^\"]*\"|github.com/mjc/russh-sftp.git\", branch = \"$sftp\"|g" "$wt/Cargo.toml"
+
+    echo "  $label (russh=$russh sftp=$sftp${features:+ features=$features})"
+    (
+        cd "$wt"
+        cargo update -p russh -p russh-sftp --quiet >>"$logfile" 2>&1 || true
+        unset NIX_ENFORCE_NO_NATIVE
+        CARGO_TARGET_DIR="$tgt" RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache \
+            cargo build --release ${features:+--features $features} -q >>"$logfile" 2>&1
+    )
+    cp "$tgt/release/sftp-s3" "$bin"
+    git -C "$SFTP_DIR" worktree remove --force "$wt" 2>/dev/null || true
+    echo "    -> $bin"
+}
+
+declare -a _build_pids=()
 for config in "${CONFIGS[@]}"; do
     IFS='|' read -r label russh sftp _port features <<< "$config"
-    bin="$BINS_DIR/sftp-s3-$label"
-    echo "  $label (russh=$russh sftp=$sftp${features:+ features=$features})"
-    cd "$SFTP_DIR"
-    sed -i "s|github\.com/mjc/russh\.git\", branch = \"[^\"]*\"|github.com/mjc/russh.git\", branch = \"$russh\"|g" Cargo.toml
-    sed -i "s|github\.com/mjc/russh-sftp\.git\", branch = \"[^\"]*\"|github.com/mjc/russh-sftp.git\", branch = \"$sftp\"|g" Cargo.toml
-    cargo update -p russh -p russh-sftp --quiet 2>/dev/null || true
-    unset NIX_ENFORCE_NO_NATIVE
-    cargo clean -q
-    CARGO_FEATURES="${features:+--features $features}"
-    RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache cargo build --release $CARGO_FEATURES -q
-    cp target/release/sftp-s3 "$bin"
-    echo "    -> $bin"
+    _build_one "$label" "$russh" "$sftp" "$features" &
+    _build_pids+=($!)
 done
+
+_build_ok=true
+for _pid in "${_build_pids[@]}"; do
+    wait "$_pid" || _build_ok=false
+done
+$_build_ok || { echo "ERROR: one or more builds failed; see $RESULTS_DIR/build-*.log" >&2; exit 1; }
 echo "All builds done."
 
-start_servers() {
-    for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r _label _russh _sftp port _feat <<< "$config"
-        fuser -k "$port/tcp" 2>/dev/null || true
+port_responding() {
+    local port=$1
+    nc -z localhost "$port" >/dev/null 2>&1
+}
+
+wait_for_port_release() {
+    local label=$1
+    local port=$2
+    for _ in {1..50}; do
+        if ! port_responding "$port"; then
+            return 0
+        fi
+        sleep 0.1
     done
-    sleep 0.3
+    echo "ERROR: port $port for $label is still busy after cleanup" >&2
+    return 1
+}
+
+start_servers() {
+    stop_servers
     for config in "${CONFIGS[@]}"; do
         IFS='|' read -r label _russh _sftp port _feat <<< "$config"
-        "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory >/dev/null 2>&1 &
+        "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory \
+            >"$RESULTS_DIR/server-$label.log" 2>&1 &
         echo $! > "/tmp/sftp-bench-$port.pid"
     done
     for config in "${CONFIGS[@]}"; do
         IFS='|' read -r label _russh _sftp port _feat <<< "$config"
         for i in {1..50}; do
-            nc -z localhost "$port" 2>/dev/null && break
+            if sshpass -p "benchmark" sftp -q "${SFTP_OPTS[@]}" -P "$port" "benchmark@localhost" <<< "bye" >/dev/null 2>&1; then
+                break
+            fi
+            if [[ -f "/tmp/sftp-bench-$port.pid" ]] && ! kill -0 "$(cat "/tmp/sftp-bench-$port.pid")" 2>/dev/null; then
+                echo "ERROR: server $label ($port) exited during startup; see $RESULTS_DIR/server-$label.log" >&2
+                return 1
+            fi
             sleep 0.1
         done
-        if ! nc -z localhost "$port" 2>/dev/null; then
-            echo "ERROR: server $label ($port) failed to start" >&2
+        if ! sshpass -p "benchmark" sftp -q "${SFTP_OPTS[@]}" -P "$port" "benchmark@localhost" <<< "bye" >/dev/null 2>&1; then
+            echo "ERROR: server $label ($port) failed to accept SFTP connections; see $RESULTS_DIR/server-$label.log" >&2
             return 1
         fi
     done
@@ -91,15 +169,19 @@ start_servers() {
 
 stop_servers() {
     for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r _label _russh _sftp port _feat <<< "$config"
+        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
         if [[ -f "/tmp/sftp-bench-$port.pid" ]]; then
-            kill "$(cat "/tmp/sftp-bench-$port.pid")" 2>/dev/null || true
+            pid=$(cat "/tmp/sftp-bench-$port.pid")
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
             rm -f "/tmp/sftp-bench-$port.pid"
         fi
         fuser -k "$port/tcp" 2>/dev/null || true
+        wait_for_port_release "$label" "$port" || return 1
     done
-    sleep 0.2
 }
+
+trap stop_servers EXIT INT TERM
 
 echo ""
 echo "=== Benchmarks ==="
@@ -118,16 +200,29 @@ for si in "${SIZES_ITERS[@]}"; do
     cmds=()
     for config in "${CONFIGS[@]}"; do
         IFS='|' read -r label _russh _sftp port _feat <<< "$config"
+        if [[ " ${SKIP_AT[*]} " == *" $label:$size "* ]]; then
+            echo "  SKIP $label at ${size}MB (see SKIP_AT)" >&2
+            continue
+        fi
         cmd_names+=(--command-name "$label")
         cmds+=("bash $SFTP_DIR/run-one.sh $port $testfile")
     done
 
-    hyperfine \
+    if [[ ${#cmds[@]} -eq 0 ]]; then
+        echo "Skipping ${size}MB (all configs filtered)" >&2
+        continue
+    fi
+
+    if ! hyperfine \
         --warmup 3 \
         --runs "$iters" \
         --export-json "$outjson" \
         "${cmd_names[@]}" \
-        "${cmds[@]}"
+        "${cmds[@]}"; then
+        echo "ERROR: benchmark failed for ${size}MB; rerun the printed command with --show-output if needed." >&2
+        stop_servers
+        continue
+    fi
 
     stop_servers
 
