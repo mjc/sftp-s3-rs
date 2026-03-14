@@ -19,17 +19,15 @@ echo "Logging to $LOG"
 
 # Scenarios: (label_suffix|client_source|server_backend)
 # client_source: where client reads files from (disk directory or /dev/shm)
-# server_backend: memory or local
+# server_backend: memory or local (local support WIP)
 SCENARIOS=(
     "disk|$SFTP_DIR|memory"
     "shm|/dev/shm|memory"
-    "disk-local|$SFTP_DIR|local"
 )
-# For now, test only disk+memory (current setup) to focus on russh differences
-# Uncomment to test all combinations
+# Uncomment to test all combinations (requires testing/debugging local backend)
 #SCENARIOS=(
-#    "disk-mem|$SFTP_DIR|memory"
-#    "shm-mem|/dev/shm|memory"
+#    "disk|$SFTP_DIR|memory"
+#    "shm|/dev/shm|memory"
 #    "disk-local|$SFTP_DIR|local"
 #    "shm-local|/dev/shm|local"
 #)
@@ -234,6 +232,10 @@ for scenario in "${SCENARIOS[@]}"; do
     IFS='|' read -r scenario_label client_source server_backend <<< "$scenario"
     echo ""
     echo "### Scenario: client=$scenario_label, backend=$server_backend ###"
+
+    # Ensure servers from previous scenario are stopped
+    stop_servers
+    sleep 0.5
 
 for si in "${SIZES_ITERS[@]}"; do
     size=${si%%:*}
