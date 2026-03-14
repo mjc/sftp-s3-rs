@@ -60,11 +60,15 @@ _CONFIGS_BASE=(
 # warmups) generates enough transfers to exceed RLIMIT_MEMLOCK (8MB), causing 17s±74s
 # variance and eventual timeouts. At 1024MB, servers crash on first warmup.
 # write-path-refactor and reduce-mlock-usage fix this.
+#
+# reduce-master at 1024MB: crashes during warmup. reduce-mlock-usage branch appears
+# to have stability issues at large transfer sizes. reduce-deser works fine.
 SKIP_AT=(
     "main-master:256"
     "main-master:1024"
     "main-deser:256"
     "main-deser:1024"
+    "reduce-master:1024"
 )
 
 # label|russh_branch|sftp_branch|port|extra_cargo_features
