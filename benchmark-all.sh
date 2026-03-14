@@ -77,12 +77,10 @@ SIZES_ITERS=(
 
 mkdir -p "$BINS_DIR"
 
-# Pre-create test files from /dev/urandom (compresses poorly, reflecting real data)
+# Pre-create test files on disk (reused across runs)
 echo "=== Test files ==="
 for si in "${SIZES_ITERS[@]}"; do
     size=${si%%:*}
-
-    # Create in disk directory
     f="$SFTP_DIR/testfile_${size}mb.bin"
     if [[ ! -f "$f" ]]; then
         echo "  Creating ${size}MB (disk)..."
@@ -90,18 +88,31 @@ for si in "${SIZES_ITERS[@]}"; do
     else
         echo "  ${size}MB (disk) exists"
     fi
-
-    # Create in /dev/shm if available
-    if [[ -w /dev/shm ]]; then
-        f="/dev/shm/testfile_${size}mb.bin"
-        if [[ ! -f "$f" ]]; then
-            echo "  Creating ${size}MB (/dev/shm)..."
-            dd if=/dev/urandom of="$f" bs=1M count="$size" status=none
-        else
-            echo "  ${size}MB (/dev/shm) exists"
-        fi
-    fi
 done
+
+create_shm_files() {
+    if [[ ! -w /dev/shm ]]; then
+        return 0
+    fi
+    echo "  Creating test files in /dev/shm..."
+    for si in "${SIZES_ITERS[@]}"; do
+        size=${si%%:*}
+        f="/dev/shm/testfile_${size}mb.bin"
+        dd if=/dev/urandom of="$f" bs=1M count="$size" status=none 2>/dev/null
+    done
+}
+
+cleanup_shm_files() {
+    if [[ ! -w /dev/shm ]]; then
+        return 0
+    fi
+    echo "  Cleaning up /dev/shm test files..."
+    for si in "${SIZES_ITERS[@]}"; do
+        size=${si%%:*}
+        f="/dev/shm/testfile_${size}mb.bin"
+        rm -f "$f"
+    done
+}
 
 # Build all configs in parallel using git worktrees to avoid Cargo.toml patching races
 echo ""
@@ -264,6 +275,11 @@ for scenario in "${SCENARIOS[@]}"; do
     echo ""
     echo "### Scenario: client=$scenario_label, backend=$server_backend ###"
 
+    # Create /dev/shm files if needed
+    if [[ "$scenario_label" == "shm"* ]]; then
+        create_shm_files
+    fi
+
 for config in "${CONFIGS[@]}"; do
     IFS='|' read -r label _russh _sftp port _feat <<< "$config"
 
@@ -299,6 +315,11 @@ for config in "${CONFIGS[@]}"; do
             "$outjson"
     done
 done
+
+    # Cleanup /dev/shm files after scenario
+    if [[ "$scenario_label" == "shm"* ]]; then
+        cleanup_shm_files
+    fi
 done  # End scenario loop
 
 echo ""
