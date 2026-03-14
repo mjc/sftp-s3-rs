@@ -16,6 +16,17 @@ SFTPOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compres
 FILENAME=$(basename "$TESTFILE")
 CLIENT_FILE="$CLIENT_SOURCE_DIR/$FILENAME"
 
-sshpass -p "$PASS" sftp $SFTPOPTS -P "$PORT" "$USER@localhost" 2>/dev/null <<< "put $CLIENT_FILE" || exit 1
-sshpass -p "$PASS" sftp $SFTPOPTS -P "$PORT" "$USER@localhost" 2>/dev/null <<< "get $FILENAME $DLFILE" || exit 1
+# Use 5 minute timeout for large transfers, set ConnectTimeout and batch mode
+timeout 300 sshpass -p "$PASS" sftp -o ConnectTimeout=5 -o BatchMode=no $SFTPOPTS -P "$PORT" "$USER@localhost" <<EOF
+put $CLIENT_FILE
+bye
+EOF
+[[ $? -eq 0 ]] || exit 1
+
+timeout 300 sshpass -p "$PASS" sftp -o ConnectTimeout=5 -o BatchMode=no $SFTPOPTS -P "$PORT" "$USER@localhost" <<EOF
+get $FILENAME $DLFILE
+bye
+EOF
+[[ $? -eq 0 ]] || exit 1
+
 rm -f "$DLFILE"

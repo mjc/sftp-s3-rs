@@ -301,6 +301,7 @@ for config in "${CONFIGS[@]}"; do
             --runs "$iters" \
             --export-json "$outjson" \
             --command-name "$label" \
+            --show-output \
             "bash $SFTP_DIR/run-one.sh $port $testfile $client_source"; then
             echo "ERROR: benchmark failed for $label at ${size}MB; see $RESULTS_DIR/server-$label.log" >&2
             stop_server "$label"
