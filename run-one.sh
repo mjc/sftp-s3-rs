@@ -16,17 +16,21 @@ SFTPOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compres
 FILENAME=$(basename "$TESTFILE")
 CLIENT_FILE="$CLIENT_SOURCE_DIR/$FILENAME"
 
-# Use 5 minute timeout for large transfers, set ConnectTimeout and batch mode
-timeout 300 sshpass -p "$PASS" sftp -o ConnectTimeout=5 -o BatchMode=no $SFTPOPTS -P "$PORT" "$USER@localhost" <<EOF
-put $CLIENT_FILE
-bye
-EOF
-[[ $? -eq 0 ]] || exit 1
+# Create batch files to avoid rekey issues with heredoc
+BATCH_UP="/tmp/sftp_batch_up_$$.txt"
+BATCH_DL="/tmp/sftp_batch_dl_$$.txt"
 
-timeout 300 sshpass -p "$PASS" sftp -o ConnectTimeout=5 -o BatchMode=no $SFTPOPTS -P "$PORT" "$USER@localhost" <<EOF
-get $FILENAME $DLFILE
-bye
-EOF
-[[ $? -eq 0 ]] || exit 1
+echo "put $CLIENT_FILE" > "$BATCH_UP"
+echo "quit" >> "$BATCH_UP"
 
-rm -f "$DLFILE"
+echo "get $FILENAME $DLFILE" > "$BATCH_DL"
+echo "quit" >> "$BATCH_DL"
+
+# Use 5 minute timeout for large transfers with -b batch mode
+timeout 300 sshpass -p "$PASS" sftp -b "$BATCH_UP" $SFTPOPTS -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+[[ $? -eq 0 ]] || { rm -f "$BATCH_UP" "$BATCH_DL"; exit 1; }
+
+timeout 300 sshpass -p "$PASS" sftp -b "$BATCH_DL" $SFTPOPTS -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+[[ $? -eq 0 ]] || { rm -f "$BATCH_UP" "$BATCH_DL"; exit 1; }
+
+rm -f "$DLFILE" "$BATCH_UP" "$BATCH_DL"

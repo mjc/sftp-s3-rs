@@ -67,7 +67,7 @@ done
 unset _CONFIGS_BASE _cfg _lbl _russh _sftp _feat
 
 # Iterations distributed across scenarios (total = iters / num_scenarios per scenario)
-# With 3 scenarios, each config gets iters/3 runs per scenario
+# With 2 scenarios, each config gets iters/2 runs per scenario
 SIZES_ITERS=(
     "1:180:2"
     "32:45:3"
@@ -301,7 +301,6 @@ for config in "${CONFIGS[@]}"; do
             --runs "$iters" \
             --export-json "$outjson" \
             --command-name "$label" \
-            --show-output \
             "bash $SFTP_DIR/run-one.sh $port $testfile $client_source"; then
             echo "ERROR: benchmark failed for $label at ${size}MB; see $RESULTS_DIR/server-$label.log" >&2
             stop_server "$label"
