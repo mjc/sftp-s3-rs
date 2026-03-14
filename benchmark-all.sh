@@ -4,6 +4,9 @@
 # Builds each config binary once, starts both servers simultaneously on different ports,
 # then runs hyperfine with both commands per file size. Hyperfine interleaves runs
 # so CPU/memory/thermal conditions are equal for all configs.
+#
+# To reduce variance from background processes (e.g., plex), run with taskset:
+#   taskset -c 0-3 ./benchmark-all.sh  # Pin benchmark to CPUs 0-3
 
 set -euo pipefail
 
