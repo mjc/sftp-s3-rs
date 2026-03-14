@@ -2078,7 +2078,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2693,6 +2693,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.0"
+source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3197,6 +3198,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.57.1"
+source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3255,6 +3257,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
+source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
 dependencies = [
  "libc",
  "log",
@@ -3266,6 +3269,7 @@ dependencies = [
 [[package]]
 name = "russh-sftp"
 version = "2.1.1"
+source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#80ad3f306dd3b3d9359ec3a366da34369a6ad97f"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3281,6 +3285,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
+source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
 dependencies = [
  "chrono",
  "tokio",
