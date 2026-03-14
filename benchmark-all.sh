@@ -53,23 +53,10 @@ _CONFIGS_BASE=(
     "write-deser|write-path-refactor|deserialize-bytes-optimization|"
 )
 
-# label:size_mb combos to skip — format: "label:size"
-# main-* branches at 256MB+: mlock() exhaustion in russh main branch.
-# CryptoVec is used for non-secret packet buffers (enc.write, PacketWriter) and mlock()s
-# all backing memory but never munlock()s on clear(). The 256MB tier alone (25 runs × 5
-# warmups) generates enough transfers to exceed RLIMIT_MEMLOCK (8MB), causing 17s±74s
-# variance and eventual timeouts. At 1024MB, servers crash on first warmup.
-# write-path-refactor and reduce-mlock-usage fix this.
-#
-# reduce-master at 1024MB: crashes during warmup. reduce-mlock-usage branch appears
-# to have stability issues at large transfer sizes. reduce-deser works fine.
-SKIP_AT=(
-    "main-master:256"
-    "main-master:1024"
-    "main-deser:256"
-    "main-deser:1024"
-    "reduce-master:1024"
-)
+# Skip list (usually empty now that we run one server at a time)
+# Previously needed to skip main-* at 256MB+ due to mlock exhaustion with 6 concurrent servers.
+# With sequential execution, mlock pressure per server is manageable.
+SKIP_AT=()
 
 # label|russh_branch|sftp_branch|port|extra_cargo_features
 CONFIGS=()
@@ -179,40 +166,77 @@ wait_for_port_release() {
     return 1
 }
 
-start_servers() {
-    local backend=${1:-memory}
-    stop_servers
-    for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
-        if [[ "$backend" == "local" ]]; then
-            local root="/tmp/sftp-bench-root-$label"
-            mkdir -p "$root"
-            "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend local --root "$root" \
-                >"$RESULTS_DIR/server-$label.log" 2>&1 &
-        else
-            "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory \
-                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+start_server() {
+    local label=$1 backend=${2:-memory}
+    stop_server "$label"
+
+    # Find config for this label
+    local config port russh sftp features
+    for c in "${CONFIGS[@]}"; do
+        IFS='|' read -r lbl russh sftp port features <<< "$c"
+        if [[ "$lbl" == "$label" ]]; then
+            config="$c"
+            break
         fi
-        echo $! > "/tmp/sftp-bench-$port.pid"
     done
-    for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
-        for i in {1..50}; do
-            if sshpass -p "benchmark" sftp -q "${SFTP_OPTS[@]}" -P "$port" "benchmark@localhost" <<< "bye" >/dev/null 2>&1; then
-                break
-            fi
-            if [[ -f "/tmp/sftp-bench-$port.pid" ]] && ! kill -0 "$(cat "/tmp/sftp-bench-$port.pid")" 2>/dev/null; then
-                echo "ERROR: server $label ($port) exited during startup; see $RESULTS_DIR/server-$label.log" >&2
-                return 1
-            fi
-            sleep 0.1
-        done
-        if ! sshpass -p "benchmark" sftp -q "${SFTP_OPTS[@]}" -P "$port" "benchmark@localhost" <<< "bye" >/dev/null 2>&1; then
-            echo "ERROR: server $label ($port) failed to accept SFTP connections; see $RESULTS_DIR/server-$label.log" >&2
+    [[ -z "$config" ]] && { echo "ERROR: config not found for $label" >&2; return 1; }
+    IFS='|' read -r label russh sftp port features <<< "$config"
+
+    if [[ "$backend" == "local" ]]; then
+        local root="/tmp/sftp-bench-root-$label"
+        mkdir -p "$root"
+        "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend local --root "$root" \
+            >"$RESULTS_DIR/server-$label.log" 2>&1 &
+    else
+        "$BINS_DIR/sftp-s3-$label" --port "$port" --user "benchmark:benchmark" --backend memory \
+            >"$RESULTS_DIR/server-$label.log" 2>&1 &
+    fi
+    echo $! > "/tmp/sftp-bench-$port.pid"
+
+    # Wait for server to be ready
+    for i in {1..50}; do
+        if sshpass -p "benchmark" sftp -q "${SFTP_OPTS[@]}" -P "$port" "benchmark@localhost" <<< "bye" >/dev/null 2>&1; then
+            echo "  Server $label up on port $port"
+            return 0
+        fi
+        if [[ -f "/tmp/sftp-bench-$port.pid" ]] && ! kill -0 "$(cat "/tmp/sftp-bench-$port.pid")" 2>/dev/null; then
+            echo "ERROR: server $label ($port) exited during startup; see $RESULTS_DIR/server-$label.log" >&2
             return 1
         fi
+        sleep 0.1
     done
-    echo "  Servers up: $(for c in "${CONFIGS[@]}"; do IFS='|' read -r lbl _ _ p _ <<< "$c"; echo -n "$lbl:$p "; done)"
+    echo "ERROR: server $label ($port) failed to accept SFTP connections; see $RESULTS_DIR/server-$label.log" >&2
+    return 1
+}
+
+stop_server() {
+    local label=$1
+    # Find port for this label
+    local port
+    for c in "${CONFIGS[@]}"; do
+        IFS='|' read -r lbl _ _ p _ <<< "$c"
+        if [[ "$lbl" == "$label" ]]; then
+            port=$p
+            break
+        fi
+    done
+    [[ -z "$port" ]] && return 0
+
+    if [[ -f "/tmp/sftp-bench-$port.pid" ]]; then
+        local pid=$(cat "/tmp/sftp-bench-$port.pid")
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -f "/tmp/sftp-bench-$port.pid"
+    fi
+    fuser -k "$port/tcp" 2>/dev/null || true
+    wait_for_port_release "$label" "$port" || return 1
+}
+
+stop_servers() {
+    for config in "${CONFIGS[@]}"; do
+        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
+        stop_server "$label"
+    done
 }
 
 stop_servers() {
@@ -234,62 +258,46 @@ trap stop_servers EXIT INT TERM
 echo ""
 echo "=== Benchmarks ==="
 
-# Run benchmarks for each scenario
+# Run benchmarks sequentially: one config at a time to avoid resource contention
 for scenario in "${SCENARIOS[@]}"; do
     IFS='|' read -r scenario_label client_source server_backend <<< "$scenario"
     echo ""
     echo "### Scenario: client=$scenario_label, backend=$server_backend ###"
 
-    # Ensure servers from previous scenario are stopped
-    stop_servers
-    sleep 0.5
+for config in "${CONFIGS[@]}"; do
+    IFS='|' read -r label _russh _sftp port _feat <<< "$config"
 
-for si in "${SIZES_ITERS[@]}"; do
-    size=${si%%:*}
-    rest=${si#*:}
-    iters=${rest%%:*}
-    warmup=${rest##*:}
-    testfile="$SFTP_DIR/testfile_${size}mb.bin"
-    outjson="$RESULTS_DIR/${size}mb-${scenario_label}.json"
+    for si in "${SIZES_ITERS[@]}"; do
+        size=${si%%:*}
+        rest=${si#*:}
+        iters=${rest%%:*}
+        warmup=${rest##*:}
+        testfile="$SFTP_DIR/testfile_${size}mb.bin"
+        outjson="$RESULTS_DIR/${size}mb-${scenario_label}-${label}.json"
 
-    echo ""
-    echo "--- ${size}MB × ${iters} runs (${warmup} warmup) ---"
-    start_servers "$server_backend" || { echo "Skipping ${size}MB" >&2; continue; }
+        echo ""
+        echo "--- $label ${size}MB × ${iters} runs (${warmup} warmup) ---"
 
-    cmd_names=()
-    cmds=()
-    for config in "${CONFIGS[@]}"; do
-        IFS='|' read -r label _russh _sftp port _feat <<< "$config"
-        if [[ " ${SKIP_AT[*]} " == *" $label:$size "* ]]; then
-            echo "  SKIP $label at ${size}MB (see SKIP_AT)" >&2
+        start_server "$label" "$server_backend" || { echo "Skipping $label at ${size}MB" >&2; continue; }
+
+        if ! hyperfine \
+            --warmup "$warmup" \
+            --runs "$iters" \
+            --export-json "$outjson" \
+            --command-name "$label" \
+            "bash $SFTP_DIR/run-one.sh $port $testfile $client_source"; then
+            echo "ERROR: benchmark failed for $label at ${size}MB; see $RESULTS_DIR/server-$label.log" >&2
+            stop_server "$label"
             continue
         fi
-        cmd_names+=(--command-name "$label")
-        cmds+=("bash $SFTP_DIR/run-one.sh $port $testfile $client_source")
+
+        stop_server "$label"
+
+        echo "  Throughput (roundtrip = upload+download / wall time):"
+        jq -r --argjson mb "$((size * 2))" \
+            '.results[] | "    \(.command): \($mb / .mean | . * 10 | round / 10) MB/s  (±\($mb * .stddev / (.mean * .mean) | . * 10 | round / 10))"' \
+            "$outjson"
     done
-
-    if [[ ${#cmds[@]} -eq 0 ]]; then
-        echo "Skipping ${size}MB (all configs filtered)" >&2
-        continue
-    fi
-
-    if ! hyperfine \
-        --warmup "$warmup" \
-        --runs "$iters" \
-        --export-json "$outjson" \
-        "${cmd_names[@]}" \
-        "${cmds[@]}"; then
-        echo "ERROR: benchmark failed for ${size}MB; rerun the printed command with --show-output if needed." >&2
-        stop_servers
-        continue
-    fi
-
-    stop_servers
-
-    echo "  Throughput (roundtrip = upload+download / wall time):"
-    jq -r --argjson mb "$((size * 2))" \
-        '.results[] | "    \(.command): \($mb / .mean | . * 10 | round / 10) MB/s  (±\($mb * .stddev / (.mean * .mean) | . * 10 | round / 10))"' \
-        "$outjson"
 done
 done  # End scenario loop
 
@@ -312,10 +320,10 @@ for scenario in "${SCENARIOS[@]}"; do
         printf "%-15s" "$label"
         for si in "${SIZES_ITERS[@]}"; do
             size_str=${si%%:*}
-            outjson="$RESULTS_DIR/${size_str}mb-${scenario_label}.json"
+            outjson="$RESULTS_DIR/${size_str}mb-${scenario_label}-${label}.json"
             if [[ -f "$outjson" ]]; then
-                speed=$(jq -r --argjson mb "$((size_str * 2))" --arg lbl "$label" \
-                    '.results[] | select(.command == $lbl) | $mb / .mean | . * 10 | round / 10' \
+                speed=$(jq -r --argjson mb "$((size_str * 2))" \
+                    '$mb / .results[0].mean | . * 10 | round / 10' \
                     "$outjson" 2>/dev/null)
                 printf "  %7s" "${speed:-n/a}"
             else
