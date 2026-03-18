@@ -67,6 +67,7 @@
 
           # SFTP testing
           sshpass
+          lsof
           bc
           openssh  # sftp client
 
