@@ -19,7 +19,7 @@ russh = { git = "https://github.com/mjc/russh.git", branch = "reduce-mlock-usage
 russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros", "time"] }
 async-trait = "0.1"
 futures = "0.3"
 
@@ -84,5 +84,4 @@ harness = false
 [[bench]]
 name = "protocol_iai"
 harness = false
-
 

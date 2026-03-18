@@ -61,6 +61,52 @@ async fn connect_sftp(port: u16) -> SftpSession {
     SftpSession::new(channel.into_stream()).await.unwrap()
 }
 
+/// Start a server with a custom rekey write limit (bytes).
+async fn start_test_server_with_rekey_limit(rekey_write_limit: usize) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        Server::new(MemoryBackend::new())
+            .config(
+                ServerConfig::new()
+                    .with_generated_key()
+                    .with_rekey_write_limit(rekey_write_limit),
+            )
+            .with_users(vec![("test".to_string(), "pass".to_string())])
+            .run_on_socket(&listener)
+            .await
+            .unwrap();
+    });
+
+    port
+}
+
+/// Connect with a custom client config.
+/// Returns (handle, sftp_session) — keep handle alive for the duration of the session.
+async fn connect_sftp_with_config(
+    port: u16,
+    config: Arc<client::Config>,
+) -> (client::Handle<TestClient>, SftpSession) {
+    let mut session = client::connect(config, ("127.0.0.1", port), TestClient)
+        .await
+        .unwrap();
+
+    assert!(
+        session
+            .authenticate_password("test", "pass")
+            .await
+            .unwrap()
+            .success(),
+        "password auth should succeed"
+    );
+
+    let channel = session.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
+    (session, sftp)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -216,6 +262,217 @@ async fn test_large_file_roundtrip() {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await.unwrap();
     assert_eq!(buf, data);
+}
+
+/// Test that an SFTP transfer survives SSH key renegotiation when the CLIENT explicitly
+/// triggers rekey via `rekey_soon()` mid-transfer.
+///
+/// This uses a russh-to-russh connection. Both client and server handle rekey correctly
+/// in this pairing (russh-to-russh rekey works). For the OpenSSH client bug, see
+/// test_transfer_survives_rekey_openssh.
+#[tokio::test]
+async fn test_transfer_survives_rekey() {
+    const UPLOAD_SIZE: usize = 3 * 1024 * 1024; // 3 MB total
+    const CHUNK: usize = 512 * 1024; // write in 512KB chunks
+
+    let port = start_test_server_with_rekey_limit(1 << 30).await;
+
+    let (handle, sftp) = connect_sftp_with_config(port, Arc::new(client::Config::default())).await;
+
+    let data: Vec<u8> = (0u8..=255).cycle().take(UPLOAD_SIZE).collect();
+
+    let mut file = sftp
+        .open_with_flags(
+            "/rekey_test.bin",
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        )
+        .await
+        .unwrap();
+
+    // Write first chunk, request rekey, then write remaining chunks.
+    // rekey_soon() queues a KEXINIT to be sent at the next opportunity.
+    // The server must handle all subsequent packets with the new cipher.
+    let mut offset = 0;
+    let mut rekeyed = false;
+    while offset < data.len() {
+        let end = (offset + CHUNK).min(data.len());
+        file.write_all(&data[offset..end]).await.unwrap();
+        offset = end;
+
+        if !rekeyed && offset >= CHUNK {
+            handle.rekey_soon().await.unwrap();
+            rekeyed = true;
+            // yield to let the rekey message be processed before next write
+            tokio::task::yield_now().await;
+        }
+    }
+    file.shutdown().await.unwrap();
+
+    let mut file = sftp
+        .open_with_flags("/rekey_test.bin", OpenFlags::READ)
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).await.unwrap();
+    assert_eq!(buf.len(), data.len(), "read back wrong number of bytes");
+    assert_eq!(buf, data, "data corrupted across rekey boundary");
+
+    drop(handle); // keep alive through the whole test
+}
+
+/// Start a server that accepts a specific public key, return (port, tempdir_with_private_key).
+/// The private key is written in OpenSSH format so the system sftp client can use it.
+async fn start_test_server_with_pubkey(rekey_write_limit: usize) -> (u16, tempfile::TempDir) {
+    use russh::keys::ssh_key::rand_core::OsRng;
+    use russh::keys::{Algorithm, PrivateKey};
+    use std::io::Write as _;
+
+    // Generate a key pair
+    let privkey = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let pubkey = privkey.public_key().clone();
+
+    // Write private key to a tempdir (needs 0600 permissions for sftp to accept it)
+    let tmpdir = tempfile::tempdir().unwrap();
+    let key_path = tmpdir.path().join("id_test");
+    {
+        let pem = privkey.to_openssh(Default::default()).unwrap();
+        let mut f = std::fs::File::create(&key_path).unwrap();
+        f.write_all(pem.as_bytes()).unwrap();
+        // Set permissions to 0600 (required by OpenSSH)
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        Server::new(MemoryBackend::new())
+            .config(
+                ServerConfig::new()
+                    .with_generated_key()
+                    .with_rekey_write_limit(rekey_write_limit),
+            )
+            .with_pubkey_auth(move |_user, key| key == &pubkey)
+            .run_on_socket(&listener)
+            .await
+            .unwrap();
+    });
+
+    (port, tmpdir)
+}
+
+/// Test that an OpenSSH SFTP upload survives SSH rekey when `RekeyLimit=1M`
+/// forces rekey during a 3MB upload.
+///
+/// Uses pubkey auth so sftp -b (batch mode) can authenticate non-interactively.
+///
+/// This is the regression scenario: affected russh revisions fail after OpenSSH
+/// initiates rekey, typically with "Connection closed with error" or a timeout.
+/// The test name reflects the intended behavior, so broken revisions fail here.
+#[tokio::test]
+async fn test_transfer_survives_rekey_openssh() {
+    use std::io::Write as _;
+    use tempfile::NamedTempFile;
+    use tokio::process::Command;
+
+    // Skip if sftp is unavailable
+    if std::process::Command::new("sftp")
+        .arg("-V")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("sftp not found, skipping test_transfer_survives_rekey_openssh");
+        return;
+    }
+
+    const SERVER_REKEY_LIMIT: usize = 1 << 30;
+    const UPLOAD_SIZE: usize = 3 * 1024 * 1024; // 3 MB
+
+    let (port, _keydir) = start_test_server_with_pubkey(SERVER_REKEY_LIMIT).await;
+    let key_path = _keydir.path().join("id_test");
+    let key_path_str = key_path.to_str().unwrap().to_string();
+
+    // Write the file to upload
+    let mut upload_file = NamedTempFile::new().unwrap();
+    let data: Vec<u8> = (0u8..=255).cycle().take(UPLOAD_SIZE).collect();
+    upload_file.write_all(&data).unwrap();
+    upload_file.flush().unwrap();
+    let upload_path = upload_file.path().to_str().unwrap().to_string();
+
+    // Write the sftp batch script
+    let mut batch_file = NamedTempFile::new().unwrap();
+    writeln!(batch_file, "put {upload_path} /uploaded.bin").unwrap();
+    writeln!(batch_file, "bye").unwrap();
+    batch_file.flush().unwrap();
+    let batch_path = batch_file.path().to_str().unwrap().to_string();
+
+    // Give the server task a moment to start accepting
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Run OpenSSH sftp with RekeyLimit=1M using pubkey auth (works in batch mode)
+    let sftp_result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Command::new("sftp")
+            .env("SSH_AUTH_SOCK", "") // disable SSH agent
+            .args([
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                &format!("IdentityFile={key_path_str}"),
+                "-o",
+                "RekeyLimit=1M",
+                "-o",
+                "Ciphers=aes256-gcm@openssh.com",
+                "-o",
+                "LogLevel=DEBUG3",
+                "-P",
+                &port.to_string(),
+                "-b",
+                &batch_path,
+                "test@127.0.0.1",
+            ])
+            .output(),
+    )
+    .await;
+
+    let output = match sftp_result {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => panic!("sftp command failed to start: {e}"),
+        Err(_) => panic!(
+            "sftp timed out after 30s — server stuck after rekey \
+             (second post-rekey packet fails decryption)"
+        ),
+    };
+
+    assert!(
+        output.status.success(),
+        "sftp upload with RekeyLimit=1M failed (rekey bug):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Verify data landed correctly via russh client connecting to same server
+    let (handle, sftp) = connect_sftp_with_config(port, Arc::new(client::Config::default())).await;
+    let mut file = sftp
+        .open_with_flags("/uploaded.bin", OpenFlags::READ)
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).await.unwrap();
+    assert_eq!(buf.len(), data.len(), "uploaded file has wrong size");
+    assert_eq!(buf, data, "data corrupted across rekey boundary");
+    drop(handle);
 }
 
 #[tokio::test]

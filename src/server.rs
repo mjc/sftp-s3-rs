@@ -3,7 +3,7 @@ use crate::ssh_handler::{AuthConfig, SshServer};
 use russh::keys::ssh_key::rand_core::OsRng;
 use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
-use russh::{cipher, compression, Preferred};
+use russh::{cipher, compression, Limits, Preferred};
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
@@ -31,6 +31,8 @@ pub struct ServerConfig {
     pub window_size: u32,
     /// Maximum SSH packet size (default: 32KB, max: 256KB)
     pub maximum_packet_size: u32,
+    /// Rekey write limit in bytes (default: 1GB). Lower for testing.
+    pub rekey_write_limit: usize,
 }
 
 impl Default for ServerConfig {
@@ -44,6 +46,7 @@ impl Default for ServerConfig {
             nodelay: true, // Enable by default for better small file performance
             window_size: 2 * 1024 * 1024, // 2MB default
             maximum_packet_size: 256 * 1024, // 256KB (max allowed) for fewer round trips
+            rekey_write_limit: 1 << 30, // 1GB default (matches russh default)
         }
     }
 }
@@ -80,6 +83,12 @@ impl ServerConfig {
         let key =
             russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
         self.keys.push(key);
+        self
+    }
+
+    /// Set rekey write limit in bytes (default: 1GB). Useful for testing rekey behaviour.
+    pub fn with_rekey_write_limit(mut self, limit: usize) -> Self {
+        self.rekey_write_limit = limit;
         self
     }
 
@@ -333,6 +342,10 @@ impl<B: Backend> Server<B> {
             nodelay: self.config.nodelay,
             window_size: self.config.window_size,
             maximum_packet_size: self.config.maximum_packet_size,
+            limits: Limits {
+                rekey_write_limit: self.config.rekey_write_limit,
+                ..Limits::default()
+            },
             ..Default::default()
         });
 
