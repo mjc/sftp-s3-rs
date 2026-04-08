@@ -354,6 +354,7 @@ async fn start_test_server_with_pubkey(rekey_write_limit: usize) -> (u16, tempfi
                     .with_rekey_write_limit(rekey_write_limit),
             )
             .with_pubkey_auth(move |_user, key| key == &pubkey)
+            .with_users(vec![("test".to_string(), "pass".to_string())])
             .run_on_socket(&listener)
             .await
             .unwrap();

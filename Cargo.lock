@@ -2693,7 +2693,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.0"
-source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
+source = "git+https://github.com/mjc/russh.git?branch=fix-openssh-rekey#832f09b5cd4289a84578d4d34baf6bb7ec6af6f2"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3197,8 +3197,8 @@ dependencies = [
 
 [[package]]
 name = "russh"
-version = "0.57.1"
-source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
+version = "0.57.0"
+source = "git+https://github.com/mjc/russh.git?branch=fix-openssh-rekey#832f09b5cd4289a84578d4d34baf6bb7ec6af6f2"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3257,7 +3257,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
+source = "git+https://github.com/mjc/russh.git?branch=fix-openssh-rekey#832f09b5cd4289a84578d4d34baf6bb7ec6af6f2"
 dependencies = [
  "libc",
  "log",
@@ -3285,7 +3285,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=reduce-mlock-usage#d11dfe9bde653d28064398e7d238f91bc44f2feb"
+source = "git+https://github.com/mjc/russh.git?branch=fix-openssh-rekey#832f09b5cd4289a84578d4d34baf6bb7ec6af6f2"
 dependencies = [
  "chrono",
  "tokio",
