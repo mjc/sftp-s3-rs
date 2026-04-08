@@ -1,0 +1,100 @@
+wing: sftp_s3_rs
+rooms:
+- name: keys
+  description: SSH host keys and authorized_keys for server authentication
+  keywords:
+  - keys
+  - hostkey
+  - authorized_keys
+  - ssh_host
+
+- name: testing
+  description: Integration tests, unit tests, and test utilities
+  keywords:
+  - testing
+  - tests
+  - integration
+  - proptest
+  - assert
+
+- name: configuration
+  description: Build config, Nix flake, Cargo manifest, and project settings
+  keywords:
+  - configuration
+  - config
+  - Cargo
+  - flake
+  - nix
+  - devShell
+
+- name: benchmark_results
+  description: Benchmark output data, CSV results, and performance summaries
+  keywords:
+  - benchmark_results
+  - results
+  - criterion
+  - throughput
+
+- name: benches
+  description: Benchmark source code (criterion, iai) for protocol and transfer performance
+  keywords:
+  - benches
+  - benchmark
+  - criterion
+  - iai
+  - transfer
+
+- name: src
+  description: Main Rust source — SFTP handler, SSH handler, server, SCP, error types
+  keywords:
+  - src
+  - sftp_handler
+  - ssh_handler
+  - scp_handler
+  - server
+  - handle
+
+- name: backend
+  description: Storage backend implementations — S3, local filesystem, and in-memory
+  keywords:
+  - backend
+  - S3Backend
+  - MemoryBackend
+  - LocalBackend
+  - BackendError
+  - storage
+
+- name: examples
+  description: Usage examples demonstrating server setup and backend configuration
+  keywords:
+  - examples
+  - example
+
+- name: profiling
+  description: Flamegraphs, perf data, strace logs, and span statistics for performance analysis
+  keywords:
+  - flamegraph
+  - perf
+  - profiling
+  - strace
+  - span
+
+- name: scripts
+  description: Shell scripts for running benchmarks and server operations
+  keywords:
+  - scripts
+  - benchmark-all
+  - run-benchmark
+  - run-one
+
+- name: docker
+  description: Docker and container configuration for development and deployment
+  keywords:
+  - docker
+  - Dockerfile
+  - docker-compose
+  - container
+
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

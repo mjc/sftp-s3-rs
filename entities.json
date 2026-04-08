@@ -1,0 +1,4 @@
+{
+  "people": ["Mika Cohen"],
+  "projects": ["russh", "russh-sftp", "S3", "tokio", "Docker"]
+}
