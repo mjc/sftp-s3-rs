@@ -195,13 +195,15 @@ impl WriteHandle for BufferedWriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
         let start = usize::try_from(offset)
             .map_err(|_| BackendError::Other("write offset too large for this platform".into()))?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or_else(|| BackendError::Other("write range too large for this platform".into()))?;
         if start > self.buffer.len() {
             self.buffer.resize(start, 0);
         }
         if start == self.buffer.len() {
             self.buffer.extend_from_slice(&data);
         } else {
-            let end = start + data.len();
             if end > self.buffer.len() {
                 self.buffer.resize(end, 0);
             }
@@ -330,4 +332,73 @@ pub fn current_timestamp() -> u32 {
 
 pub(crate) fn unix_secs_to_u32(secs: u64) -> u32 {
     u32::try_from(secs).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_buffered_read_rejects_offset_too_large_for_platform() {
+        let handle = BufferedReadHandle::new(Bytes::from_static(b"data"));
+
+        let result = handle.read_at(u64::MAX, 1).await;
+
+        if usize::try_from(u64::MAX).is_ok() {
+            assert!(matches!(result, Ok(bytes) if bytes.is_empty()));
+        } else {
+            assert!(matches!(result, Err(BackendError::Other(msg)) if msg.contains("offset")));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_buffered_read_saturates_large_lengths() {
+        let handle = BufferedReadHandle::new(Bytes::from_static(b"abcdef"));
+
+        let bytes = handle.read_at(2, u32::MAX).await.unwrap();
+
+        assert_eq!(bytes, Bytes::from_static(b"cdef"));
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_rejects_offset_too_large_for_platform() {
+        let mut handle = BufferedWriteHandle::new();
+
+        let result = handle.write_at(u64::MAX, Bytes::from_static(b"x")).await;
+
+        assert!(
+            matches!(result, Err(BackendError::Other(msg)) if msg.contains("offset") || msg.contains("range"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_overwrites_existing_range() {
+        let mut handle = BufferedWriteHandle::new();
+
+        handle
+            .write_at(0, Bytes::from_static(b"abcdef"))
+            .await
+            .unwrap();
+        handle
+            .write_at(2, Bytes::from_static(b"XYZ"))
+            .await
+            .unwrap();
+
+        assert_eq!(handle.into_bytes(), Bytes::from_static(b"abXYZf"));
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_preserves_sparse_gaps() {
+        let mut handle = BufferedWriteHandle::new();
+
+        handle.write_at(3, Bytes::from_static(b"z")).await.unwrap();
+
+        assert_eq!(handle.into_bytes(), Bytes::from_static(b"\0\0\0z"));
+    }
+
+    #[test]
+    fn test_unix_secs_to_u32_saturates() {
+        assert_eq!(unix_secs_to_u32(42), 42);
+        assert_eq!(unix_secs_to_u32(u64::MAX), u32::MAX);
+    }
 }

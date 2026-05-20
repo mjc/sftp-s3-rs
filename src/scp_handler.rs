@@ -484,11 +484,18 @@ pub enum ScpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::MemoryBackend;
+    use crate::backend::{Backend, MemoryBackend};
+    use bytes::Bytes;
     use std::sync::Arc;
 
     fn make_handler() -> ScpHandler<MemoryBackend> {
         ScpHandler::new(Arc::new(MemoryBackend::new()))
+    }
+
+    fn make_handler_with_backend() -> (Arc<MemoryBackend>, ScpHandler<MemoryBackend>) {
+        let backend = Arc::new(MemoryBackend::new());
+        let handler = ScpHandler::new(Arc::clone(&backend));
+        (backend, handler)
     }
 
     // --- parse_command ---
@@ -541,6 +548,14 @@ mod tests {
         assert_eq!(path, "/");
     }
 
+    #[test]
+    fn test_parse_command_uses_last_non_flag_path() {
+        let (_, _, _, path) =
+            ScpHandler::<MemoryBackend>::parse_command("scp -p -t /first /second").unwrap();
+
+        assert_eq!(path, "/second");
+    }
+
     // --- parse_file_message ---
 
     #[test]
@@ -576,6 +591,125 @@ mod tests {
     fn test_parse_file_message_too_few_parts() {
         let result = ScpHandler::<MemoryBackend>::parse_file_message("0644 123");
         assert!(matches!(result, Err(ScpError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn test_receive_file_writes_to_current_directory() {
+        let (backend, mut handler) = make_handler_with_backend();
+        let (mut client, mut server) = tokio::io::duplex(128);
+
+        let server_task = tokio::spawn(async move {
+            let mut pending_mtime = None;
+            handler
+                .receive_file(
+                    &mut server,
+                    "0644 5 hello.txt",
+                    "/docs",
+                    None,
+                    &mut pending_mtime,
+                )
+                .await
+        });
+
+        let mut status = [0u8; 1];
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+        client.write_all(b"hello\0").await.unwrap();
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+
+        server_task.await.unwrap().unwrap();
+        assert_eq!(
+            backend.read_file("/docs/hello.txt").await.unwrap(),
+            Bytes::from_static(b"hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_file_uses_explicit_target() {
+        let (backend, mut handler) = make_handler_with_backend();
+        let (mut client, mut server) = tokio::io::duplex(128);
+
+        let server_task = tokio::spawn(async move {
+            let mut pending_mtime = None;
+            handler
+                .receive_file(
+                    &mut server,
+                    "0644 4 ignored-name.txt",
+                    "/docs",
+                    Some("/target.txt"),
+                    &mut pending_mtime,
+                )
+                .await
+        });
+
+        let mut status = [0u8; 1];
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+        client.write_all(b"data\0").await.unwrap();
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+
+        server_task.await.unwrap().unwrap();
+        assert_eq!(
+            backend.read_file("/target.txt").await.unwrap(),
+            Bytes::from_static(b"data")
+        );
+        assert!(matches!(
+            backend.read_file("/docs/ignored-name.txt").await,
+            Err(crate::backend::BackendError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_receive_file_rejects_bad_confirmation_byte() {
+        let (_backend, mut handler) = make_handler_with_backend();
+        let (mut client, mut server) = tokio::io::duplex(128);
+
+        let server_task = tokio::spawn(async move {
+            let mut pending_mtime = None;
+            handler
+                .receive_file(&mut server, "0644 3 bad.txt", "/", None, &mut pending_mtime)
+                .await
+        });
+
+        let mut status = [0u8; 1];
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+        client.write_all(b"badx").await.unwrap();
+
+        let result = server_task.await.unwrap();
+        assert!(matches!(result, Err(ScpError::Protocol(msg)) if msg.contains("null byte")));
+    }
+
+    #[tokio::test]
+    async fn test_receive_file_consumes_pending_mtime() {
+        let (_backend, mut handler) = make_handler_with_backend();
+        let (mut client, mut server) = tokio::io::duplex(128);
+
+        let server_task = tokio::spawn(async move {
+            let mut pending_mtime = Some(123);
+            let result = handler
+                .receive_file(
+                    &mut server,
+                    "0644 1 time.txt",
+                    "/",
+                    None,
+                    &mut pending_mtime,
+                )
+                .await;
+            result.map(|()| pending_mtime)
+        });
+
+        let mut status = [0u8; 1];
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+        client.write_all(b"t\0").await.unwrap();
+        client.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], SCP_OK);
+
+        let pending_mtime = server_task.await.unwrap().unwrap();
+        assert_eq!(pending_mtime, None);
     }
 
     // --- parse_dir_message ---
