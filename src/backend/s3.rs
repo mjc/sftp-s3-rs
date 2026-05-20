@@ -383,27 +383,11 @@ impl Backend for S3Backend {
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
         let key = self.build_key(path);
 
-        // Start multipart upload
-        let create_result = self
-            .client
-            .create_multipart_upload()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(Self::map_s3_error)?;
-
-        let upload_id = create_result
-            .upload_id
-            .ok_or_else(|| BackendError::Other("No upload ID returned".into()))?;
-
-        debug!(key = %key, upload_id = %upload_id, "Started multipart upload");
-
         Ok(Box::new(S3WriteHandle {
             client: self.client.clone(),
             bucket: self.config.bucket.clone(),
             key,
-            upload_id,
+            upload_id: None,
             buffer: Vec::new(),
             parts: Vec::new(),
             part_number: 1,
@@ -506,7 +490,7 @@ struct S3WriteHandle {
     client: Client,
     bucket: String,
     key: String,
-    upload_id: String,
+    upload_id: Option<String>,
     buffer: Vec<u8>,
     parts: Vec<CompletedPart>,
     part_number: i32,
@@ -514,6 +498,29 @@ struct S3WriteHandle {
 }
 
 impl S3WriteHandle {
+    async fn ensure_multipart_started(&mut self) -> BackendResult<String> {
+        if let Some(upload_id) = &self.upload_id {
+            return Ok(upload_id.clone());
+        }
+
+        let create_result = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .send()
+            .await
+            .map_err(S3Backend::map_s3_error)?;
+
+        let upload_id = create_result
+            .upload_id
+            .ok_or_else(|| BackendError::Other("No upload ID returned".into()))?;
+
+        debug!(key = %self.key, upload_id = %upload_id, "Started multipart upload");
+        self.upload_id = Some(upload_id.clone());
+        Ok(upload_id)
+    }
+
     /// Flush buffer to S3 as a part if large enough (or if force is true)
     async fn flush_part(&mut self, force: bool) -> BackendResult<()> {
         if self.buffer.is_empty() {
@@ -525,6 +532,7 @@ impl S3WriteHandle {
             return Ok(());
         }
 
+        let upload_id = self.ensure_multipart_started().await?;
         let data = std::mem::take(&mut self.buffer);
         debug!(
             key = %self.key,
@@ -538,7 +546,7 @@ impl S3WriteHandle {
             .upload_part()
             .bucket(&self.bucket)
             .key(&self.key)
-            .upload_id(&self.upload_id)
+            .upload_id(upload_id)
             .part_number(self.part_number)
             .body(ByteStream::from(data))
             .send()
@@ -579,26 +587,13 @@ impl WriteHandle for S3WriteHandle {
     }
 
     async fn finish(mut self: Box<Self>) -> BackendResult<()> {
-        // Upload any remaining data
-        self.flush_part(true).await?;
-
-        if self.parts.is_empty() {
-            // No parts uploaded - abort multipart and use simple upload
-            let _ = self
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&self.key)
-                .upload_id(&self.upload_id)
-                .send()
-                .await;
-
-            // Write empty file
+        if self.parts.is_empty() && self.buffer.len() < MIN_PART_SIZE {
+            let data = std::mem::take(&mut self.buffer);
             self.client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(&self.key)
-                .body(ByteStream::from_static(b""))
+                .body(ByteStream::from(data))
                 .send()
                 .await
                 .map_err(S3Backend::map_s3_error)?;
@@ -606,14 +601,20 @@ impl WriteHandle for S3WriteHandle {
             return Ok(());
         }
 
+        // Upload any remaining data
+        self.flush_part(true).await?;
+
         // Complete multipart upload
+        let upload_id = self
+            .upload_id
+            .ok_or_else(|| BackendError::Other("No upload ID for multipart completion".into()))?;
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(self.parts))
             .build();
 
         debug!(
             key = %self.key,
-            upload_id = %self.upload_id,
+            upload_id = %upload_id,
             "Completing multipart upload"
         );
 
@@ -621,7 +622,7 @@ impl WriteHandle for S3WriteHandle {
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(&self.key)
-            .upload_id(&self.upload_id)
+            .upload_id(upload_id)
             .multipart_upload(completed)
             .send()
             .await
@@ -631,9 +632,13 @@ impl WriteHandle for S3WriteHandle {
     }
 
     async fn abort(self: Box<Self>) -> BackendResult<()> {
+        let Some(upload_id) = self.upload_id else {
+            return Ok(());
+        };
+
         debug!(
             key = %self.key,
-            upload_id = %self.upload_id,
+            upload_id = %upload_id,
             "Aborting multipart upload"
         );
 
@@ -641,7 +646,7 @@ impl WriteHandle for S3WriteHandle {
             .abort_multipart_upload()
             .bucket(&self.bucket)
             .key(&self.key)
-            .upload_id(&self.upload_id)
+            .upload_id(upload_id)
             .send()
             .await
             .map_err(S3Backend::map_s3_error)?;
@@ -856,7 +861,7 @@ mod tests {
             client: dummy_client(),
             bucket: "bucket".to_string(),
             key: "key".to_string(),
-            upload_id: "upload".to_string(),
+            upload_id: None,
             buffer: Vec::new(),
             parts: Vec::new(),
             part_number: 1,
@@ -878,7 +883,7 @@ mod tests {
             client: dummy_client(),
             bucket: "bucket".to_string(),
             key: "key".to_string(),
-            upload_id: "upload".to_string(),
+            upload_id: None,
             buffer: Vec::new(),
             parts: Vec::new(),
             part_number: 1,
@@ -890,5 +895,14 @@ mod tests {
         assert!(matches!(result, Err(BackendError::Other(_))));
         assert!(handle.buffer.is_empty());
         assert_eq!(handle.next_offset, 4);
+    }
+
+    #[tokio::test]
+    async fn test_s3_open_write_is_lazy_until_data_flush() {
+        let backend = S3Backend::new(dummy_client(), S3Config::new("bucket"));
+
+        let handle = backend.open_write("small.txt").await.unwrap();
+
+        handle.abort().await.unwrap();
     }
 }

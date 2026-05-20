@@ -69,7 +69,8 @@ the default `s3` feature and supports:
 - delimiter-based directory listings
 - paginated listings
 - range reads
-- multipart streaming writes
+- lazy multipart streaming writes
+- direct `PutObject` writes for small files
 - `.keep` marker objects for empty directories
 
 ```rust
@@ -131,7 +132,8 @@ For large object stores, implement the streaming methods directly. For simpler
 stores, it is fine to buffer in memory and commit on `finish`.
 
 S3 multipart uploads are append-only, so `S3Backend` requires sequential write
-offsets. Backends that support random writes should make overwrite behavior
+offsets. It starts multipart uploads lazily and uses direct `PutObject` for
+small files. Backends that support random writes should make overwrite behavior
 explicit and test overlapping chunks.
 
 ## Testing Recommendations
