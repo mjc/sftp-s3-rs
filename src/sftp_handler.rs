@@ -779,6 +779,9 @@ mod tests {
 
         let result = handler.realpath(3, String::new()).await.unwrap();
         assert_eq!(result.files[0].filename, "/");
+
+        let result = handler.realpath(4, "/..".to_string()).await.unwrap();
+        assert_eq!(result.files[0].filename, "/");
     }
 
     #[tokio::test]

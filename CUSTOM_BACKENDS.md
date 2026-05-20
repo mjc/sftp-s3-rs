@@ -172,8 +172,10 @@ let key = normalize_path("/folder/file.txt");
 assert_eq!(key.as_ref(), "folder/file.txt");
 ```
 
-For filesystem-backed stores, reject traversal before touching disk. `LocalBackend`
-is the reference implementation for this pattern.
+For filesystem-backed stores, reject traversal before touching disk.
+`LocalBackend` is the reference implementation for this pattern. For key-like
+stores, decide whether `..` is a root path variant or a valid key segment and
+document that choice.
 
 ## Directory Listings
 
@@ -200,9 +202,10 @@ The SFTP handler maps these variants into client-visible SFTP status codes.
 ## Streaming Writes
 
 `WriteHandle::write_at` may receive offsets. Some clients write sequentially,
-but random or retry writes are possible. If your storage only supports append or
-multipart uploads, validate offsets and return a stable error instead of
-silently corrupting data.
+but random, overlapping, or retry writes are possible. If your storage supports
+random writes, make overlapping chunks overwrite the addressed byte range. If
+your storage only supports append or multipart uploads, validate offsets and
+return a stable error instead of silently corrupting data.
 
 Callers commit uploads with `finish`. Use `abort` to clean up temporary files,
 multipart uploads, or in-progress state.

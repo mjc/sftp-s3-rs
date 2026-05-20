@@ -114,7 +114,8 @@ Important conventions:
 - `file_info("/")` and equivalent root paths should return directory metadata.
 - `FileInfo::file`, `FileInfo::file_with_mtime`, `FileInfo::directory`, and
   `FileInfo::directory_with_mtime` build compatible metadata.
-- `normalize_path` removes leading and trailing slashes and treats `.` as root.
+- `normalize_path` removes leading and trailing slashes and treats `.`, `..`,
+  and empty paths as root.
 - Use stable `BackendError` variants so clients receive predictable SFTP status
   codes.
 
@@ -129,6 +130,10 @@ The trait includes both whole-file methods and streaming methods:
 For large object stores, implement the streaming methods directly. For simpler
 stores, it is fine to buffer in memory and commit on `finish`.
 
+S3 multipart uploads are append-only, so `S3Backend` requires sequential write
+offsets. Backends that support random writes should make overwrite behavior
+explicit and test overlapping chunks.
+
 ## Testing Recommendations
 
 At minimum, test:
@@ -141,6 +146,7 @@ At minimum, test:
 - directory creation and deletion
 - path normalization and traversal rejection for filesystem-backed stores
 - streaming read offsets and write finalization
+- non-sequential or overlapping write offsets when the backend supports them
 
 For S3-compatible backends, also test prefix handling, delimiter listings,
 pagination, `.keep` marker filtering, range reads, multipart completion, and

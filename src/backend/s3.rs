@@ -407,6 +407,7 @@ impl Backend for S3Backend {
             buffer: Vec::new(),
             parts: Vec::new(),
             part_number: 1,
+            next_offset: 0,
         }))
     }
 }
@@ -509,6 +510,7 @@ struct S3WriteHandle {
     buffer: Vec<u8>,
     parts: Vec<CompletedPart>,
     part_number: i32,
+    next_offset: u64,
 }
 
 impl S3WriteHandle {
@@ -559,31 +561,18 @@ impl S3WriteHandle {
 #[async_trait]
 impl WriteHandle for S3WriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        // For simplicity, we assume sequential writes (offset == buffer end)
-        // S3 multipart doesn't support random writes anyway.
-        // Instead of copying into buffer with extend_from_slice, we defer merging
-        // buffer chunks until flush to avoid hot-path copies.
-        let start = offset as usize;
-
-        if start > self.buffer.len() {
-            // Gap before this write - flush current buffer and restart
-            self.flush_part(false).await?;
-            self.buffer.clear();
-            self.buffer.resize(start, 0);
-            self.buffer.extend_from_slice(&data);
-        } else if start == self.buffer.len() {
-            // Sequential append - just add to buffer
-            self.buffer.extend_from_slice(&data);
-        } else {
-            // Random write within current buffer - copy needed (rare case)
-            let end = start + data.len();
-            if end > self.buffer.len() {
-                self.buffer.resize(end, 0);
-            }
-            self.buffer[start..end].copy_from_slice(&data);
+        // S3 multipart uploads are append-only. Track the global stream offset
+        // instead of the current in-memory buffer length, because the buffer is
+        // drained each time a part is uploaded.
+        if offset != self.next_offset {
+            return Err(BackendError::Other(format!(
+                "non-sequential S3 write offset: got {offset}, expected {}",
+                self.next_offset
+            )));
         }
 
-        // Flush if we have enough data for a part
+        self.next_offset += data.len() as u64;
+        self.buffer.extend_from_slice(&data);
         self.flush_part(false).await?;
 
         Ok(())
@@ -664,6 +653,15 @@ impl WriteHandle for S3WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dummy_client() -> Client {
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::for_tests())
+            .build();
+        Client::from_conf(config)
+    }
 
     // Helper: create an S3Backend-shaped config for testing pure functions.
     // Does NOT connect to any AWS endpoint.
@@ -850,5 +848,47 @@ mod tests {
     fn test_s3_config_with_prefix() {
         let config = S3Config::new("b").with_prefix("sftp/");
         assert_eq!(config.prefix, "sftp/");
+    }
+
+    #[tokio::test]
+    async fn test_s3_write_handle_tracks_global_offsets_after_buffer_flush() {
+        let mut handle = S3WriteHandle {
+            client: dummy_client(),
+            bucket: "bucket".to_string(),
+            key: "key".to_string(),
+            upload_id: "upload".to_string(),
+            buffer: Vec::new(),
+            parts: Vec::new(),
+            part_number: 1,
+            next_offset: MIN_PART_SIZE as u64,
+        };
+
+        handle
+            .write_at(MIN_PART_SIZE as u64, Bytes::from_static(b"tail"))
+            .await
+            .unwrap();
+
+        assert_eq!(handle.next_offset, MIN_PART_SIZE as u64 + 4);
+        assert_eq!(handle.buffer, b"tail");
+    }
+
+    #[tokio::test]
+    async fn test_s3_write_handle_rejects_non_sequential_offsets() {
+        let mut handle = S3WriteHandle {
+            client: dummy_client(),
+            bucket: "bucket".to_string(),
+            key: "key".to_string(),
+            upload_id: "upload".to_string(),
+            buffer: Vec::new(),
+            parts: Vec::new(),
+            part_number: 1,
+            next_offset: 4,
+        };
+
+        let result = handle.write_at(2, Bytes::from_static(b"nope")).await;
+
+        assert!(matches!(result, Err(BackendError::Other(_))));
+        assert!(handle.buffer.is_empty());
+        assert_eq!(handle.next_offset, 4);
     }
 }

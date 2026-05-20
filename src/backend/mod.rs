@@ -302,7 +302,7 @@ pub trait Backend: Send + Sync + 'static {
 /// Returns Cow::Borrowed when input is already normalized, avoiding allocation.
 pub fn normalize_path(path: &str) -> Cow<'_, str> {
     let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() || trimmed == "." {
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         Cow::Borrowed("")
     } else if trimmed.len() == path.len() {
         // No slashes were trimmed, return borrowed
