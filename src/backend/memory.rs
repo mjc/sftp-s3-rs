@@ -63,7 +63,7 @@ impl Backend for MemoryBackend {
         let prefix = if normalized.is_empty() {
             String::new()
         } else {
-            format!("{}/", normalized)
+            format!("{normalized}/")
         };
 
         let files = self.files.read();
@@ -99,7 +99,10 @@ impl Backend for MemoryBackend {
             let attrs = if is_dir {
                 FileInfo::directory_with_mtime(data.mtime)
             } else {
-                FileInfo::file_with_mtime(data.content.len() as u64, data.mtime)
+                FileInfo::file_with_mtime(
+                    u64::try_from(data.content.len()).unwrap_or(u64::MAX),
+                    data.mtime,
+                )
             };
 
             entries_by_name.entry(name.to_string()).or_insert(attrs);
@@ -126,13 +129,13 @@ impl Backend for MemoryBackend {
         // Check if it's a file
         if let Some(data) = files.get(normalized.as_ref()) {
             return Ok(FileInfo::file_with_mtime(
-                data.content.len() as u64,
+                u64::try_from(data.content.len()).unwrap_or(u64::MAX),
                 data.mtime,
             ));
         }
 
         // Check if it's a directory
-        let prefix = format!("{}/", normalized);
+        let prefix = format!("{normalized}/");
         if files.keys().any(|k| k.starts_with(&prefix)) {
             return Ok(FileInfo::directory());
         }
@@ -154,7 +157,7 @@ impl Backend for MemoryBackend {
 
     async fn del_dir(&self, path: &str) -> BackendResult<()> {
         let normalized = normalize_path(path);
-        let prefix = format!("{}/", normalized);
+        let prefix = format!("{normalized}/");
         let keep_marker_key = format!("{prefix}{KEEP_MARKER}");
 
         let mut files = self.files.write();
@@ -268,15 +271,19 @@ impl WriteHandle for MemoryWriteHandle {
         }
 
         // Calculate total file size
-        let total_size = self.chunks.iter().fold(0u64, |max, (offset, data)| {
-            max.max(offset + data.len() as u64)
-        }) as usize;
+        let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
+            max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
+        });
+        let total_size = usize::try_from(total_size_u64)
+            .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
 
         // Only allocate the actual needed size
         let mut result = Vec::with_capacity(total_size);
 
         for (offset, data) in self.chunks {
-            let offset = offset as usize;
+            let offset = usize::try_from(offset).map_err(|_| {
+                BackendError::Other("file offset too large for this platform".into())
+            })?;
             // Pad with zeros only if there's a gap (rare)
             if result.len() < offset {
                 result.resize(offset, 0);

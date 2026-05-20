@@ -1,6 +1,6 @@
 use super::{
-    normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo, ReadHandle,
-    WriteHandle,
+    normalize_path, unix_secs_to_u32, Backend, BackendError, BackendResult, DirEntry, FileInfo,
+    ReadHandle, WriteHandle,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -32,18 +32,23 @@ impl LocalBackend {
             return Ok(self.root.clone());
         }
 
-        let mut full_path = self.root.clone();
+        let mut relative_path = PathBuf::new();
         for component in Path::new(normalized.as_ref()).components() {
             match component {
-                Component::Normal(part) => full_path.push(part),
+                Component::Normal(part) => relative_path.push(part),
                 Component::CurDir => {}
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                Component::ParentDir => {
+                    if !relative_path.pop() {
+                        return Err(BackendError::PermissionDenied);
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) => {
                     return Err(BackendError::PermissionDenied);
                 }
             }
         }
 
-        Ok(full_path)
+        Ok(self.root.join(relative_path))
     }
 
     /// Convert std::io::Error to BackendError
@@ -64,15 +69,13 @@ impl LocalBackend {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as u32)
-            .unwrap_or(0);
+            .map_or(0, |d| unix_secs_to_u32(d.as_secs()));
 
         let atime = metadata
             .accessed()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as u32)
-            .unwrap_or(mtime);
+            .map_or(mtime, |d| unix_secs_to_u32(d.as_secs()));
 
         #[cfg(unix)]
         let (permissions, uid, gid) = {
@@ -253,7 +256,7 @@ impl ReadHandle for LocalReadHandle {
             .map_err(LocalBackend::map_io_error)?;
 
         buf.clear(); // Reset length to 0, keeps capacity
-        buf.reserve(len as usize); // Ensure capacity, reuses existing allocation
+        buf.reserve(usize::try_from(len).unwrap_or(usize::MAX)); // Ensure capacity, reuses existing allocation
 
         file.read_buf(buf)
             .await
@@ -409,6 +412,21 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(BackendError::PermissionDenied)));
+    }
+
+    #[tokio::test]
+    async fn test_allows_parent_directory_segments_within_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("safe").await.unwrap();
+        backend
+            .write_file("safe/../root.txt", Bytes::from_static(b"ok"))
+            .await
+            .unwrap();
+
+        let read = backend.read_file("root.txt").await.unwrap();
+        assert_eq!(read, Bytes::from_static(b"ok"));
     }
 
     #[tokio::test]

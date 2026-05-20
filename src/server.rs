@@ -5,11 +5,16 @@ use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
 use russh::{cipher, compression, Limits, Preferred};
 use std::borrow::Cow;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
+
+const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
 
 /// Server configuration
 #[derive(Clone)]
@@ -149,7 +154,6 @@ impl ServerConfig {
         }
 
         // Try loading from cwd
-        const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
         if let Ok(key) = russh::keys::load_secret_key(CWD_KEY_PATH, None) {
             self.keys.push(key);
             return Ok(self);
@@ -158,10 +162,6 @@ impl ServerConfig {
         // Generate and try to save to cwd
         let key =
             russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
-
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
 
         let key_str = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
@@ -241,8 +241,7 @@ impl<B: Backend> Server<B> {
             authorized
                 .iter()
                 .find(|(u, _)| u == user)
-                .map(|(_, keys)| keys.iter().any(|k| k == key))
-                .unwrap_or(false)
+                .is_some_and(|(_, keys)| keys.iter().any(|k| k == key))
         })
     }
 

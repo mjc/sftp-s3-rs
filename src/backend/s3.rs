@@ -1,6 +1,6 @@
 use super::{
-    current_timestamp, normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo,
-    ReadHandle, WriteHandle,
+    current_timestamp, normalize_path, unix_secs_to_u32, Backend, BackendError, BackendResult,
+    DirEntry, FileInfo, ReadHandle, WriteHandle,
 };
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
@@ -117,7 +117,11 @@ impl S3Backend {
 
     /// Parse AWS DateTime to Unix timestamp
     fn parse_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> u32 {
-        dt.secs() as u32
+        u64::try_from(dt.secs()).map_or(0, unix_secs_to_u32)
+    }
+
+    fn s3_size_to_u64(size: i64) -> u64 {
+        u64::try_from(size).unwrap_or(0)
     }
 }
 
@@ -162,9 +166,8 @@ impl Backend for S3Backend {
                     let mtime = obj
                         .last_modified
                         .as_ref()
-                        .map(Self::parse_datetime)
-                        .unwrap_or_else(current_timestamp);
-                    let size = obj.size.unwrap_or(0) as u64;
+                        .map_or_else(current_timestamp, Self::parse_datetime);
+                    let size = Self::s3_size_to_u64(obj.size.unwrap_or(0));
 
                     Self::insert_listing_file(&mut entries_by_name, &key, &prefix, size, mtime);
                 }
@@ -219,7 +222,7 @@ impl Backend for S3Backend {
         let key = self.build_key(normalized.as_ref());
 
         // Try to get the object directly (file case)
-        match self
+        let head_error = match self
             .client
             .head_object()
             .bucket(&self.config.bucket)
@@ -228,24 +231,21 @@ impl Backend for S3Backend {
             .await
         {
             Ok(result) => {
-                let size = result.content_length.unwrap_or(0) as u64;
+                let size = Self::s3_size_to_u64(result.content_length.unwrap_or(0));
                 let mtime = result
                     .last_modified
                     .as_ref()
-                    .map(Self::parse_datetime)
-                    .unwrap_or_else(current_timestamp);
+                    .map_or_else(current_timestamp, Self::parse_datetime);
                 return Ok(FileInfo::file_with_mtime(size, mtime));
             }
             Err(err) => {
                 let mapped = Self::map_s3_error(err);
-                if !matches!(mapped, BackendError::NotFound) {
-                    return Err(mapped);
-                }
+                Some(mapped)
             }
-        }
+        };
 
         // Check if it's a directory (has objects with this prefix)
-        let prefix = format!("{}/", key);
+        let prefix = format!("{key}/");
         let result = self
             .client
             .list_objects_v2()
@@ -257,16 +257,13 @@ impl Backend for S3Backend {
             .await
             .map_err(Self::map_s3_error)?;
 
-        let has_contents = result.contents.map(|c| !c.is_empty()).unwrap_or(false);
-        let has_prefixes = result
-            .common_prefixes
-            .map(|p| !p.is_empty())
-            .unwrap_or(false);
+        let has_contents = result.contents.is_some_and(|c| !c.is_empty());
+        let has_prefixes = result.common_prefixes.is_some_and(|p| !p.is_empty());
 
         if has_contents || has_prefixes {
             Ok(FileInfo::directory())
         } else {
-            Err(BackendError::NotFound)
+            Err(head_error.unwrap_or(BackendError::NotFound))
         }
     }
 
@@ -390,7 +387,7 @@ impl Backend for S3Backend {
             .await
             .map_err(Self::map_s3_error)?;
 
-        let size = head.content_length.unwrap_or(0) as u64;
+        let size = Self::s3_size_to_u64(head.content_length.unwrap_or(0));
 
         Ok(Box::new(S3ReadHandle {
             client: self.client.clone(),
@@ -424,6 +421,13 @@ impl S3Backend {
         size: u64,
         mtime: u32,
     ) {
+        if let Some(name) = Self::strip_listing_directory_marker(key, prefix) {
+            entries_by_name
+                .entry(name)
+                .or_insert_with(|| FileInfo::directory_with_mtime(mtime));
+            return;
+        }
+
         if let Some(name) = Self::strip_listing_prefix(key, prefix) {
             entries_by_name
                 .entry(name)
@@ -441,6 +445,22 @@ impl S3Backend {
             entries_by_name
                 .entry(name)
                 .or_insert_with(|| FileInfo::directory_with_mtime(DIRECTORY_LISTING_MTIME));
+        }
+    }
+
+    fn strip_listing_directory_marker(key: &str, prefix: &str) -> Option<String> {
+        let entry = if prefix.is_empty() {
+            key
+        } else {
+            key.strip_prefix(prefix)?
+        };
+
+        let trimmed = entry.trim_end_matches('/');
+        if entry == trimmed || trimmed.is_empty() || trimmed == KEEP_MARKER || trimmed.contains('/')
+        {
+            None
+        } else {
+            Some(trimmed.to_string())
         }
     }
 
@@ -474,8 +494,8 @@ impl ReadHandle for S3ReadHandle {
             return Ok(Bytes::new());
         }
 
-        let end = std::cmp::min(offset + len as u64, self.size) - 1;
-        let range = format!("bytes={}-{}", offset, end);
+        let end = std::cmp::min(offset + u64::from(len), self.size) - 1;
+        let range = format!("bytes={offset}-{end}");
 
         let result = self
             .client
@@ -787,6 +807,22 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_listing_directory_marker() {
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/empty-dir/", "tenant/"),
+            Some("empty-dir".to_string())
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/nested/dir/", "tenant/"),
+            None
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/file.txt", "tenant/"),
+            None
+        );
+    }
+
+    #[test]
     fn test_listing_collection_sorts_and_deduplicates_immediate_entries() {
         let mut entries = BTreeMap::new();
 
@@ -795,13 +831,18 @@ mod tests {
         S3Backend::insert_listing_file(&mut entries, "tenant/a.txt", "tenant/", 1, 100);
         S3Backend::insert_listing_file(&mut entries, "tenant/dir/file.txt", "tenant/", 4, 100);
         S3Backend::insert_listing_file(&mut entries, "tenant/.keep", "tenant/", 0, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/empty-dir/", "tenant/", 0, 200);
 
         let names: Vec<_> = entries.keys().map(String::as_str).collect();
-        assert_eq!(names, vec!["a.txt", "dir", "z.txt"]);
+        assert_eq!(names, vec!["a.txt", "dir", "empty-dir", "z.txt"]);
         let dir = entries.get("dir").unwrap();
         assert!(dir.is_dir);
         assert_eq!(dir.mtime, DIRECTORY_LISTING_MTIME);
         assert_eq!(dir.atime, DIRECTORY_LISTING_MTIME);
+
+        let empty_dir = entries.get("empty-dir").unwrap();
+        assert!(empty_dir.is_dir);
+        assert_eq!(empty_dir.mtime, 200);
 
         let file = entries.get("a.txt").unwrap();
         assert!(!file.is_dir);

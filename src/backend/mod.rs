@@ -149,11 +149,13 @@ impl BufferedReadHandle {
 #[async_trait]
 impl ReadHandle for BufferedReadHandle {
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
-        let start = offset as usize;
+        let start = usize::try_from(offset)
+            .map_err(|_| BackendError::Other("read offset too large for this platform".into()))?;
         if start >= self.content.len() {
             return Ok(Bytes::new());
         }
-        let end = std::cmp::min(start + len as usize, self.content.len());
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        let end = std::cmp::min(start.saturating_add(len), self.content.len());
         Ok(self.content.slice(start..end))
     }
 
@@ -188,7 +190,8 @@ impl Default for BufferedWriteHandle {
 #[async_trait]
 impl WriteHandle for BufferedWriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        let start = offset as usize;
+        let start = usize::try_from(offset)
+            .map_err(|_| BackendError::Other("write offset too large for this platform".into()))?;
         if start > self.buffer.len() {
             self.buffer.resize(start, 0);
         }
@@ -316,6 +319,10 @@ pub fn normalize_path(path: &str) -> Cow<'_, str> {
 pub fn current_timestamp() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
+        .map(|d| unix_secs_to_u32(d.as_secs()))
         .unwrap_or(0)
+}
+
+pub(crate) fn unix_secs_to_u32(secs: u64) -> u32 {
+    u32::try_from(secs).unwrap_or(u32::MAX)
 }

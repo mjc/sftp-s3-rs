@@ -82,7 +82,7 @@ impl<B: Backend> ScpHandler<B> {
         if path == "~" {
             Cow::Borrowed("/")
         } else if let Some(rest) = path.strip_prefix("~/") {
-            Cow::Owned(format!("/{}", rest))
+            Cow::Owned(format!("/{rest}"))
         } else {
             Cow::Borrowed(path)
         }
@@ -110,8 +110,7 @@ impl<B: Backend> ScpHandler<B> {
         let target_path = args
             .iter()
             .rfind(|a| !a.starts_with('-'))
-            .map(|p| Self::expand_tilde(p).into_owned())
-            .unwrap_or_else(|| "/".to_string());
+            .map_or_else(|| "/".to_string(), |p| Self::expand_tilde(p).into_owned());
 
         Ok((mode, recursive, preserve_times, target_path))
     }
@@ -145,10 +144,10 @@ impl<B: Backend> ScpHandler<B> {
                 "/".to_string()
             }
         };
-        let explicit_target = if !target_is_dir {
-            Some(target_path.to_string())
-        } else {
+        let explicit_target = if target_is_dir {
             None
+        } else {
+            Some(target_path.to_string())
         };
         let mut pending_mtime = None;
 
@@ -200,8 +199,12 @@ impl<B: Backend> ScpHandler<B> {
 
                         debug!("Starting to read {} bytes of file data", size);
                         while remaining > 0 {
-                            let to_read =
-                                std::cmp::min(remaining, transfer_buf.capacity() as u64) as usize;
+                            let capacity =
+                                u64::try_from(transfer_buf.capacity()).unwrap_or(u64::MAX);
+                            let to_read = usize::try_from(std::cmp::min(remaining, capacity))
+                                .map_err(|_| {
+                                    ScpError::Protocol("transfer chunk too large".into())
+                                })?;
                             transfer_buf.resize(to_read, 0);
                             stream.read_exact(&mut transfer_buf[..to_read]).await?;
 
@@ -212,8 +215,9 @@ impl<B: Backend> ScpHandler<B> {
                                 .write_at(offset, data)
                                 .await
                                 .map_err(|e| ScpError::Backend(e.to_string()))?;
-                            offset += to_read as u64;
-                            remaining -= to_read as u64;
+                            let bytes_read = u64::try_from(to_read).unwrap_or(u64::MAX);
+                            offset += bytes_read;
+                            remaining -= bytes_read;
                             debug!("Read {} bytes, remaining: {}", to_read, remaining);
                         }
                         debug!("Finished reading file data, total: {} bytes", offset);
@@ -265,7 +269,7 @@ impl<B: Backend> ScpHandler<B> {
                             .map_err(|e| ScpError::Backend(e.to_string()))?;
 
                         // Push to directory stack
-                        current_dir = format!("{}/", dir_path);
+                        current_dir = format!("{dir_path}/");
 
                         // Send OK
                         self.send_status(stream, SCP_OK, "").await?;

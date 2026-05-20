@@ -27,8 +27,8 @@ use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 // Unix file type bits for SFTP
-const S_IFREG: u32 = 0o100000; // Regular file
-const S_IFDIR: u32 = 0o040000; // Directory
+const S_IFREG: u32 = 0o100_000; // Regular file
+const S_IFDIR: u32 = 0o040_000; // Directory
 
 /// Convert FileInfo to russh_sftp FileAttributes
 fn to_file_attributes(info: &FileInfo) -> FileAttributes {
@@ -66,14 +66,13 @@ impl<B: Backend> SftpHandler<B> {
 impl From<BackendError> for StatusCode {
     fn from(err: BackendError) -> Self {
         match err {
-            BackendError::NotFound => StatusCode::NoSuchFile,
+            BackendError::NotFound | BackendError::NotADirectory => StatusCode::NoSuchFile,
             BackendError::PermissionDenied => StatusCode::PermissionDenied,
-            BackendError::AlreadyExists => StatusCode::Failure,
-            BackendError::NotADirectory => StatusCode::NoSuchFile,
-            BackendError::IsADirectory => StatusCode::Failure,
-            BackendError::DirectoryNotEmpty => StatusCode::Failure,
-            BackendError::Io(_) => StatusCode::Failure,
-            BackendError::Other(_) => StatusCode::Failure,
+            BackendError::AlreadyExists
+            | BackendError::IsADirectory
+            | BackendError::DirectoryNotEmpty
+            | BackendError::Io(_)
+            | BackendError::Other(_) => StatusCode::Failure,
         }
     }
 }
@@ -143,7 +142,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let handle = self.handles.create_dir_handle(normalized.into_owned());
+        let handle = self.handles.create_dir_handle(normalized.as_ref());
         Ok(Handle { id, handle })
     }
 
@@ -196,7 +195,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                 Ok(write_handle) => {
                     let h = self
                         .handles
-                        .create_write_handle(normalized.into_owned(), write_handle);
+                        .create_write_handle(normalized.as_ref(), write_handle);
                     debug!(id, path = %path, handle = %h, "Opened file for write");
                     h
                 }
@@ -211,7 +210,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                 Ok(read_handle) => {
                     let h = self
                         .handles
-                        .create_read_handle(normalized.into_owned(), read_handle);
+                        .create_read_handle(normalized.as_ref(), read_handle);
                     debug!(id, path = %path, handle = %h, "Opened file for read");
                     h
                 }
@@ -319,11 +318,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
             HandleInfo::Write { path } => {
                 // For write handles, we don't know the final size yet
-                self.backend
-                    .file_info(&path)
-                    .await
-                    .map(|i| to_file_attributes(&i))
-                    .unwrap_or_else(|_| to_file_attributes(&FileInfo::file(0)))
+                self.backend.file_info(&path).await.map_or_else(
+                    |_| to_file_attributes(&FileInfo::file(0)),
+                    |i| to_file_attributes(&i),
+                )
             }
         };
 
@@ -335,7 +333,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         let absolute = if normalized.is_empty() {
             "/".to_string()
         } else {
-            format!("/{}", normalized)
+            format!("/{normalized}")
         };
 
         Ok(Name {
