@@ -70,6 +70,7 @@
           lsof
           bc
           openssh  # sftp client
+          minio
 
           # Build optimization
           sccache

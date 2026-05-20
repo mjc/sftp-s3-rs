@@ -9,6 +9,7 @@ use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Display};
 use tracing::debug;
 
 /// Marker file for empty directories (matching Elixir implementation)
@@ -88,14 +89,29 @@ impl S3Backend {
     }
 
     /// Convert S3 error to BackendError
-    fn map_s3_error(err: impl std::fmt::Display) -> BackendError {
+    fn map_s3_error(err: impl Display + Debug) -> BackendError {
         let msg = err.to_string();
-        if msg.contains("NoSuchKey") || msg.contains("NotFound") || msg.contains("404") {
+        let debug_msg = format!("{err:?}");
+        let searchable = format!("{msg}\n{debug_msg}").to_ascii_lowercase();
+
+        if searchable.contains("nosuchkey")
+            || searchable.contains("notfound")
+            || searchable.contains("not found")
+            || searchable.contains("404")
+        {
             BackendError::NotFound
-        } else if msg.contains("AccessDenied") || msg.contains("403") {
+        } else if searchable.contains("accessdenied")
+            || searchable.contains("access denied")
+            || searchable.contains("forbidden")
+            || searchable.contains("403")
+        {
             BackendError::PermissionDenied
         } else {
-            BackendError::Other(msg)
+            BackendError::Other(if msg == "service error" {
+                debug_msg
+            } else {
+                msg
+            })
         }
     }
 

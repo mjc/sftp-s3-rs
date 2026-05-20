@@ -141,6 +141,21 @@ Connect with an SFTP client:
 sftp -P 2222 user@localhost
 ```
 
+## Testing
+
+Run the default suite through the Nix development shell:
+
+```bash
+nix develop -c cargo test --all-features
+```
+
+The MinIO-backed S3 end-to-end test is ignored by default because it starts a
+local MinIO process. `minio` is provided by the flake:
+
+```bash
+nix develop -c cargo test --all-features --test s3_minio_integration -- --ignored --nocapture
+```
+
 ## Docker Deployment
 
 ### Quick Start
