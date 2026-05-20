@@ -142,10 +142,6 @@ impl Backend for S3Backend {
                     let Some(key) = obj.key else {
                         continue;
                     };
-                    let Some(name) = Self::strip_listing_prefix(&key, &prefix) else {
-                        continue;
-                    };
-
                     let mtime = obj
                         .last_modified
                         .as_ref()
@@ -153,9 +149,7 @@ impl Backend for S3Backend {
                         .unwrap_or_else(current_timestamp);
                     let size = obj.size.unwrap_or(0) as u64;
 
-                    entries_by_name
-                        .entry(name)
-                        .or_insert_with(|| FileInfo::file_with_mtime(size, mtime));
+                    Self::insert_listing_file(&mut entries_by_name, &key, &prefix, size, mtime);
                 }
             }
 
@@ -164,14 +158,7 @@ impl Backend for S3Backend {
                     let Some(prefix_key) = common_prefix.prefix else {
                         continue;
                     };
-                    let trimmed = prefix_key.trim_end_matches('/');
-                    let Some(name) = Self::strip_listing_prefix(trimmed, &prefix) else {
-                        continue;
-                    };
-
-                    entries_by_name
-                        .entry(name)
-                        .or_insert_with(FileInfo::directory);
+                    Self::insert_listing_prefix(&mut entries_by_name, &prefix_key, &prefix);
                 }
             }
 
@@ -425,6 +412,33 @@ impl Backend for S3Backend {
 }
 
 impl S3Backend {
+    fn insert_listing_file(
+        entries_by_name: &mut BTreeMap<String, FileInfo>,
+        key: &str,
+        prefix: &str,
+        size: u64,
+        mtime: u32,
+    ) {
+        if let Some(name) = Self::strip_listing_prefix(key, prefix) {
+            entries_by_name
+                .entry(name)
+                .or_insert_with(|| FileInfo::file_with_mtime(size, mtime));
+        }
+    }
+
+    fn insert_listing_prefix(
+        entries_by_name: &mut BTreeMap<String, FileInfo>,
+        prefix_key: &str,
+        listing_prefix: &str,
+    ) {
+        let trimmed = prefix_key.trim_end_matches('/');
+        if let Some(name) = Self::strip_listing_prefix(trimmed, listing_prefix) {
+            entries_by_name
+                .entry(name)
+                .or_insert_with(FileInfo::directory);
+        }
+    }
+
     fn strip_listing_prefix(key: &str, prefix: &str) -> Option<String> {
         let entry = if prefix.is_empty() {
             key
@@ -747,6 +761,33 @@ mod tests {
             S3Backend::strip_listing_prefix("tenant/.keep", "tenant/"),
             None
         );
+    }
+
+    #[test]
+    fn test_listing_collection_sorts_and_deduplicates_immediate_entries() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "tenant/z.txt", "tenant/", 9, 100);
+        S3Backend::insert_listing_prefix(&mut entries, "tenant/dir/", "tenant/");
+        S3Backend::insert_listing_file(&mut entries, "tenant/a.txt", "tenant/", 1, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/dir/file.txt", "tenant/", 4, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/.keep", "tenant/", 0, 100);
+
+        let names: Vec<_> = entries.keys().map(String::as_str).collect();
+        assert_eq!(names, vec!["a.txt", "dir", "z.txt"]);
+        assert!(entries.get("dir").unwrap().is_dir);
+        assert!(!entries.get("a.txt").unwrap().is_dir);
+    }
+
+    #[test]
+    fn test_listing_collection_keeps_first_entry_when_file_and_prefix_overlap() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_prefix(&mut entries, "tenant/shared/", "tenant/");
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared", "tenant/", 12, 100);
+
+        let info = entries.get("shared").unwrap();
+        assert!(info.is_dir);
     }
 
     // --- map_s3_error tests ---
