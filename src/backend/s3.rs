@@ -1,6 +1,6 @@
 use super::{
-    current_timestamp, normalize_path, Backend, BackendError, BackendResult, DirEntry, FileInfo,
-    ReadHandle, WriteHandle,
+    current_timestamp, normalize_path, unix_secs_to_u32, Backend, BackendError, BackendResult,
+    DirEntry, FileInfo, ReadHandle, WriteHandle,
 };
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
@@ -8,14 +8,17 @@ use aws_sdk_s3::types::CompletedMultipartUpload;
 use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
-use std::collections::HashSet;
+use std::collections::BTreeMap;
+use std::fmt::{Debug, Display};
 use tracing::debug;
 
 /// Marker file for empty directories (matching Elixir implementation)
 const KEEP_MARKER: &str = ".keep";
+const DIRECTORY_LISTING_MTIME: u32 = 0;
 
 /// S3 storage backend configuration
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct S3Config {
     /// S3 bucket name (required)
     pub bucket: String,
@@ -38,6 +41,7 @@ impl S3Config {
 }
 
 /// S3 storage backend
+#[must_use]
 pub struct S3Backend {
     client: Client,
     config: S3Config,
@@ -56,7 +60,7 @@ impl S3Backend {
         Self::new(client, config)
     }
 
-    /// Create with custom endpoint (for MinIO, LocalStack, etc)
+    /// Create with custom endpoint (for `MinIO`, `LocalStack`, etc).
     pub async fn with_endpoint(config: S3Config, endpoint: &str, region: &str) -> Self {
         let sdk_config = aws_config::from_env()
             .endpoint_url(endpoint)
@@ -86,21 +90,52 @@ impl S3Backend {
         }
     }
 
-    /// Convert S3 error to BackendError
-    fn map_s3_error(err: impl std::fmt::Display) -> BackendError {
+    /// Convert S3 error to `BackendError`.
+    fn map_s3_error(err: impl Display + Debug) -> BackendError {
         let msg = err.to_string();
-        if msg.contains("NoSuchKey") || msg.contains("NotFound") || msg.contains("404") {
+        let debug_msg = format!("{err:?}");
+        let searchable = format!("{msg}\n{debug_msg}").to_ascii_lowercase();
+
+        if searchable.contains("nosuchkey")
+            || searchable.contains("notfound")
+            || searchable.contains("not found")
+            || searchable.contains("404")
+        {
             BackendError::NotFound
-        } else if msg.contains("AccessDenied") || msg.contains("403") {
+        } else if searchable.contains("accessdenied")
+            || searchable.contains("access denied")
+            || searchable.contains("forbidden")
+            || searchable.contains("403")
+        {
             BackendError::PermissionDenied
         } else {
-            BackendError::Other(msg)
+            BackendError::Other(if msg == "service error" {
+                debug_msg
+            } else {
+                msg
+            })
         }
     }
 
-    /// Parse AWS DateTime to Unix timestamp
+    /// Parse AWS `DateTime` to Unix timestamp.
     fn parse_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> u32 {
-        dt.secs() as u32
+        u64::try_from(dt.secs()).map_or(0, unix_secs_to_u32)
+    }
+
+    fn s3_size_to_u64(size: i64) -> u64 {
+        u64::try_from(size).unwrap_or(0)
+    }
+
+    fn directory_probe_result(
+        has_contents: bool,
+        has_prefixes: bool,
+        head_error: Option<BackendError>,
+    ) -> BackendResult<FileInfo> {
+        if has_contents || has_prefixes {
+            Ok(FileInfo::directory())
+        } else {
+            Err(head_error.unwrap_or(BackendError::NotFound))
+        }
     }
 }
 
@@ -120,16 +155,57 @@ impl Backend for S3Backend {
 
         debug!(prefix = %prefix, "Listing S3 objects");
 
-        let result = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.config.bucket)
-            .prefix(&prefix)
-            .send()
-            .await
-            .map_err(Self::map_s3_error)?;
+        let mut entries_by_name = BTreeMap::new();
+        let mut continuation_token = None;
 
-        let mut seen = HashSet::new();
+        loop {
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.config.bucket)
+                .prefix(&prefix)
+                .delimiter("/");
+
+            if let Some(token) = continuation_token.as_deref() {
+                request = request.continuation_token(token);
+            }
+
+            let result = request.send().await.map_err(Self::map_s3_error)?;
+
+            if let Some(contents) = result.contents {
+                for obj in contents {
+                    let Some(key) = obj.key else {
+                        continue;
+                    };
+                    let mtime = obj
+                        .last_modified
+                        .as_ref()
+                        .map_or_else(current_timestamp, Self::parse_datetime);
+                    let size = Self::s3_size_to_u64(obj.size.unwrap_or(0));
+
+                    Self::insert_listing_file(&mut entries_by_name, &key, &prefix, size, mtime);
+                }
+            }
+
+            if let Some(common_prefixes) = result.common_prefixes {
+                for common_prefix in common_prefixes {
+                    let Some(prefix_key) = common_prefix.prefix else {
+                        continue;
+                    };
+                    Self::insert_listing_prefix(&mut entries_by_name, &prefix_key, &prefix);
+                }
+            }
+
+            if result.is_truncated.unwrap_or(false) {
+                continuation_token = result.next_continuation_token;
+                if continuation_token.is_some() {
+                    continue;
+                }
+            }
+
+            break;
+        }
+
         let mut entries = vec![
             DirEntry {
                 name: ".".to_string(),
@@ -140,48 +216,11 @@ impl Backend for S3Backend {
                 attrs: FileInfo::directory(),
             },
         ];
-
-        if let Some(contents) = result.contents {
-            for obj in contents {
-                if let Some(key) = obj.key {
-                    let relative = if prefix.is_empty() {
-                        key.clone()
-                    } else {
-                        key.strip_prefix(&prefix).unwrap_or(&key).to_string()
-                    };
-
-                    // Get first path component
-                    let name = relative.split('/').next().unwrap_or(&relative);
-
-                    // Skip empty names and .keep markers at root level
-                    if name.is_empty() || name == KEEP_MARKER {
-                        continue;
-                    }
-
-                    if seen.insert(name.to_string()) {
-                        // Determine if directory (has objects under it) or file
-                        let is_dir = relative.contains('/');
-                        let mtime = obj
-                            .last_modified
-                            .as_ref()
-                            .map(Self::parse_datetime)
-                            .unwrap_or_else(current_timestamp);
-                        let size = obj.size.unwrap_or(0) as u64;
-
-                        let attrs = if is_dir {
-                            FileInfo::directory_with_mtime(mtime)
-                        } else {
-                            FileInfo::file_with_mtime(size, mtime)
-                        };
-
-                        entries.push(DirEntry {
-                            name: name.to_string(),
-                            attrs,
-                        });
-                    }
-                }
-            }
-        }
+        entries.extend(
+            entries_by_name
+                .into_iter()
+                .map(|(name, attrs)| DirEntry { name, attrs }),
+        );
 
         Ok(entries)
     }
@@ -197,7 +236,7 @@ impl Backend for S3Backend {
         let key = self.build_key(normalized.as_ref());
 
         // Try to get the object directly (file case)
-        match self
+        let head_error = match self
             .client
             .head_object()
             .bucket(&self.config.bucket)
@@ -206,36 +245,36 @@ impl Backend for S3Backend {
             .await
         {
             Ok(result) => {
-                let size = result.content_length.unwrap_or(0) as u64;
+                let size = Self::s3_size_to_u64(result.content_length.unwrap_or(0));
                 let mtime = result
                     .last_modified
                     .as_ref()
-                    .map(Self::parse_datetime)
-                    .unwrap_or_else(current_timestamp);
+                    .map_or_else(current_timestamp, Self::parse_datetime);
                 return Ok(FileInfo::file_with_mtime(size, mtime));
             }
-            Err(_) => {
-                // Not a file, check if it's a directory
+            Err(err) => {
+                let mapped = Self::map_s3_error(err);
+                Some(mapped)
             }
-        }
+        };
 
         // Check if it's a directory (has objects with this prefix)
-        let prefix = format!("{}/", key);
+        let prefix = format!("{key}/");
         let result = self
             .client
             .list_objects_v2()
             .bucket(&self.config.bucket)
             .prefix(&prefix)
+            .delimiter("/")
             .max_keys(1)
             .send()
             .await
             .map_err(Self::map_s3_error)?;
 
-        if result.contents.map(|c| !c.is_empty()).unwrap_or(false) {
-            Ok(FileInfo::directory())
-        } else {
-            Err(BackendError::NotFound)
-        }
+        let has_contents = result.contents.is_some_and(|c| !c.is_empty());
+        let has_prefixes = result.common_prefixes.is_some_and(|p| !p.is_empty());
+
+        Self::directory_probe_result(has_contents, has_prefixes, head_error)
     }
 
     async fn make_dir(&self, path: &str) -> BackendResult<()> {
@@ -358,7 +397,7 @@ impl Backend for S3Backend {
             .await
             .map_err(Self::map_s3_error)?;
 
-        let size = head.content_length.unwrap_or(0) as u64;
+        let size = Self::s3_size_to_u64(head.content_length.unwrap_or(0));
 
         Ok(Box::new(S3ReadHandle {
             client: self.client.clone(),
@@ -371,31 +410,82 @@ impl Backend for S3Backend {
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
         let key = self.build_key(path);
 
-        // Start multipart upload
-        let create_result = self
-            .client
-            .create_multipart_upload()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(Self::map_s3_error)?;
-
-        let upload_id = create_result
-            .upload_id
-            .ok_or_else(|| BackendError::Other("No upload ID returned".into()))?;
-
-        debug!(key = %key, upload_id = %upload_id, "Started multipart upload");
-
         Ok(Box::new(S3WriteHandle {
             client: self.client.clone(),
             bucket: self.config.bucket.clone(),
             key,
-            upload_id,
+            upload_id: None,
             buffer: Vec::new(),
             parts: Vec::new(),
             part_number: 1,
+            next_offset: 0,
         }))
+    }
+}
+
+impl S3Backend {
+    fn insert_listing_file(
+        entries_by_name: &mut BTreeMap<String, FileInfo>,
+        key: &str,
+        prefix: &str,
+        size: u64,
+        mtime: u32,
+    ) {
+        if let Some(name) = Self::strip_listing_directory_marker(key, prefix) {
+            entries_by_name
+                .entry(name)
+                .or_insert_with(|| FileInfo::directory_with_mtime(mtime));
+            return;
+        }
+
+        if let Some(name) = Self::strip_listing_prefix(key, prefix) {
+            entries_by_name
+                .entry(name)
+                .or_insert_with(|| FileInfo::file_with_mtime(size, mtime));
+        }
+    }
+
+    fn insert_listing_prefix(
+        entries_by_name: &mut BTreeMap<String, FileInfo>,
+        prefix_key: &str,
+        listing_prefix: &str,
+    ) {
+        let trimmed = prefix_key.trim_end_matches('/');
+        if let Some(name) = Self::strip_listing_prefix(trimmed, listing_prefix) {
+            entries_by_name
+                .entry(name)
+                .or_insert_with(|| FileInfo::directory_with_mtime(DIRECTORY_LISTING_MTIME));
+        }
+    }
+
+    fn strip_listing_directory_marker(key: &str, prefix: &str) -> Option<String> {
+        let entry = if prefix.is_empty() {
+            key
+        } else {
+            key.strip_prefix(prefix)?
+        };
+
+        let trimmed = entry.trim_end_matches('/');
+        if entry == trimmed || trimmed.is_empty() || trimmed == KEEP_MARKER || trimmed.contains('/')
+        {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn strip_listing_prefix(key: &str, prefix: &str) -> Option<String> {
+        let entry = if prefix.is_empty() {
+            key
+        } else {
+            key.strip_prefix(prefix)?
+        };
+
+        if entry.is_empty() || entry == KEEP_MARKER || entry.contains('/') {
+            None
+        } else {
+            Some(entry.to_string())
+        }
     }
 }
 
@@ -414,8 +504,8 @@ impl ReadHandle for S3ReadHandle {
             return Ok(Bytes::new());
         }
 
-        let end = std::cmp::min(offset + len as u64, self.size) - 1;
-        let range = format!("bytes={}-{}", offset, end);
+        let end = std::cmp::min(offset + u64::from(len), self.size) - 1;
+        let range = format!("bytes={offset}-{end}");
 
         let result = self
             .client
@@ -450,13 +540,37 @@ struct S3WriteHandle {
     client: Client,
     bucket: String,
     key: String,
-    upload_id: String,
+    upload_id: Option<String>,
     buffer: Vec<u8>,
     parts: Vec<CompletedPart>,
     part_number: i32,
+    next_offset: u64,
 }
 
 impl S3WriteHandle {
+    async fn ensure_multipart_started(&mut self) -> BackendResult<String> {
+        if let Some(upload_id) = &self.upload_id {
+            return Ok(upload_id.clone());
+        }
+
+        let create_result = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .send()
+            .await
+            .map_err(S3Backend::map_s3_error)?;
+
+        let upload_id = create_result
+            .upload_id
+            .ok_or_else(|| BackendError::Other("No upload ID returned".into()))?;
+
+        debug!(key = %self.key, upload_id = %upload_id, "Started multipart upload");
+        self.upload_id = Some(upload_id.clone());
+        Ok(upload_id)
+    }
+
     /// Flush buffer to S3 as a part if large enough (or if force is true)
     async fn flush_part(&mut self, force: bool) -> BackendResult<()> {
         if self.buffer.is_empty() {
@@ -468,6 +582,7 @@ impl S3WriteHandle {
             return Ok(());
         }
 
+        let upload_id = self.ensure_multipart_started().await?;
         let data = std::mem::take(&mut self.buffer);
         debug!(
             key = %self.key,
@@ -481,7 +596,7 @@ impl S3WriteHandle {
             .upload_part()
             .bucket(&self.bucket)
             .key(&self.key)
-            .upload_id(&self.upload_id)
+            .upload_id(upload_id)
             .part_number(self.part_number)
             .body(ByteStream::from(data))
             .send()
@@ -504,57 +619,31 @@ impl S3WriteHandle {
 #[async_trait]
 impl WriteHandle for S3WriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        // For simplicity, we assume sequential writes (offset == buffer end)
-        // S3 multipart doesn't support random writes anyway.
-        // Instead of copying into buffer with extend_from_slice, we defer merging
-        // buffer chunks until flush to avoid hot-path copies.
-        let start = offset as usize;
-
-        if start > self.buffer.len() {
-            // Gap before this write - flush current buffer and restart
-            self.flush_part(false).await?;
-            self.buffer.clear();
-            self.buffer.resize(start, 0);
-            self.buffer.extend_from_slice(&data);
-        } else if start == self.buffer.len() {
-            // Sequential append - just add to buffer
-            self.buffer.extend_from_slice(&data);
-        } else {
-            // Random write within current buffer - copy needed (rare case)
-            let end = start + data.len();
-            if end > self.buffer.len() {
-                self.buffer.resize(end, 0);
-            }
-            self.buffer[start..end].copy_from_slice(&data);
+        // S3 multipart uploads are append-only. Track the global stream offset
+        // instead of the current in-memory buffer length, because the buffer is
+        // drained each time a part is uploaded.
+        if offset != self.next_offset {
+            return Err(BackendError::Other(format!(
+                "non-sequential S3 write offset: got {offset}, expected {}",
+                self.next_offset
+            )));
         }
 
-        // Flush if we have enough data for a part
+        self.next_offset += data.len() as u64;
+        self.buffer.extend_from_slice(&data);
         self.flush_part(false).await?;
 
         Ok(())
     }
 
     async fn finish(mut self: Box<Self>) -> BackendResult<()> {
-        // Upload any remaining data
-        self.flush_part(true).await?;
-
-        if self.parts.is_empty() {
-            // No parts uploaded - abort multipart and use simple upload
-            let _ = self
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&self.key)
-                .upload_id(&self.upload_id)
-                .send()
-                .await;
-
-            // Write empty file
+        if self.parts.is_empty() && self.buffer.len() < MIN_PART_SIZE {
+            let data = std::mem::take(&mut self.buffer);
             self.client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(&self.key)
-                .body(ByteStream::from_static(b""))
+                .body(ByteStream::from(data))
                 .send()
                 .await
                 .map_err(S3Backend::map_s3_error)?;
@@ -562,14 +651,20 @@ impl WriteHandle for S3WriteHandle {
             return Ok(());
         }
 
+        // Upload any remaining data
+        self.flush_part(true).await?;
+
         // Complete multipart upload
+        let upload_id = self
+            .upload_id
+            .ok_or_else(|| BackendError::Other("No upload ID for multipart completion".into()))?;
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(self.parts))
             .build();
 
         debug!(
             key = %self.key,
-            upload_id = %self.upload_id,
+            upload_id = %upload_id,
             "Completing multipart upload"
         );
 
@@ -577,7 +672,7 @@ impl WriteHandle for S3WriteHandle {
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(&self.key)
-            .upload_id(&self.upload_id)
+            .upload_id(upload_id)
             .multipart_upload(completed)
             .send()
             .await
@@ -587,9 +682,13 @@ impl WriteHandle for S3WriteHandle {
     }
 
     async fn abort(self: Box<Self>) -> BackendResult<()> {
+        let Some(upload_id) = self.upload_id else {
+            return Ok(());
+        };
+
         debug!(
             key = %self.key,
-            upload_id = %self.upload_id,
+            upload_id = %upload_id,
             "Aborting multipart upload"
         );
 
@@ -597,7 +696,7 @@ impl WriteHandle for S3WriteHandle {
             .abort_multipart_upload()
             .bucket(&self.bucket)
             .key(&self.key)
-            .upload_id(&self.upload_id)
+            .upload_id(upload_id)
             .send()
             .await
             .map_err(S3Backend::map_s3_error)?;
@@ -609,6 +708,15 @@ impl WriteHandle for S3WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dummy_client() -> Client {
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::for_tests())
+            .build();
+        Client::from_conf(config)
+    }
 
     // Helper: create an S3Backend-shaped config for testing pure functions.
     // Does NOT connect to any AWS endpoint.
@@ -673,6 +781,191 @@ mod tests {
         assert_eq!(build_key_fn(&config, "/a/b/c.txt"), "tenant/data/a/b/c.txt");
     }
 
+    // --- listing prefix tests ---
+
+    #[test]
+    fn test_strip_listing_prefix_root_file() {
+        assert_eq!(
+            S3Backend::strip_listing_prefix("file.txt", ""),
+            Some("file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_prefix_prefixed_file() {
+        assert_eq!(
+            S3Backend::strip_listing_prefix("tenant/file.txt", "tenant/"),
+            Some("file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_prefix_ignores_nested_files() {
+        assert_eq!(
+            S3Backend::strip_listing_prefix("tenant/dir/file.txt", "tenant/"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_prefix_ignores_keep_markers_and_empty_entries() {
+        assert_eq!(S3Backend::strip_listing_prefix("tenant/", "tenant/"), None);
+        assert_eq!(
+            S3Backend::strip_listing_prefix("tenant/.keep", "tenant/"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_directory_marker() {
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/empty-dir/", "tenant/"),
+            Some("empty-dir".to_string())
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("empty-dir/", ""),
+            Some("empty-dir".to_string())
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/.keep/", "tenant/"),
+            None
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/", "tenant/"),
+            None
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/nested/dir/", "tenant/"),
+            None
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/file.txt", "tenant/"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_listing_collection_treats_root_marker_as_directory() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "empty-dir/", "", 0, 321);
+
+        let entry = entries.get("empty-dir").unwrap();
+        assert!(entry.is_dir);
+        assert_eq!(entry.mtime, 321);
+    }
+
+    #[test]
+    fn test_listing_collection_sorts_and_deduplicates_immediate_entries() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "tenant/z.txt", "tenant/", 9, 100);
+        S3Backend::insert_listing_prefix(&mut entries, "tenant/dir/", "tenant/");
+        S3Backend::insert_listing_file(&mut entries, "tenant/a.txt", "tenant/", 1, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/dir/file.txt", "tenant/", 4, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/.keep", "tenant/", 0, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/empty-dir/", "tenant/", 0, 200);
+
+        let names: Vec<_> = entries.keys().map(String::as_str).collect();
+        assert_eq!(names, vec!["a.txt", "dir", "empty-dir", "z.txt"]);
+        let dir = entries.get("dir").unwrap();
+        assert!(dir.is_dir);
+        assert_eq!(dir.mtime, DIRECTORY_LISTING_MTIME);
+        assert_eq!(dir.atime, DIRECTORY_LISTING_MTIME);
+
+        let empty_dir = entries.get("empty-dir").unwrap();
+        assert!(empty_dir.is_dir);
+        assert_eq!(empty_dir.mtime, 200);
+
+        let file = entries.get("a.txt").unwrap();
+        assert!(!file.is_dir);
+        assert_eq!(file.mtime, 100);
+    }
+
+    #[test]
+    fn test_listing_collection_keeps_first_entry_when_file_and_prefix_overlap() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_prefix(&mut entries, "tenant/shared/", "tenant/");
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared", "tenant/", 12, 100);
+
+        let info = entries.get("shared").unwrap();
+        assert!(info.is_dir);
+    }
+
+    #[test]
+    fn test_listing_collection_keeps_directory_marker_when_file_overlaps() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared/", "tenant/", 0, 200);
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared", "tenant/", 12, 100);
+
+        let info = entries.get("shared").unwrap();
+        assert!(info.is_dir);
+        assert_eq!(info.mtime, 200);
+    }
+
+    #[test]
+    fn test_listing_collection_keeps_file_when_marker_arrives_later() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared", "tenant/", 12, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared/", "tenant/", 0, 200);
+
+        let info = entries.get("shared").unwrap();
+        assert!(!info.is_dir);
+        assert_eq!(info.size, 12);
+    }
+
+    #[test]
+    fn test_directory_probe_returns_directory_after_permission_denied_head() {
+        let info =
+            S3Backend::directory_probe_result(true, false, Some(BackendError::PermissionDenied))
+                .unwrap();
+
+        assert!(info.is_dir);
+    }
+
+    #[test]
+    fn test_directory_probe_returns_directory_from_common_prefix_after_head_error() {
+        let info = S3Backend::directory_probe_result(
+            false,
+            true,
+            Some(BackendError::Other("head failed".into())),
+        )
+        .unwrap();
+
+        assert!(info.is_dir);
+    }
+
+    #[test]
+    fn test_directory_probe_preserves_permission_denied_when_no_directory_exists() {
+        let result =
+            S3Backend::directory_probe_result(false, false, Some(BackendError::PermissionDenied));
+
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+    }
+
+    #[test]
+    fn test_directory_probe_defaults_to_not_found_without_head_error() {
+        let result = S3Backend::directory_probe_result(false, false, None);
+
+        assert!(matches!(result, Err(BackendError::NotFound)));
+    }
+
+    #[test]
+    fn test_s3_size_to_u64_clamps_negative_values() {
+        assert_eq!(S3Backend::s3_size_to_u64(-1), 0);
+        assert_eq!(S3Backend::s3_size_to_u64(42), 42);
+    }
+
+    #[test]
+    fn test_parse_datetime_clamps_negative_timestamps() {
+        let dt = aws_sdk_s3::primitives::DateTime::from_secs(-1);
+
+        assert_eq!(S3Backend::parse_datetime(&dt), 0);
+    }
+
     // --- map_s3_error tests ---
 
     #[test]
@@ -733,5 +1026,56 @@ mod tests {
     fn test_s3_config_with_prefix() {
         let config = S3Config::new("b").with_prefix("sftp/");
         assert_eq!(config.prefix, "sftp/");
+    }
+
+    #[tokio::test]
+    async fn test_s3_write_handle_tracks_global_offsets_after_buffer_flush() {
+        let mut handle = S3WriteHandle {
+            client: dummy_client(),
+            bucket: "bucket".to_string(),
+            key: "key".to_string(),
+            upload_id: None,
+            buffer: Vec::new(),
+            parts: Vec::new(),
+            part_number: 1,
+            next_offset: MIN_PART_SIZE as u64,
+        };
+
+        handle
+            .write_at(MIN_PART_SIZE as u64, Bytes::from_static(b"tail"))
+            .await
+            .unwrap();
+
+        assert_eq!(handle.next_offset, MIN_PART_SIZE as u64 + 4);
+        assert_eq!(handle.buffer, b"tail");
+    }
+
+    #[tokio::test]
+    async fn test_s3_write_handle_rejects_non_sequential_offsets() {
+        let mut handle = S3WriteHandle {
+            client: dummy_client(),
+            bucket: "bucket".to_string(),
+            key: "key".to_string(),
+            upload_id: None,
+            buffer: Vec::new(),
+            parts: Vec::new(),
+            part_number: 1,
+            next_offset: 4,
+        };
+
+        let result = handle.write_at(2, Bytes::from_static(b"nope")).await;
+
+        assert!(matches!(result, Err(BackendError::Other(_))));
+        assert!(handle.buffer.is_empty());
+        assert_eq!(handle.next_offset, 4);
+    }
+
+    #[tokio::test]
+    async fn test_s3_open_write_is_lazy_until_data_flush() {
+        let backend = S3Backend::new(dummy_client(), S3Config::new("bucket"));
+
+        let handle = backend.open_write("small.txt").await.unwrap();
+
+        handle.abort().await.unwrap();
     }
 }

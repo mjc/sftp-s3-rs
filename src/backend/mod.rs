@@ -38,7 +38,7 @@ pub enum BackendError {
     Other(String),
 }
 
-/// Directory entry returned by list_dir
+/// Directory entry returned by `list_dir`.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     pub name: String,
@@ -47,6 +47,7 @@ pub struct DirEntry {
 
 /// File metadata information
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct FileInfo {
     pub size: u64,
     pub is_dir: bool,
@@ -58,7 +59,7 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    /// Create FileInfo for a directory
+    /// Create `FileInfo` for a directory.
     pub fn directory() -> Self {
         Self {
             size: 4096,
@@ -71,7 +72,7 @@ impl FileInfo {
         }
     }
 
-    /// Create FileInfo for a directory with specific mtime
+    /// Create `FileInfo` for a directory with specific mtime.
     pub fn directory_with_mtime(mtime: u32) -> Self {
         Self {
             size: 4096,
@@ -84,7 +85,7 @@ impl FileInfo {
         }
     }
 
-    /// Create FileInfo for a regular file
+    /// Create `FileInfo` for a regular file.
     pub fn file(size: u64) -> Self {
         Self {
             size,
@@ -97,7 +98,7 @@ impl FileInfo {
         }
     }
 
-    /// Create FileInfo for a regular file with specific mtime
+    /// Create `FileInfo` for a regular file with specific mtime.
     pub fn file_with_mtime(size: u64, mtime: u32) -> Self {
         Self {
             size,
@@ -149,11 +150,13 @@ impl BufferedReadHandle {
 #[async_trait]
 impl ReadHandle for BufferedReadHandle {
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
-        let start = offset as usize;
+        let start = usize::try_from(offset)
+            .map_err(|_| BackendError::Other("read offset too large for this platform".into()))?;
         if start >= self.content.len() {
             return Ok(Bytes::new());
         }
-        let end = std::cmp::min(start + len as usize, self.content.len());
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        let end = std::cmp::min(start.saturating_add(len), self.content.len());
         Ok(self.content.slice(start..end))
     }
 
@@ -164,6 +167,7 @@ impl ReadHandle for BufferedReadHandle {
 
 /// Write handle that buffers in memory and returns data on finish
 /// Used by simple backends that don't support streaming
+#[must_use]
 pub struct BufferedWriteHandle {
     buffer: Vec<u8>,
 }
@@ -174,6 +178,7 @@ impl BufferedWriteHandle {
     }
 
     /// Get the buffered data (for backends to write after finish)
+    #[must_use]
     pub fn into_bytes(self) -> Bytes {
         Bytes::from(self.buffer)
     }
@@ -188,14 +193,17 @@ impl Default for BufferedWriteHandle {
 #[async_trait]
 impl WriteHandle for BufferedWriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        let start = offset as usize;
+        let start = usize::try_from(offset)
+            .map_err(|_| BackendError::Other("write offset too large for this platform".into()))?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or_else(|| BackendError::Other("write range too large for this platform".into()))?;
         if start > self.buffer.len() {
             self.buffer.resize(start, 0);
         }
         if start == self.buffer.len() {
             self.buffer.extend_from_slice(&data);
         } else {
-            let end = start + data.len();
             if end > self.buffer.len() {
                 self.buffer.resize(end, 0);
             }
@@ -285,24 +293,25 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Open a file for streaming reads
     ///
-    /// Returns a ReadHandle for reading file data in chunks.
+    /// Returns a `ReadHandle` for reading file data in chunks.
     /// For backends that support range requests (e.g., S3), this enables
     /// reading large files without loading them entirely into memory.
     async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>>;
 
     /// Open a file for streaming writes
     ///
-    /// Returns a WriteHandle for writing file data in chunks.
+    /// Returns a `WriteHandle` for writing file data in chunks.
     /// For backends that support multipart uploads (e.g., S3), this enables
     /// uploading large files without buffering them entirely in memory.
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>>;
 }
 
 /// Normalize a path: trim leading/trailing slashes, handle empty as root.
-/// Returns Cow::Borrowed when input is already normalized, avoiding allocation.
+/// Returns `Cow::Borrowed` when input is already normalized, avoiding allocation.
+#[must_use]
 pub fn normalize_path(path: &str) -> Cow<'_, str> {
     let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() || trimmed == "." {
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         Cow::Borrowed("")
     } else if trimmed.len() == path.len() {
         // No slashes were trimmed, return borrowed
@@ -313,9 +322,83 @@ pub fn normalize_path(path: &str) -> Cow<'_, str> {
 }
 
 /// Get current Unix timestamp
+#[must_use]
 pub fn current_timestamp() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
+        .map(|d| unix_secs_to_u32(d.as_secs()))
         .unwrap_or(0)
+}
+
+pub(crate) fn unix_secs_to_u32(secs: u64) -> u32 {
+    u32::try_from(secs).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_buffered_read_rejects_offset_too_large_for_platform() {
+        let handle = BufferedReadHandle::new(Bytes::from_static(b"data"));
+
+        let result = handle.read_at(u64::MAX, 1).await;
+
+        if usize::try_from(u64::MAX).is_ok() {
+            assert!(matches!(result, Ok(bytes) if bytes.is_empty()));
+        } else {
+            assert!(matches!(result, Err(BackendError::Other(msg)) if msg.contains("offset")));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_buffered_read_saturates_large_lengths() {
+        let handle = BufferedReadHandle::new(Bytes::from_static(b"abcdef"));
+
+        let bytes = handle.read_at(2, u32::MAX).await.unwrap();
+
+        assert_eq!(bytes, Bytes::from_static(b"cdef"));
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_rejects_offset_too_large_for_platform() {
+        let mut handle = BufferedWriteHandle::new();
+
+        let result = handle.write_at(u64::MAX, Bytes::from_static(b"x")).await;
+
+        assert!(
+            matches!(result, Err(BackendError::Other(msg)) if msg.contains("offset") || msg.contains("range"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_overwrites_existing_range() {
+        let mut handle = BufferedWriteHandle::new();
+
+        handle
+            .write_at(0, Bytes::from_static(b"abcdef"))
+            .await
+            .unwrap();
+        handle
+            .write_at(2, Bytes::from_static(b"XYZ"))
+            .await
+            .unwrap();
+
+        assert_eq!(handle.into_bytes(), Bytes::from_static(b"abXYZf"));
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_preserves_sparse_gaps() {
+        let mut handle = BufferedWriteHandle::new();
+
+        handle.write_at(3, Bytes::from_static(b"z")).await.unwrap();
+
+        assert_eq!(handle.into_bytes(), Bytes::from_static(b"\0\0\0z"));
+    }
+
+    #[test]
+    fn test_unix_secs_to_u32_saturates() {
+        assert_eq!(unix_secs_to_u32(42), 42);
+        assert_eq!(unix_secs_to_u32(u64::MAX), u32::MAX);
+    }
 }

@@ -12,6 +12,12 @@ A pluggable SFTP server with S3 and custom backend support, written in Rust.
 - Password authentication
 - Async/await with Tokio
 
+## Guides
+
+- [BACKENDS.md](BACKENDS.md) for backend tradeoffs and built-in backend behavior
+- [CUSTOM_BACKENDS.md](CUSTOM_BACKENDS.md) for implementing your own backend
+- [TELEMETRY.md](TELEMETRY.md) for tracing, span fields, and operational logging
+
 ## Quick Start
 
 ```rust
@@ -59,11 +65,15 @@ Configure AWS credentials via environment variables:
 
 ## Custom Backend
 
-Implement the `Backend` trait for custom storage:
+Implement the `Backend` trait for custom storage. The full guide is in
+[CUSTOM_BACKENDS.md](CUSTOM_BACKENDS.md).
 
 ```rust
-use sftp_s3::backend::{Backend, BackendResult, DirEntry, FileInfo};
 use async_trait::async_trait;
+use bytes::Bytes;
+use sftp_s3::backend::{
+    Backend, BackendResult, BufferedReadHandle, DirEntry, FileInfo, ReadHandle, WriteHandle,
+};
 
 struct MyBackend;
 
@@ -93,11 +103,19 @@ impl Backend for MyBackend {
         // Implementation
     }
 
-    async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {
+    async fn read_file(&self, path: &str) -> BackendResult<Bytes> {
         // Implementation
     }
 
-    async fn write_file(&self, path: &str, content: Vec<u8>) -> BackendResult<()> {
+    async fn write_file(&self, path: &str, content: Bytes) -> BackendResult<()> {
+        // Implementation
+    }
+
+    async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>> {
+        Ok(Box::new(BufferedReadHandle::new(self.read_file(path).await?)))
+    }
+
+    async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
         // Implementation
     }
 }
@@ -121,6 +139,21 @@ Connect with an SFTP client:
 
 ```bash
 sftp -P 2222 user@localhost
+```
+
+## Testing
+
+Run the default suite through the Nix development shell:
+
+```bash
+nix develop -c cargo test --all-features
+```
+
+The MinIO-backed S3 end-to-end test is ignored by default because it starts a
+local MinIO process. `minio` is provided by the flake:
+
+```bash
+nix develop -c cargo test --all-features --test s3_minio_integration -- --ignored --nocapture
 ```
 
 ## Docker Deployment

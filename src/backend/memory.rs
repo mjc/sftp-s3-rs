@@ -5,7 +5,7 @@ use super::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 const KEEP_MARKER: &str = ".keep";
@@ -18,6 +18,7 @@ struct FileData {
 }
 
 /// In-memory storage backend for testing and development
+#[must_use]
 pub struct MemoryBackend {
     files: Arc<RwLock<HashMap<String, FileData>>>,
 }
@@ -63,12 +64,11 @@ impl Backend for MemoryBackend {
         let prefix = if normalized.is_empty() {
             String::new()
         } else {
-            format!("{}/", normalized)
+            format!("{normalized}/")
         };
 
         let files = self.files.read();
-        // Use &str in seen to avoid double-allocation (one alloc per unique name instead of two)
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut entries_by_name = BTreeMap::new();
         let mut entries = vec![
             DirEntry {
                 name: ".".to_string(),
@@ -96,20 +96,24 @@ impl Backend for MemoryBackend {
                 continue;
             }
 
-            if seen.insert(name) {
-                let is_dir = relative.contains('/');
-                let attrs = if is_dir {
-                    FileInfo::directory_with_mtime(data.mtime)
-                } else {
-                    FileInfo::file_with_mtime(data.content.len() as u64, data.mtime)
-                };
+            let is_dir = relative.contains('/');
+            let attrs = if is_dir {
+                FileInfo::directory_with_mtime(data.mtime)
+            } else {
+                FileInfo::file_with_mtime(
+                    u64::try_from(data.content.len()).unwrap_or(u64::MAX),
+                    data.mtime,
+                )
+            };
 
-                entries.push(DirEntry {
-                    name: name.to_string(),
-                    attrs,
-                });
-            }
+            entries_by_name.entry(name.to_string()).or_insert(attrs);
         }
+
+        entries.extend(
+            entries_by_name
+                .into_iter()
+                .map(|(name, attrs)| DirEntry { name, attrs }),
+        );
 
         Ok(entries)
     }
@@ -126,13 +130,13 @@ impl Backend for MemoryBackend {
         // Check if it's a file
         if let Some(data) = files.get(normalized.as_ref()) {
             return Ok(FileInfo::file_with_mtime(
-                data.content.len() as u64,
+                u64::try_from(data.content.len()).unwrap_or(u64::MAX),
                 data.mtime,
             ));
         }
 
         // Check if it's a directory
-        let prefix = format!("{}/", normalized);
+        let prefix = format!("{normalized}/");
         if files.keys().any(|k| k.starts_with(&prefix)) {
             return Ok(FileInfo::directory());
         }
@@ -153,8 +157,19 @@ impl Backend for MemoryBackend {
     }
 
     async fn del_dir(&self, path: &str) -> BackendResult<()> {
-        let key = format!("{}/{}", normalize_path(path), KEEP_MARKER);
-        self.files.write().remove(&key);
+        let normalized = normalize_path(path);
+        let prefix = format!("{normalized}/");
+        let keep_marker_key = format!("{prefix}{KEEP_MARKER}");
+
+        let mut files = self.files.write();
+        if files
+            .keys()
+            .any(|key| key.starts_with(&prefix) && key != &keep_marker_key)
+        {
+            return Err(BackendError::DirectoryNotEmpty);
+        }
+
+        files.remove(&keep_marker_key);
         Ok(())
     }
 
@@ -257,20 +272,28 @@ impl WriteHandle for MemoryWriteHandle {
         }
 
         // Calculate total file size
-        let total_size = self.chunks.iter().fold(0u64, |max, (offset, data)| {
-            max.max(offset + data.len() as u64)
-        }) as usize;
+        let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
+            max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
+        });
+        let total_size = usize::try_from(total_size_u64)
+            .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
 
         // Only allocate the actual needed size
         let mut result = Vec::with_capacity(total_size);
 
         for (offset, data) in self.chunks {
-            let offset = offset as usize;
+            let offset = usize::try_from(offset).map_err(|_| {
+                BackendError::Other("file offset too large for this platform".into())
+            })?;
             // Pad with zeros only if there's a gap (rare)
             if result.len() < offset {
                 result.resize(offset, 0);
             }
-            result.extend_from_slice(&data);
+            let end = offset + data.len();
+            if result.len() < end {
+                result.resize(end, 0);
+            }
+            result[offset..end].copy_from_slice(&data);
         }
 
         self.files.write().insert(
@@ -310,6 +333,13 @@ mod tests {
         assert_eq!(read, content);
     }
 
+    #[test]
+    fn test_normalize_root_variants() {
+        for path in ["", "/", ".", "/.", "..", "/.."] {
+            assert_eq!(normalize_path(path).as_ref(), "", "{path:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_list_root() {
         let backend = MemoryBackend::new();
@@ -343,6 +373,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_dir_returns_sorted_immediate_entries() {
+        let backend = MemoryBackend::new();
+        backend
+            .write_file("z.txt", Bytes::from_static(b"z"))
+            .await
+            .unwrap();
+        backend
+            .write_file("dir/file.txt", Bytes::from_static(b"nested"))
+            .await
+            .unwrap();
+        backend
+            .write_file("a.txt", Bytes::from_static(b"a"))
+            .await
+            .unwrap();
+
+        let entries = backend.list_dir("/").await.unwrap();
+        let names: Vec<_> = entries.into_iter().map(|entry| entry.name).collect();
+
+        assert_eq!(names, vec![".", "..", "a.txt", "dir", "z.txt"]);
+    }
+
+    #[tokio::test]
     async fn test_file_info() {
         let backend = MemoryBackend::new();
         backend
@@ -356,6 +408,41 @@ mod tests {
 
         let root_info = backend.file_info("/").await.unwrap();
         assert!(root_info.is_dir);
+    }
+
+    #[tokio::test]
+    async fn test_root_path_variants() {
+        let backend = MemoryBackend::new();
+        backend
+            .write_file("test.txt", Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+
+        for path in [".", "", "/", "..", "/.."] {
+            let info = backend.file_info(path).await.unwrap();
+            assert!(info.is_dir, "{path:?} should be root directory");
+
+            let entries = backend.list_dir(path).await.unwrap();
+            let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+            assert!(names.contains(&"test.txt"), "{path:?} should list root");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_del_dir_rejects_non_empty_directory() {
+        let backend = MemoryBackend::new();
+        backend.make_dir("mydir").await.unwrap();
+        backend
+            .write_file("mydir/file.txt", Bytes::from_static(b"content"))
+            .await
+            .unwrap();
+
+        let result = backend.del_dir("mydir").await;
+
+        assert!(matches!(result, Err(BackendError::DirectoryNotEmpty)));
+        let entries = backend.list_dir("mydir").await.unwrap();
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(names.contains(&"file.txt"));
     }
 
     // Concurrent access test
@@ -554,5 +641,36 @@ mod tests {
         // Verify temp file is gone
         let temp_result = backend.read_file(temp_path).await;
         assert!(matches!(temp_result, Err(BackendError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_sparse_write_handle_overwrites_existing_bytes() {
+        let backend = MemoryBackend::new();
+        let mut handle = backend.open_write("overlap.txt").await.unwrap();
+
+        handle
+            .write_at(0, Bytes::from_static(b"abcdef"))
+            .await
+            .unwrap();
+        handle.write_at(2, Bytes::from_static(b"ZZ")).await.unwrap();
+        handle.finish().await.unwrap();
+
+        let content = backend.read_file("overlap.txt").await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"abZZef"));
+    }
+
+    #[tokio::test]
+    async fn test_sparse_write_handle_preserves_gaps() {
+        let backend = MemoryBackend::new();
+        let mut handle = backend.open_write("sparse.bin").await.unwrap();
+
+        handle
+            .write_at(3, Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        handle.finish().await.unwrap();
+
+        let content = backend.read_file("sparse.bin").await.unwrap();
+        assert_eq!(content.as_ref(), b"\0\0\0abc");
     }
 }

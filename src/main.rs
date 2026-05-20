@@ -29,8 +29,7 @@ impl std::str::FromStr for Backend {
                     "local, memory"
                 };
                 Err(format!(
-                    "unknown backend '{}', choose from: {}",
-                    other, available
+                    "unknown backend '{other}', choose from: {available}"
                 ))
             }
         }
@@ -61,7 +60,7 @@ struct Cli {
     #[arg(short, long = "user", env = "SFTP_USERS", value_delimiter = ',')]
     users: Vec<String>,
 
-    /// Path to authorized_keys file for public key auth
+    /// Path to `authorized_keys` file for public key auth
     #[arg(long, env = "AUTHORIZED_KEYS_FILE")]
     authorized_keys_file: Option<PathBuf>,
 
@@ -117,9 +116,9 @@ fn parse_pubkey(line: &str) -> Option<russh::keys::PublicKey> {
 /// Expand ~ to home directory
 fn expand_tilde(path: &std::path::Path) -> PathBuf {
     if let Some(path_str) = path.to_str() {
-        if path_str.starts_with("~") {
+        if path_str.starts_with('~') {
             if let Ok(home) = std::env::var("HOME") {
-                let expanded = path_str.replacen("~", &home, 1);
+                let expanded = path_str.replacen('~', &home, 1);
                 return PathBuf::from(expanded);
             }
         }
@@ -195,20 +194,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ref cipher_names) = cli.ciphers {
         let mut ciphers = Vec::new();
         for name in cipher_names {
-            match parse_cipher(name) {
-                Some(c) => ciphers.push(c),
-                None => {
-                    eprintln!(
-                        "Unknown cipher '{}'. Available: {}",
-                        name,
-                        AVAILABLE_CIPHERS.join(", ")
-                    );
-                    std::process::exit(1);
-                }
+            if let Some(cipher) = parse_cipher(name) {
+                ciphers.push(cipher);
+            } else {
+                eprintln!(
+                    "Unknown cipher '{}'. Available: {}",
+                    name,
+                    AVAILABLE_CIPHERS.join(", ")
+                );
+                std::process::exit(1);
             }
         }
         config = config.with_ciphers(ciphers.clone());
-        eprintln!("Using ciphers: {:?}", cipher_names);
+        eprintln!("Using ciphers: {cipher_names:?}");
     }
 
     // Enable compression if requested (disabled by default)
@@ -250,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             let s3_config = sftp_s3::S3Config::new(bucket).with_prefix(&cli.prefix);
             let backend = if let Some(endpoint) = &cli.endpoint {
-                eprintln!("Using custom S3 endpoint: {}", endpoint);
+                eprintln!("Using custom S3 endpoint: {endpoint}");
                 sftp_s3::S3Backend::with_endpoint(s3_config, endpoint, &cli.region).await
             } else {
                 sftp_s3::S3Backend::from_env(s3_config).await

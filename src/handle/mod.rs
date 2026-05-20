@@ -29,6 +29,7 @@ pub enum HandleType {
 }
 
 /// Manages file handles for SFTP sessions using numeric IDs
+#[must_use]
 pub struct HandleManager {
     handles: RwLock<HashMap<u64, HandleType>>,
     next_id: AtomicU64,
@@ -51,25 +52,25 @@ impl HandleManager {
         std::str::from_utf8(handle).ok()?.parse().ok()
     }
 
-    pub fn create_dir_handle(&self, path: String) -> String {
+    pub fn create_dir_handle(&self, path: &str) -> String {
         let id = self.generate_handle();
         self.handles.write().insert(
             id,
             HandleType::Dir {
-                path: Arc::from(path.as_str()),
+                path: Arc::from(path),
                 read_done: false,
             },
         );
         id.to_string()
     }
 
-    pub fn create_read_handle(&self, path: String, handle: Box<dyn ReadHandle>) -> String {
+    pub fn create_read_handle(&self, path: &str, handle: Box<dyn ReadHandle>) -> String {
         let id = self.generate_handle();
         let size = handle.size();
         self.handles.write().insert(
             id,
             HandleType::Read {
-                path: Arc::from(path.as_str()),
+                path: Arc::from(path),
                 handle: Arc::new(Mutex::new(handle)),
                 size,
             },
@@ -77,12 +78,12 @@ impl HandleManager {
         id.to_string()
     }
 
-    pub fn create_write_handle(&self, path: String, handle: Box<dyn WriteHandle + Send>) -> String {
+    pub fn create_write_handle(&self, path: &str, handle: Box<dyn WriteHandle + Send>) -> String {
         let id = self.generate_handle();
         self.handles.write().insert(
             id,
             HandleType::Write {
-                path: Arc::from(path.as_str()),
+                path: Arc::from(path),
                 handle: Arc::new(Mutex::new(Some(handle))),
             },
         );
@@ -193,7 +194,7 @@ mod tests {
         let handles: Vec<String> = (0..1000)
             .map(|i| {
                 let read_handle = Box::new(BufferedReadHandle::new(Bytes::new()));
-                manager.create_read_handle(format!("path{}", i), read_handle)
+                manager.create_read_handle(&format!("path{}", i), read_handle)
             })
             .collect();
         let unique: HashSet<_> = handles.iter().collect();
@@ -205,7 +206,7 @@ mod tests {
         let manager = HandleManager::new();
         let content = Bytes::from_static(b"hello");
         let read_handle = Box::new(BufferedReadHandle::new(content));
-        let handle = manager.create_read_handle("test.txt".to_string(), read_handle);
+        let handle = manager.create_read_handle("test.txt", read_handle);
 
         let info = manager.get_handle_info(handle.as_bytes());
         assert!(info.is_some());
@@ -222,7 +223,7 @@ mod tests {
     fn test_remove_actually_removes() {
         let manager = HandleManager::new();
         let read_handle = Box::new(BufferedReadHandle::new(Bytes::new()));
-        let handle = manager.create_read_handle("test.txt".to_string(), read_handle);
+        let handle = manager.create_read_handle("test.txt", read_handle);
 
         assert!(manager.get_handle_info(handle.as_bytes()).is_some());
         manager.remove(handle.as_bytes());
@@ -234,7 +235,7 @@ mod tests {
         // Verify that get_read_handle returns Arc<str> clone (cheap, no heap alloc)
         let manager = HandleManager::new();
         let read_handle = Box::new(BufferedReadHandle::new(Bytes::from_static(b"data")));
-        let handle = manager.create_read_handle("mypath".to_string(), read_handle);
+        let handle = manager.create_read_handle("mypath", read_handle);
 
         let (path1, _, _) = manager.get_read_handle(handle.as_bytes()).unwrap();
         let (path2, _, _) = manager.get_read_handle(handle.as_bytes()).unwrap();
@@ -249,7 +250,7 @@ mod tests {
             let handles: Vec<String> = (0..count)
                 .map(|i| {
                     let read_handle = Box::new(BufferedReadHandle::new(Bytes::new()));
-                    manager.create_read_handle(format!("path{}", i), read_handle)
+                    manager.create_read_handle(&format!("path{}", i), read_handle)
                 })
                 .collect();
             let unique: HashSet<_> = handles.iter().collect();
@@ -259,7 +260,7 @@ mod tests {
         #[test]
         fn prop_get_returns_created_path(path in "[a-z][a-z0-9]{0,20}") {
             let manager = HandleManager::new();
-            let handle = manager.create_dir_handle(path.clone());
+            let handle = manager.create_dir_handle(&path);
             let data = manager.get_dir_handle(handle.as_bytes());
             prop_assert!(data.is_some());
             let (p, _) = data.unwrap();
@@ -270,7 +271,7 @@ mod tests {
         fn prop_remove_clears_handle(path in "[a-z][a-z0-9]{0,20}") {
             let manager = HandleManager::new();
             let read_handle = Box::new(BufferedReadHandle::new(Bytes::new()));
-            let handle = manager.create_read_handle(path.clone(), read_handle);
+            let handle = manager.create_read_handle(&path, read_handle);
             manager.remove(handle.as_bytes());
             prop_assert!(manager.get_handle_info(handle.as_bytes()).is_none());
         }

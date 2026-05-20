@@ -5,14 +5,21 @@ use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
 use russh::{cipher, compression, Limits, Preferred};
 use std::borrow::Cow;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
+const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
+type ServerSetup<B> = (u16, SshServer<B>, Arc<SshConfig>);
+
 /// Server configuration
 #[derive(Clone)]
+#[must_use]
 pub struct ServerConfig {
     /// Port to bind to
     pub port: u16,
@@ -24,7 +31,7 @@ pub struct ServerConfig {
     pub ciphers: Option<Vec<cipher::Name>>,
     /// Enable compression (disabled by default for better throughput)
     pub compression: bool,
-    /// Enable TCP_NODELAY (disable Nagle's algorithm) for lower latency
+    /// Enable `TCP_NODELAY` (disable Nagle's algorithm) for lower latency
     /// Enabled by default for better small file/packet performance
     pub nodelay: bool,
     /// SSH channel window size for flow control (default: 2MB)
@@ -79,6 +86,10 @@ impl ServerConfig {
     }
 
     /// Generate a random Ed25519 key (useful for testing/development)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system random number generator fails.
     pub fn with_generated_key(mut self) -> Self {
         let key =
             russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
@@ -93,6 +104,10 @@ impl ServerConfig {
     }
 
     /// Load a host key from a file (OpenSSH format)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key file cannot be read or decoded.
     pub fn with_key_file(mut self, path: impl AsRef<Path>) -> Result<Self, russh::keys::Error> {
         let key = russh::keys::load_secret_key(path, None)?;
         self.keys.push(key);
@@ -100,13 +115,21 @@ impl ServerConfig {
     }
 
     /// Load a host key from PEM/OpenSSH format string data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key data cannot be decoded.
     pub fn with_key_data(mut self, data: &str) -> Result<Self, russh::keys::Error> {
         let key = russh::keys::decode_secret_key(data, None)?;
         self.keys.push(key);
         Ok(self)
     }
 
-    /// Load host key from HOST_KEY environment variable, or generate one if not set
+    /// Load host key from `HOST_KEY` environment variable, or generate one if not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a configured key cannot be read or decoded.
     pub fn with_key_from_env(self) -> Result<Self, russh::keys::Error> {
         if let Ok(key_data) = std::env::var("HOST_KEY") {
             self.with_key_data(&key_data)
@@ -117,7 +140,7 @@ impl ServerConfig {
         }
     }
 
-    /// Load host keys from standard system locations (/etc/ssh/ssh_host_*_key)
+    /// Load host keys from standard system locations (`/etc/ssh/ssh_host_*_key`)
     /// Returns self unchanged if no keys are found (doesn't fail)
     pub fn with_system_keys(mut self) -> Self {
         const SYSTEM_KEY_PATHS: &[&str] = &[
@@ -135,6 +158,14 @@ impl ServerConfig {
     }
 
     /// Load host key from env, then system, then cwd, then generate (and save to cwd)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a configured key cannot be read or decoded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if generating a fallback key or serializing it to OpenSSH format fails.
     pub fn with_default_keys(mut self) -> Result<Self, russh::keys::Error> {
         if let Ok(key_data) = std::env::var("HOST_KEY") {
             return self.with_key_data(&key_data);
@@ -149,7 +180,6 @@ impl ServerConfig {
         }
 
         // Try loading from cwd
-        const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
         if let Ok(key) = russh::keys::load_secret_key(CWD_KEY_PATH, None) {
             self.keys.push(key);
             return Ok(self);
@@ -158,10 +188,6 @@ impl ServerConfig {
         // Generate and try to save to cwd
         let key =
             russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
-
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
 
         let key_str = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
@@ -196,6 +222,7 @@ impl ServerConfig {
 }
 
 /// SFTP server builder
+#[must_use]
 pub struct Server<B: Backend> {
     backend: Arc<B>,
     config: ServerConfig,
@@ -241,8 +268,7 @@ impl<B: Backend> Server<B> {
             authorized
                 .iter()
                 .find(|(u, _)| u == user)
-                .map(|(_, keys)| keys.iter().any(|k| k == key))
-                .unwrap_or(false)
+                .is_some_and(|(_, keys)| keys.iter().any(|k| k == key))
         })
     }
 
@@ -252,7 +278,7 @@ impl<B: Backend> Server<B> {
         self.with_password_auth(move |user, pass| users.iter().any(|(u, p)| u == user && p == pass))
     }
 
-    /// Load authorized keys from ~/.ssh/authorized_keys
+    /// Load authorized keys from `~/.ssh/authorized_keys`.
     /// Returns self unchanged if file not found or not readable (doesn't fail)
     pub fn with_default_auth(self) -> Self {
         if let Some(home) = std::env::var_os("HOME") {
@@ -283,11 +309,8 @@ impl<B: Backend> Server<B> {
         self
     }
 
-    /// Build SSH config and server from current settings (shared setup for run/run_on_socket)
-    #[allow(clippy::type_complexity)]
-    fn prepare(
-        mut self,
-    ) -> Result<(u16, SshServer<B>, Arc<SshConfig>), Box<dyn std::error::Error + Send + Sync>> {
+    /// Build SSH config and server from current settings (shared setup for `run`/`run_on_socket`).
+    fn prepare(mut self) -> Result<ServerSetup<B>, Box<dyn std::error::Error + Send + Sync>> {
         let port = self.config.port;
         let mut keys = self.config.keys.clone();
         if keys.is_empty() {
@@ -354,6 +377,10 @@ impl<B: Backend> Server<B> {
     }
 
     /// Run the server
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SSH server setup fails or the listener cannot run.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (port, mut server, ssh_config) = self.prepare()?;
         let addr = format!("0.0.0.0:{port}");
@@ -362,7 +389,11 @@ impl<B: Backend> Server<B> {
         Ok(())
     }
 
-    /// Run the server on a pre-bound TcpListener (useful for testing with dynamic ports)
+    /// Run the server on a pre-bound `TcpListener` (useful for testing with dynamic ports).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SSH server setup fails or the listener cannot run.
     pub async fn run_on_socket(
         self,
         socket: &TcpListener,
@@ -374,6 +405,10 @@ impl<B: Backend> Server<B> {
 }
 
 /// Convenience function to run a server
+///
+/// # Errors
+///
+/// Returns an error if SSH server setup fails or the listener cannot run.
 pub async fn run<B: Backend>(
     backend: B,
     config: ServerConfig,
@@ -389,7 +424,8 @@ pub async fn run<B: Backend>(
 // Re-export auth types for advanced usage
 pub use crate::ssh_handler::{PasswordAuthCallback, PubkeyAuthCallback};
 
-/// Parse a cipher name string into a cipher::Name
+/// Parse a cipher name string into a `cipher::Name`.
+#[must_use]
 pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
     match s.trim() {
         "aes256-gcm" | "aes256-gcm@openssh.com" => Some(cipher::AES_256_GCM),

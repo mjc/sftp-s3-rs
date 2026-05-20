@@ -1,54 +1,20 @@
 use bytes::{Buf, Bytes};
 
-// russh-sftp master uses String handles and Vec<u8> data;
-// deserialize-bytes-optimization uses Bytes for both.
-#[cfg(feature = "sftp-master")]
-type SftpHandle = String;
-#[cfg(not(feature = "sftp-master"))]
 type SftpHandle = Bytes;
-
-#[cfg(feature = "sftp-master")]
-type SftpWriteData = Vec<u8>;
-#[cfg(not(feature = "sftp-master"))]
 type SftpWriteData = Bytes;
 
 fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
-    #[cfg(feature = "sftp-master")]
-    {
-        h.as_bytes()
-    }
-    #[cfg(not(feature = "sftp-master"))]
-    {
-        h.as_ref()
-    }
+    h.as_ref()
 }
 
 fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
-    #[cfg(feature = "sftp-master")]
-    {
-        Bytes::from(data)
-    }
-    #[cfg(not(feature = "sftp-master"))]
-    {
-        data
-    }
+    data
 }
 
-// The Data response struct also changed: master uses Vec<u8>, deser-opt uses Bytes.
-#[cfg(feature = "sftp-master")]
-type SftpResponseData = Vec<u8>;
-#[cfg(not(feature = "sftp-master"))]
 type SftpResponseData = Bytes;
 
 fn bytes_into_response_data(b: Bytes) -> SftpResponseData {
-    #[cfg(feature = "sftp-master")]
-    {
-        b.to_vec()
-    }
-    #[cfg(not(feature = "sftp-master"))]
-    {
-        b
-    }
+    b
 }
 
 use crate::backend::{normalize_path, Backend, BackendError, FileInfo};
@@ -61,10 +27,10 @@ use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 // Unix file type bits for SFTP
-const S_IFREG: u32 = 0o100000; // Regular file
-const S_IFDIR: u32 = 0o040000; // Directory
+const S_IFREG: u32 = 0o100_000; // Regular file
+const S_IFDIR: u32 = 0o040_000; // Directory
 
-/// Convert FileInfo to russh_sftp FileAttributes
+/// Convert `FileInfo` to `russh_sftp` `FileAttributes`.
 fn to_file_attributes(info: &FileInfo) -> FileAttributes {
     // SFTP requires file type bits in permissions
     let file_type = if info.is_dir { S_IFDIR } else { S_IFREG };
@@ -96,18 +62,17 @@ impl<B: Backend> SftpHandler<B> {
     }
 }
 
-/// Convert BackendError to SFTP StatusCode
+/// Convert `BackendError` to SFTP `StatusCode`.
 impl From<BackendError> for StatusCode {
     fn from(err: BackendError) -> Self {
         match err {
-            BackendError::NotFound => StatusCode::NoSuchFile,
+            BackendError::NotFound | BackendError::NotADirectory => StatusCode::NoSuchFile,
             BackendError::PermissionDenied => StatusCode::PermissionDenied,
-            BackendError::AlreadyExists => StatusCode::Failure,
-            BackendError::NotADirectory => StatusCode::NoSuchFile,
-            BackendError::IsADirectory => StatusCode::Failure,
-            BackendError::DirectoryNotEmpty => StatusCode::Failure,
-            BackendError::Io(_) => StatusCode::Failure,
-            BackendError::Other(_) => StatusCode::Failure,
+            BackendError::AlreadyExists
+            | BackendError::IsADirectory
+            | BackendError::DirectoryNotEmpty
+            | BackendError::Io(_)
+            | BackendError::Other(_) => StatusCode::Failure,
         }
     }
 }
@@ -147,8 +112,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(v)
     }
 
-    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle))))]
-    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self), fields(handle = %handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
         let hb = handle_as_bytes(&handle);
         // If it's a write handle, finish it
@@ -178,12 +142,11 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let handle = self.handles.create_dir_handle(normalized.into_owned());
+        let handle = self.handles.create_dir_handle(normalized.as_ref());
         Ok(Handle { id, handle })
     }
 
-    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle))))]
-    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self), fields(handle = %handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, Self::Error> {
         let hb = handle_as_bytes(&handle);
         let (path, read_done) = self.handles.get_dir_handle(hb).ok_or(StatusCode::Failure)?;
@@ -232,7 +195,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                 Ok(write_handle) => {
                     let h = self
                         .handles
-                        .create_write_handle(normalized.into_owned(), write_handle);
+                        .create_write_handle(normalized.as_ref(), write_handle);
                     debug!(id, path = %path, handle = %h, "Opened file for write");
                     h
                 }
@@ -247,7 +210,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                 Ok(read_handle) => {
                     let h = self
                         .handles
-                        .create_read_handle(normalized.into_owned(), read_handle);
+                        .create_read_handle(normalized.as_ref(), read_handle);
                     debug!(id, path = %path, handle = %h, "Opened file for read");
                     h
                 }
@@ -261,8 +224,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(Handle { id, handle })
     }
 
-    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle))))]
-    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self), fields(handle = %handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
     async fn read(
         &mut self,
         id: u32,
@@ -292,8 +254,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
-    #[cfg_attr(not(feature = "sftp-master"), instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len())))]
-    #[cfg_attr(feature = "sftp-master", instrument(level = "debug", skip(self, data), fields(handle = %handle, len = data.len())))]
+    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len()))]
     async fn write(
         &mut self,
         id: u32,
@@ -357,11 +318,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
             HandleInfo::Write { path } => {
                 // For write handles, we don't know the final size yet
-                self.backend
-                    .file_info(&path)
-                    .await
-                    .map(|i| to_file_attributes(&i))
-                    .unwrap_or_else(|_| to_file_attributes(&FileInfo::file(0)))
+                self.backend.file_info(&path).await.map_or_else(
+                    |_| to_file_attributes(&FileInfo::file(0)),
+                    |i| to_file_attributes(&i),
+                )
             }
         };
 
@@ -373,7 +333,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         let absolute = if normalized.is_empty() {
             "/".to_string()
         } else {
-            format!("/{}", normalized)
+            format!("/{normalized}")
         };
 
         Ok(Name {
@@ -569,25 +529,11 @@ mod tests {
     }
 
     fn to_sftp_handle(s: String) -> SftpHandle {
-        #[cfg(feature = "sftp-master")]
-        {
-            s
-        }
-        #[cfg(not(feature = "sftp-master"))]
-        {
-            Bytes::from(s.into_bytes())
-        }
+        Bytes::from(s.into_bytes())
     }
 
     fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
-        #[cfg(feature = "sftp-master")]
-        {
-            v.into()
-        }
-        #[cfg(not(feature = "sftp-master"))]
-        {
-            Bytes::from(v.into())
-        }
+        Bytes::from(v.into())
     }
 
     // Helper: init the SFTP session
@@ -778,6 +724,9 @@ mod tests {
         assert_eq!(result.files[0].filename, "/foo/bar");
 
         let result = handler.realpath(3, String::new()).await.unwrap();
+        assert_eq!(result.files[0].filename, "/");
+
+        let result = handler.realpath(4, "/..".to_string()).await.unwrap();
         assert_eq!(result.files[0].filename, "/");
     }
 
