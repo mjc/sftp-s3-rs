@@ -13,6 +13,7 @@ use tracing::debug;
 
 /// Marker file for empty directories (matching Elixir implementation)
 const KEEP_MARKER: &str = ".keep";
+const DIRECTORY_LISTING_MTIME: u32 = 0;
 
 /// S3 storage backend configuration
 #[derive(Debug, Clone)]
@@ -219,8 +220,11 @@ impl Backend for S3Backend {
                     .unwrap_or_else(current_timestamp);
                 return Ok(FileInfo::file_with_mtime(size, mtime));
             }
-            Err(_) => {
-                // Not a file, check if it's a directory
+            Err(err) => {
+                let mapped = Self::map_s3_error(err);
+                if !matches!(mapped, BackendError::NotFound) {
+                    return Err(mapped);
+                }
             }
         }
 
@@ -420,7 +424,7 @@ impl S3Backend {
         if let Some(name) = Self::strip_listing_prefix(trimmed, listing_prefix) {
             entries_by_name
                 .entry(name)
-                .or_insert_with(FileInfo::directory);
+                .or_insert_with(|| FileInfo::directory_with_mtime(DIRECTORY_LISTING_MTIME));
         }
     }
 
@@ -778,8 +782,14 @@ mod tests {
 
         let names: Vec<_> = entries.keys().map(String::as_str).collect();
         assert_eq!(names, vec!["a.txt", "dir", "z.txt"]);
-        assert!(entries.get("dir").unwrap().is_dir);
-        assert!(!entries.get("a.txt").unwrap().is_dir);
+        let dir = entries.get("dir").unwrap();
+        assert!(dir.is_dir);
+        assert_eq!(dir.mtime, DIRECTORY_LISTING_MTIME);
+        assert_eq!(dir.atime, DIRECTORY_LISTING_MTIME);
+
+        let file = entries.get("a.txt").unwrap();
+        assert!(!file.is_dir);
+        assert_eq!(file.mtime, 100);
     }
 
     #[test]
