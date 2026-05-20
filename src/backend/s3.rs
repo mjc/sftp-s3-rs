@@ -8,7 +8,7 @@ use aws_sdk_s3::types::CompletedMultipartUpload;
 use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Marker file for empty directories (matching Elixir implementation)
@@ -120,16 +120,71 @@ impl Backend for S3Backend {
 
         debug!(prefix = %prefix, "Listing S3 objects");
 
-        let result = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.config.bucket)
-            .prefix(&prefix)
-            .send()
-            .await
-            .map_err(Self::map_s3_error)?;
+        let mut entries_by_name = BTreeMap::new();
+        let mut continuation_token = None;
 
-        let mut seen = HashSet::new();
+        loop {
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.config.bucket)
+                .prefix(&prefix)
+                .delimiter("/");
+
+            if let Some(token) = continuation_token.as_deref() {
+                request = request.continuation_token(token);
+            }
+
+            let result = request.send().await.map_err(Self::map_s3_error)?;
+
+            if let Some(contents) = result.contents {
+                for obj in contents {
+                    let Some(key) = obj.key else {
+                        continue;
+                    };
+                    let Some(name) = Self::strip_listing_prefix(&key, &prefix) else {
+                        continue;
+                    };
+
+                    let mtime = obj
+                        .last_modified
+                        .as_ref()
+                        .map(Self::parse_datetime)
+                        .unwrap_or_else(current_timestamp);
+                    let size = obj.size.unwrap_or(0) as u64;
+
+                    entries_by_name
+                        .entry(name)
+                        .or_insert_with(|| FileInfo::file_with_mtime(size, mtime));
+                }
+            }
+
+            if let Some(common_prefixes) = result.common_prefixes {
+                for common_prefix in common_prefixes {
+                    let Some(prefix_key) = common_prefix.prefix else {
+                        continue;
+                    };
+                    let trimmed = prefix_key.trim_end_matches('/');
+                    let Some(name) = Self::strip_listing_prefix(trimmed, &prefix) else {
+                        continue;
+                    };
+
+                    entries_by_name
+                        .entry(name)
+                        .or_insert_with(FileInfo::directory);
+                }
+            }
+
+            if result.is_truncated.unwrap_or(false) {
+                continuation_token = result.next_continuation_token;
+                if continuation_token.is_some() {
+                    continue;
+                }
+            }
+
+            break;
+        }
+
         let mut entries = vec![
             DirEntry {
                 name: ".".to_string(),
@@ -140,48 +195,11 @@ impl Backend for S3Backend {
                 attrs: FileInfo::directory(),
             },
         ];
-
-        if let Some(contents) = result.contents {
-            for obj in contents {
-                if let Some(key) = obj.key {
-                    let relative = if prefix.is_empty() {
-                        key.clone()
-                    } else {
-                        key.strip_prefix(&prefix).unwrap_or(&key).to_string()
-                    };
-
-                    // Get first path component
-                    let name = relative.split('/').next().unwrap_or(&relative);
-
-                    // Skip empty names and .keep markers at root level
-                    if name.is_empty() || name == KEEP_MARKER {
-                        continue;
-                    }
-
-                    if seen.insert(name.to_string()) {
-                        // Determine if directory (has objects under it) or file
-                        let is_dir = relative.contains('/');
-                        let mtime = obj
-                            .last_modified
-                            .as_ref()
-                            .map(Self::parse_datetime)
-                            .unwrap_or_else(current_timestamp);
-                        let size = obj.size.unwrap_or(0) as u64;
-
-                        let attrs = if is_dir {
-                            FileInfo::directory_with_mtime(mtime)
-                        } else {
-                            FileInfo::file_with_mtime(size, mtime)
-                        };
-
-                        entries.push(DirEntry {
-                            name: name.to_string(),
-                            attrs,
-                        });
-                    }
-                }
-            }
-        }
+        entries.extend(
+            entries_by_name
+                .into_iter()
+                .map(|(name, attrs)| DirEntry { name, attrs }),
+        );
 
         Ok(entries)
     }
@@ -226,12 +244,19 @@ impl Backend for S3Backend {
             .list_objects_v2()
             .bucket(&self.config.bucket)
             .prefix(&prefix)
+            .delimiter("/")
             .max_keys(1)
             .send()
             .await
             .map_err(Self::map_s3_error)?;
 
-        if result.contents.map(|c| !c.is_empty()).unwrap_or(false) {
+        let has_contents = result.contents.map(|c| !c.is_empty()).unwrap_or(false);
+        let has_prefixes = result
+            .common_prefixes
+            .map(|p| !p.is_empty())
+            .unwrap_or(false);
+
+        if has_contents || has_prefixes {
             Ok(FileInfo::directory())
         } else {
             Err(BackendError::NotFound)
@@ -396,6 +421,22 @@ impl Backend for S3Backend {
             parts: Vec::new(),
             part_number: 1,
         }))
+    }
+}
+
+impl S3Backend {
+    fn strip_listing_prefix(key: &str, prefix: &str) -> Option<String> {
+        let entry = if prefix.is_empty() {
+            key
+        } else {
+            key.strip_prefix(prefix)?
+        };
+
+        if entry.is_empty() || entry == KEEP_MARKER || entry.contains('/') {
+            None
+        } else {
+            Some(entry.to_string())
+        }
     }
 }
 
@@ -671,6 +712,41 @@ mod tests {
     fn test_build_key_nested_path() {
         let config = make_backend_config("bucket", "tenant/data/");
         assert_eq!(build_key_fn(&config, "/a/b/c.txt"), "tenant/data/a/b/c.txt");
+    }
+
+    // --- listing prefix tests ---
+
+    #[test]
+    fn test_strip_listing_prefix_root_file() {
+        assert_eq!(
+            S3Backend::strip_listing_prefix("file.txt", ""),
+            Some("file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_prefix_prefixed_file() {
+        assert_eq!(
+            S3Backend::strip_listing_prefix("tenant/file.txt", "tenant/"),
+            Some("file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_prefix_ignores_nested_files() {
+        assert_eq!(
+            S3Backend::strip_listing_prefix("tenant/dir/file.txt", "tenant/"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_strip_listing_prefix_ignores_keep_markers_and_empty_entries() {
+        assert_eq!(S3Backend::strip_listing_prefix("tenant/", "tenant/"), None);
+        assert_eq!(
+            S3Backend::strip_listing_prefix("tenant/.keep", "tenant/"),
+            None
+        );
     }
 
     // --- map_s3_error tests ---

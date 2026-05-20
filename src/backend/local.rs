@@ -4,7 +4,7 @@ use super::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -24,13 +24,26 @@ impl LocalBackend {
         }
     }
 
-    /// Get the full filesystem path for a normalized SFTP path
-    fn full_path(&self, path: &str) -> PathBuf {
-        if path.is_empty() {
-            self.root.clone()
-        } else {
-            self.root.join(path)
+    /// Get the full filesystem path for an SFTP path, rejecting traversal
+    /// outside the configured root.
+    fn full_path(&self, path: &str) -> BackendResult<PathBuf> {
+        let normalized = normalize_path(path);
+        if normalized.is_empty() {
+            return Ok(self.root.clone());
         }
+
+        let mut full_path = self.root.clone();
+        for component in Path::new(normalized.as_ref()).components() {
+            match component {
+                Component::Normal(part) => full_path.push(part),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(BackendError::PermissionDenied);
+                }
+            }
+        }
+
+        Ok(full_path)
     }
 
     /// Convert std::io::Error to BackendError
@@ -91,8 +104,7 @@ impl LocalBackend {
 #[async_trait]
 impl Backend for LocalBackend {
     async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Listing directory");
 
@@ -121,8 +133,7 @@ impl Backend for LocalBackend {
     }
 
     async fn file_info(&self, path: &str) -> BackendResult<FileInfo> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Getting file info");
 
@@ -131,8 +142,7 @@ impl Backend for LocalBackend {
     }
 
     async fn make_dir(&self, path: &str) -> BackendResult<()> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Creating directory");
 
@@ -140,8 +150,7 @@ impl Backend for LocalBackend {
     }
 
     async fn del_dir(&self, path: &str) -> BackendResult<()> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Removing directory");
 
@@ -149,8 +158,7 @@ impl Backend for LocalBackend {
     }
 
     async fn delete(&self, path: &str) -> BackendResult<()> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Deleting file");
 
@@ -160,8 +168,8 @@ impl Backend for LocalBackend {
     }
 
     async fn rename(&self, src: &str, dst: &str) -> BackendResult<()> {
-        let src_path = self.full_path(&normalize_path(src));
-        let dst_path = self.full_path(&normalize_path(dst));
+        let src_path = self.full_path(src)?;
+        let dst_path = self.full_path(dst)?;
 
         debug!(from = %src_path.display(), to = %dst_path.display(), "Renaming");
 
@@ -171,8 +179,7 @@ impl Backend for LocalBackend {
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Bytes> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Reading file");
 
@@ -181,8 +188,7 @@ impl Backend for LocalBackend {
     }
 
     async fn write_file(&self, path: &str, content: Bytes) -> BackendResult<()> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), len = content.len(), "Writing file");
 
@@ -192,8 +198,7 @@ impl Backend for LocalBackend {
     }
 
     async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Opening file for read");
 
@@ -211,8 +216,7 @@ impl Backend for LocalBackend {
     }
 
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
-        let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Opening file for write");
 
@@ -367,6 +371,44 @@ mod tests {
         backend.delete("test.txt").await.unwrap();
         let result = backend.read_file("test.txt").await;
         assert!(matches!(result, Err(BackendError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_rejects_parent_directory_traversal() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+        let outside_name = format!(
+            "{}-outside.txt",
+            temp_dir.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let result = backend
+            .write_file(&format!("../{outside_name}"), Bytes::from_static(b"nope"))
+            .await;
+
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+        assert!(
+            !temp_dir
+                .path()
+                .parent()
+                .unwrap()
+                .join(outside_name)
+                .exists(),
+            "traversal must not create files outside the backend root"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rejects_traversal_after_normal_component() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("safe").await.unwrap();
+        let result = backend
+            .write_file("safe/../../outside.txt", Bytes::from_static(b"nope"))
+            .await;
+
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
     }
 
     #[tokio::test]
