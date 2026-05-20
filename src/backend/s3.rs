@@ -18,6 +18,7 @@ const DIRECTORY_LISTING_MTIME: u32 = 0;
 
 /// S3 storage backend configuration
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct S3Config {
     /// S3 bucket name (required)
     pub bucket: String,
@@ -40,6 +41,7 @@ impl S3Config {
 }
 
 /// S3 storage backend
+#[must_use]
 pub struct S3Backend {
     client: Client,
     config: S3Config,
@@ -58,7 +60,7 @@ impl S3Backend {
         Self::new(client, config)
     }
 
-    /// Create with custom endpoint (for MinIO, LocalStack, etc)
+    /// Create with custom endpoint (for `MinIO`, `LocalStack`, etc).
     pub async fn with_endpoint(config: S3Config, endpoint: &str, region: &str) -> Self {
         let sdk_config = aws_config::from_env()
             .endpoint_url(endpoint)
@@ -88,7 +90,7 @@ impl S3Backend {
         }
     }
 
-    /// Convert S3 error to BackendError
+    /// Convert S3 error to `BackendError`.
     fn map_s3_error(err: impl Display + Debug) -> BackendError {
         let msg = err.to_string();
         let debug_msg = format!("{err:?}");
@@ -115,7 +117,7 @@ impl S3Backend {
         }
     }
 
-    /// Parse AWS DateTime to Unix timestamp
+    /// Parse AWS `DateTime` to Unix timestamp.
     fn parse_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> u32 {
         u64::try_from(dt.secs()).map_or(0, unix_secs_to_u32)
     }

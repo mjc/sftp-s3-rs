@@ -1,12 +1,5 @@
 //! SFTP server with pluggable backends (local filesystem, S3, memory)
 
-#![allow(
-    clippy::doc_markdown,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use
-)]
-
 use clap::Parser;
 use sftp_s3::{parse_cipher, LocalBackend, MemoryBackend, Server, ServerConfig, AVAILABLE_CIPHERS};
 use std::path::PathBuf;
@@ -67,7 +60,7 @@ struct Cli {
     #[arg(short, long = "user", env = "SFTP_USERS", value_delimiter = ',')]
     users: Vec<String>,
 
-    /// Path to authorized_keys file for public key auth
+    /// Path to `authorized_keys` file for public key auth
     #[arg(long, env = "AUTHORIZED_KEYS_FILE")]
     authorized_keys_file: Option<PathBuf>,
 

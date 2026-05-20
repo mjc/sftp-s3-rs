@@ -51,7 +51,7 @@ impl LocalBackend {
         Ok(self.root.join(relative_path))
     }
 
-    /// Convert std::io::Error to BackendError
+    /// Convert `std::io::Error` to `BackendError`.
     fn map_io_error(err: std::io::Error) -> BackendError {
         match err.kind() {
             std::io::ErrorKind::NotFound => BackendError::NotFound,
@@ -63,7 +63,7 @@ impl LocalBackend {
         }
     }
 
-    /// Convert filesystem metadata to FileInfo
+    /// Convert filesystem metadata to `FileInfo`.
     fn metadata_to_info(metadata: &std::fs::Metadata) -> FileInfo {
         let mtime = metadata
             .modified()

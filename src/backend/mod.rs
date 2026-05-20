@@ -38,7 +38,7 @@ pub enum BackendError {
     Other(String),
 }
 
-/// Directory entry returned by list_dir
+/// Directory entry returned by `list_dir`.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     pub name: String,
@@ -47,6 +47,7 @@ pub struct DirEntry {
 
 /// File metadata information
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct FileInfo {
     pub size: u64,
     pub is_dir: bool,
@@ -58,7 +59,7 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    /// Create FileInfo for a directory
+    /// Create `FileInfo` for a directory.
     pub fn directory() -> Self {
         Self {
             size: 4096,
@@ -71,7 +72,7 @@ impl FileInfo {
         }
     }
 
-    /// Create FileInfo for a directory with specific mtime
+    /// Create `FileInfo` for a directory with specific mtime.
     pub fn directory_with_mtime(mtime: u32) -> Self {
         Self {
             size: 4096,
@@ -84,7 +85,7 @@ impl FileInfo {
         }
     }
 
-    /// Create FileInfo for a regular file
+    /// Create `FileInfo` for a regular file.
     pub fn file(size: u64) -> Self {
         Self {
             size,
@@ -97,7 +98,7 @@ impl FileInfo {
         }
     }
 
-    /// Create FileInfo for a regular file with specific mtime
+    /// Create `FileInfo` for a regular file with specific mtime.
     pub fn file_with_mtime(size: u64, mtime: u32) -> Self {
         Self {
             size,
@@ -166,6 +167,7 @@ impl ReadHandle for BufferedReadHandle {
 
 /// Write handle that buffers in memory and returns data on finish
 /// Used by simple backends that don't support streaming
+#[must_use]
 pub struct BufferedWriteHandle {
     buffer: Vec<u8>,
 }
@@ -176,6 +178,7 @@ impl BufferedWriteHandle {
     }
 
     /// Get the buffered data (for backends to write after finish)
+    #[must_use]
     pub fn into_bytes(self) -> Bytes {
         Bytes::from(self.buffer)
     }
@@ -288,21 +291,22 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Open a file for streaming reads
     ///
-    /// Returns a ReadHandle for reading file data in chunks.
+    /// Returns a `ReadHandle` for reading file data in chunks.
     /// For backends that support range requests (e.g., S3), this enables
     /// reading large files without loading them entirely into memory.
     async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>>;
 
     /// Open a file for streaming writes
     ///
-    /// Returns a WriteHandle for writing file data in chunks.
+    /// Returns a `WriteHandle` for writing file data in chunks.
     /// For backends that support multipart uploads (e.g., S3), this enables
     /// uploading large files without buffering them entirely in memory.
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>>;
 }
 
 /// Normalize a path: trim leading/trailing slashes, handle empty as root.
-/// Returns Cow::Borrowed when input is already normalized, avoiding allocation.
+/// Returns `Cow::Borrowed` when input is already normalized, avoiding allocation.
+#[must_use]
 pub fn normalize_path(path: &str) -> Cow<'_, str> {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
@@ -316,6 +320,7 @@ pub fn normalize_path(path: &str) -> Cow<'_, str> {
 }
 
 /// Get current Unix timestamp
+#[must_use]
 pub fn current_timestamp() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

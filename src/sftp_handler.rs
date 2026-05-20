@@ -30,7 +30,7 @@ use tracing::{debug, instrument, warn};
 const S_IFREG: u32 = 0o100_000; // Regular file
 const S_IFDIR: u32 = 0o040_000; // Directory
 
-/// Convert FileInfo to russh_sftp FileAttributes
+/// Convert `FileInfo` to `russh_sftp` `FileAttributes`.
 fn to_file_attributes(info: &FileInfo) -> FileAttributes {
     // SFTP requires file type bits in permissions
     let file_type = if info.is_dir { S_IFDIR } else { S_IFREG };
@@ -62,7 +62,7 @@ impl<B: Backend> SftpHandler<B> {
     }
 }
 
-/// Convert BackendError to SFTP StatusCode
+/// Convert `BackendError` to SFTP `StatusCode`.
 impl From<BackendError> for StatusCode {
     fn from(err: BackendError) -> Self {
         match err {

@@ -18,6 +18,7 @@ struct FileData {
 }
 
 /// In-memory storage backend for testing and development
+#[must_use]
 pub struct MemoryBackend {
     files: Arc<RwLock<HashMap<String, FileData>>>,
 }

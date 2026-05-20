@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::backend::Backend;
+use crate::backend::{Backend, WriteHandle};
 use bytes::BytesMut;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -50,7 +50,11 @@ impl<B: Backend> ScpHandler<B> {
         Self { backend }
     }
 
-    /// Run SCP protocol handler
+    /// Run SCP protocol handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if command parsing, backend operations, or stream I/O fails.
     pub async fn run<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         &mut self,
         mut stream: S,
@@ -165,94 +169,15 @@ impl<B: Backend> ScpHandler<B> {
 
             match buf[0] {
                 b'C' => {
-                    // File transfer
                     let line = Self::read_line(stream).await?;
-                    let msg = Self::parse_file_message(&line)?;
-
-                    if let ScpMessage::File { mode, size, name } = msg {
-                        // Use explicit target if provided, otherwise use current_dir + name
-                        let file_path = if let Some(ref target) = explicit_target {
-                            target.clone()
-                        } else {
-                            format!("{}/{}", current_dir.trim_end_matches('/'), name)
-                        };
-                        debug!(
-                            "SCP receive file: path={} size={} mode={}",
-                            file_path, size, mode
-                        );
-                        debug!("SCP receive file: {} ({} bytes)", file_path, size);
-
-                        // Create write handle
-                        let mut handle = self
-                            .backend
-                            .open_write(&file_path)
-                            .await
-                            .map_err(|e| ScpError::Backend(e.to_string()))?;
-
-                        // Send OK for metadata
-                        self.send_status(stream, SCP_OK, "").await?;
-
-                        // Read and write file data
-                        let mut remaining = size;
-                        let mut offset = 0u64;
-                        let mut transfer_buf = BytesMut::with_capacity(65536);
-
-                        debug!("Starting to read {} bytes of file data", size);
-                        while remaining > 0 {
-                            let capacity =
-                                u64::try_from(transfer_buf.capacity()).unwrap_or(u64::MAX);
-                            let to_read = usize::try_from(std::cmp::min(remaining, capacity))
-                                .map_err(|_| {
-                                    ScpError::Protocol("transfer chunk too large".into())
-                                })?;
-                            transfer_buf.resize(to_read, 0);
-                            stream.read_exact(&mut transfer_buf[..to_read]).await?;
-
-                            // Split without copying: transfer_buf chunk becomes independent Bytes
-                            // The underlying memory is shared, but split_to handles the reference counting
-                            let data = transfer_buf.split_to(to_read).freeze();
-                            handle
-                                .write_at(offset, data)
-                                .await
-                                .map_err(|e| ScpError::Backend(e.to_string()))?;
-                            let bytes_read = u64::try_from(to_read).unwrap_or(u64::MAX);
-                            offset += bytes_read;
-                            remaining -= bytes_read;
-                            debug!("Read {} bytes, remaining: {}", to_read, remaining);
-                        }
-                        debug!("Finished reading file data, total: {} bytes", offset);
-
-                        // Set file permissions if not default
-                        if mode != "0644" && mode != "0755" {
-                            debug!("SCP receive: preserving mode {}", mode);
-                        }
-
-                        // Finish the write
-                        handle
-                            .finish()
-                            .await
-                            .map_err(|e| ScpError::Backend(e.to_string()))?;
-
-                        // Set mtime if pending
-                        if let Some(mtime) = pending_mtime.take() {
-                            debug!("SCP receive: setting mtime to {}", mtime);
-                        }
-
-                        // Read terminating null byte from client (confirmation of data sent)
-                        debug!("Waiting for client confirmation byte...");
-                        let mut confirm = [0u8; 1];
-                        stream.read_exact(&mut confirm).await?;
-                        debug!("Got confirmation byte: {}", confirm[0]);
-                        if confirm[0] != 0 {
-                            return Err(ScpError::Protocol(format!(
-                                "expected null byte after file data, got {}",
-                                confirm[0]
-                            )));
-                        }
-
-                        // Send OK after data received
-                        self.send_status(stream, SCP_OK, "").await?;
-                    }
+                    self.receive_file(
+                        stream,
+                        &line,
+                        &current_dir,
+                        explicit_target.as_deref(),
+                        &mut pending_mtime,
+                    )
+                    .await?;
                 }
                 b'D' => {
                     // Directory creation
@@ -316,6 +241,110 @@ impl<B: Backend> ScpHandler<B> {
             }
         }
 
+        Ok(())
+    }
+
+    async fn receive_file<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &mut self,
+        stream: &mut S,
+        line: &str,
+        current_dir: &str,
+        explicit_target: Option<&str>,
+        pending_mtime: &mut Option<u64>,
+    ) -> Result<(), ScpError> {
+        let msg = Self::parse_file_message(line)?;
+
+        if let ScpMessage::File { mode, size, name } = msg {
+            let file_path = explicit_target.map_or_else(
+                || format!("{}/{}", current_dir.trim_end_matches('/'), name),
+                ToString::to_string,
+            );
+            debug!("SCP receive file: path={file_path} size={size} mode={mode}");
+            debug!("SCP receive file: {file_path} ({size} bytes)");
+
+            let mut handle = self
+                .backend
+                .open_write(&file_path)
+                .await
+                .map_err(|e| ScpError::Backend(e.to_string()))?;
+
+            self.send_status(stream, SCP_OK, "").await?;
+
+            let mut remaining = size;
+            let mut offset = 0u64;
+            let mut transfer_buf = BytesMut::with_capacity(65_536);
+
+            debug!("Starting to read {size} bytes of file data");
+            while remaining > 0 {
+                let bytes_read = Self::receive_file_chunk(
+                    stream,
+                    &mut *handle,
+                    &mut transfer_buf,
+                    remaining,
+                    offset,
+                )
+                .await?;
+                offset += bytes_read;
+                remaining -= bytes_read;
+                debug!("Read {bytes_read} bytes, remaining: {remaining}");
+            }
+            debug!("Finished reading file data, total: {offset} bytes");
+
+            if mode != "0644" && mode != "0755" {
+                debug!("SCP receive: preserving mode {mode}");
+            }
+
+            handle
+                .finish()
+                .await
+                .map_err(|e| ScpError::Backend(e.to_string()))?;
+
+            if let Some(mtime) = pending_mtime.take() {
+                debug!("SCP receive: setting mtime to {mtime}");
+            }
+
+            Self::read_file_confirmation(stream).await?;
+            self.send_status(stream, SCP_OK, "").await?;
+        }
+
+        Ok(())
+    }
+
+    async fn receive_file_chunk<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        stream: &mut S,
+        handle: &mut dyn WriteHandle,
+        transfer_buf: &mut BytesMut,
+        remaining: u64,
+        offset: u64,
+    ) -> Result<u64, ScpError> {
+        let capacity = u64::try_from(transfer_buf.capacity()).unwrap_or(u64::MAX);
+        let to_read = usize::try_from(std::cmp::min(remaining, capacity))
+            .map_err(|_| ScpError::Protocol("transfer chunk too large".into()))?;
+        transfer_buf.resize(to_read, 0);
+        stream.read_exact(&mut transfer_buf[..to_read]).await?;
+
+        let data = transfer_buf.split_to(to_read).freeze();
+        handle
+            .write_at(offset, data)
+            .await
+            .map_err(|e| ScpError::Backend(e.to_string()))?;
+
+        Ok(u64::try_from(to_read).unwrap_or(u64::MAX))
+    }
+
+    async fn read_file_confirmation<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        stream: &mut S,
+    ) -> Result<(), ScpError> {
+        debug!("Waiting for client confirmation byte...");
+        let mut confirm = [0u8; 1];
+        stream.read_exact(&mut confirm).await?;
+        debug!("Got confirmation byte: {}", confirm[0]);
+        if confirm[0] != 0 {
+            return Err(ScpError::Protocol(format!(
+                "expected null byte after file data, got {}",
+                confirm[0]
+            )));
+        }
         Ok(())
     }
 

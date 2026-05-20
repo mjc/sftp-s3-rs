@@ -61,15 +61,6 @@
 //! }
 //! ```
 
-#![allow(
-    clippy::doc_markdown,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::too_many_lines
-)]
-
 pub mod backend;
 pub mod error;
 pub mod handle;

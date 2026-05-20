@@ -29,6 +29,7 @@ pub enum HandleType {
 }
 
 /// Manages file handles for SFTP sessions using numeric IDs
+#[must_use]
 pub struct HandleManager {
     handles: RwLock<HashMap<u64, HandleType>>,
     next_id: AtomicU64,
