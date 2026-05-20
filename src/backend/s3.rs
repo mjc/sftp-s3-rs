@@ -125,6 +125,18 @@ impl S3Backend {
     fn s3_size_to_u64(size: i64) -> u64 {
         u64::try_from(size).unwrap_or(0)
     }
+
+    fn directory_probe_result(
+        has_contents: bool,
+        has_prefixes: bool,
+        head_error: Option<BackendError>,
+    ) -> BackendResult<FileInfo> {
+        if has_contents || has_prefixes {
+            Ok(FileInfo::directory())
+        } else {
+            Err(head_error.unwrap_or(BackendError::NotFound))
+        }
+    }
 }
 
 #[async_trait]
@@ -262,11 +274,7 @@ impl Backend for S3Backend {
         let has_contents = result.contents.is_some_and(|c| !c.is_empty());
         let has_prefixes = result.common_prefixes.is_some_and(|p| !p.is_empty());
 
-        if has_contents || has_prefixes {
-            Ok(FileInfo::directory())
-        } else {
-            Err(head_error.unwrap_or(BackendError::NotFound))
-        }
+        Self::directory_probe_result(has_contents, has_prefixes, head_error)
     }
 
     async fn make_dir(&self, path: &str) -> BackendResult<()> {
@@ -815,6 +823,18 @@ mod tests {
             Some("empty-dir".to_string())
         );
         assert_eq!(
+            S3Backend::strip_listing_directory_marker("empty-dir/", ""),
+            Some("empty-dir".to_string())
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/.keep/", "tenant/"),
+            None
+        );
+        assert_eq!(
+            S3Backend::strip_listing_directory_marker("tenant/", "tenant/"),
+            None
+        );
+        assert_eq!(
             S3Backend::strip_listing_directory_marker("tenant/nested/dir/", "tenant/"),
             None
         );
@@ -822,6 +842,17 @@ mod tests {
             S3Backend::strip_listing_directory_marker("tenant/file.txt", "tenant/"),
             None
         );
+    }
+
+    #[test]
+    fn test_listing_collection_treats_root_marker_as_directory() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "empty-dir/", "", 0, 321);
+
+        let entry = entries.get("empty-dir").unwrap();
+        assert!(entry.is_dir);
+        assert_eq!(entry.mtime, 321);
     }
 
     #[test]
@@ -860,6 +891,79 @@ mod tests {
 
         let info = entries.get("shared").unwrap();
         assert!(info.is_dir);
+    }
+
+    #[test]
+    fn test_listing_collection_keeps_directory_marker_when_file_overlaps() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared/", "tenant/", 0, 200);
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared", "tenant/", 12, 100);
+
+        let info = entries.get("shared").unwrap();
+        assert!(info.is_dir);
+        assert_eq!(info.mtime, 200);
+    }
+
+    #[test]
+    fn test_listing_collection_keeps_file_when_marker_arrives_later() {
+        let mut entries = BTreeMap::new();
+
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared", "tenant/", 12, 100);
+        S3Backend::insert_listing_file(&mut entries, "tenant/shared/", "tenant/", 0, 200);
+
+        let info = entries.get("shared").unwrap();
+        assert!(!info.is_dir);
+        assert_eq!(info.size, 12);
+    }
+
+    #[test]
+    fn test_directory_probe_returns_directory_after_permission_denied_head() {
+        let info =
+            S3Backend::directory_probe_result(true, false, Some(BackendError::PermissionDenied))
+                .unwrap();
+
+        assert!(info.is_dir);
+    }
+
+    #[test]
+    fn test_directory_probe_returns_directory_from_common_prefix_after_head_error() {
+        let info = S3Backend::directory_probe_result(
+            false,
+            true,
+            Some(BackendError::Other("head failed".into())),
+        )
+        .unwrap();
+
+        assert!(info.is_dir);
+    }
+
+    #[test]
+    fn test_directory_probe_preserves_permission_denied_when_no_directory_exists() {
+        let result =
+            S3Backend::directory_probe_result(false, false, Some(BackendError::PermissionDenied));
+
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+    }
+
+    #[test]
+    fn test_directory_probe_defaults_to_not_found_without_head_error() {
+        let result = S3Backend::directory_probe_result(false, false, None);
+
+        assert!(matches!(result, Err(BackendError::NotFound)));
+    }
+
+    #[test]
+    fn test_s3_size_to_u64_clamps_negative_values() {
+        assert_eq!(S3Backend::s3_size_to_u64(-1), 0);
+        assert_eq!(S3Backend::s3_size_to_u64(42), 42);
+    }
+
+    #[test]
+    fn test_parse_datetime_clamps_negative_timestamps() {
+        let dt = aws_sdk_s3::primitives::DateTime::from_secs(-1);
+
+        assert_eq!(S3Backend::parse_datetime(&dt), 0);
     }
 
     // --- map_s3_error tests ---
