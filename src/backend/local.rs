@@ -430,6 +430,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_allows_multiple_in_root_parent_segments() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("a").await.unwrap();
+        backend.make_dir("a/b").await.unwrap();
+        backend
+            .write_file("a/b/../c.txt", Bytes::from_static(b"nested"))
+            .await
+            .unwrap();
+
+        let read = backend.read_file("a/c.txt").await.unwrap();
+        assert_eq!(read, Bytes::from_static(b"nested"));
+    }
+
+    #[tokio::test]
+    async fn test_current_dir_segments_are_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("safe").await.unwrap();
+        backend
+            .write_file("safe/./file.txt", Bytes::from_static(b"dot"))
+            .await
+            .unwrap();
+
+        let read = backend.read_file("safe/file.txt").await.unwrap();
+        assert_eq!(read, Bytes::from_static(b"dot"));
+    }
+
+    #[tokio::test]
+    async fn test_rejects_traversal_with_multiple_parent_segments() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("a").await.unwrap();
+        backend.make_dir("a/b").await.unwrap();
+        let result = backend
+            .write_file("a/b/../../../outside.txt", Bytes::from_static(b"nope"))
+            .await;
+
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+        assert!(!temp_dir.path().join("outside.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_rename_with_in_root_parent_segments() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("a").await.unwrap();
+        backend.make_dir("a/b").await.unwrap();
+        backend
+            .write_file("a/b/source.txt", Bytes::from_static(b"rename"))
+            .await
+            .unwrap();
+
+        backend
+            .rename("a/b/source.txt", "a/b/../dest.txt")
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            backend.read_file("a/b/source.txt").await,
+            Err(BackendError::NotFound)
+        ));
+        let read = backend.read_file("a/dest.txt").await.unwrap();
+        assert_eq!(read, Bytes::from_static(b"rename"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_with_in_root_parent_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("a").await.unwrap();
+        backend.make_dir("a/b").await.unwrap();
+        backend
+            .write_file("a/file.txt", Bytes::from_static(b"list"))
+            .await
+            .unwrap();
+
+        let entries = backend.list_dir("a/b/..").await.unwrap();
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(names.contains(&"file.txt"));
+        assert!(names.contains(&"b"));
+    }
+
+    #[tokio::test]
     async fn test_rename() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalBackend::new(temp_dir.path());
