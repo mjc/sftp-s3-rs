@@ -15,7 +15,7 @@ SFTPOPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compres
 if [[ -n "${SFTP_IDENTITY_FILE:-}" ]]; then
     SFTP_CMD=(sftp -o BatchMode=yes -o IdentityFile="$SFTP_IDENTITY_FILE")
 else
-    SFTP_CMD=(sshpass -p "$PASS" sftp -o BatchMode=no)
+    SFTP_CMD=(sshpass -p "$PASS" sftp -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no)
 fi
 
 # Use file from client_source_dir instead of original testfile location
@@ -33,10 +33,18 @@ echo "get $FILENAME $DLFILE" > "$BATCH_DL"
 echo "quit" >> "$BATCH_DL"
 
 # Use 5 minute timeout for large transfers with -b batch mode
-timeout 300 "${SFTP_CMD[@]}" -b "$BATCH_UP" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+if [[ -n "${SFTP_IDENTITY_FILE:-}" ]]; then
+    timeout 300 "${SFTP_CMD[@]}" -b "$BATCH_UP" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+else
+    timeout 300 "${SFTP_CMD[@]}" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" < "$BATCH_UP" >/dev/null 2>&1
+fi
 [[ $? -eq 0 ]] || { rm -f "$BATCH_UP" "$BATCH_DL"; exit 1; }
 
-timeout 300 "${SFTP_CMD[@]}" -b "$BATCH_DL" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+if [[ -n "${SFTP_IDENTITY_FILE:-}" ]]; then
+    timeout 300 "${SFTP_CMD[@]}" -b "$BATCH_DL" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+else
+    timeout 300 "${SFTP_CMD[@]}" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" < "$BATCH_DL" >/dev/null 2>&1
+fi
 [[ $? -eq 0 ]] || { rm -f "$BATCH_UP" "$BATCH_DL"; exit 1; }
 
 rm -f "$DLFILE" "$BATCH_UP" "$BATCH_DL"

@@ -156,6 +156,33 @@ local MinIO process. `minio` is provided by the flake:
 nix develop -c cargo test --all-features --test s3_minio_integration -- --ignored --nocapture
 ```
 
+## Performance
+
+OpenSSH `sftp` round-trip benchmark against the memory backend, measured on May
+21, 2026 with the release binary. The client requests the SSH `sftp` subsystem
+(`sftp -vv` reports `Sending subsystem: sftp` and remote SFTP version 3); it is
+not using legacy scp protocol. Each row is 10 measured runs after 2 warmups using
+public-key authentication and `Compression=no`. Throughput is calculated as
+upload plus download bytes divided by wall time.
+
+| Client file source | Size | Throughput | Mean time | Std dev | Range |
+|--------------------|------|------------|-----------|---------|-------|
+| disk | 32MB | 285.2 MB/s | 0.224s | 0.013s | 0.215s - 0.261s |
+| disk | 256MB | 642.3 MB/s | 0.797s | 0.021s | 0.768s - 0.847s |
+| disk | 1024MB | 726.2 MB/s | 2.820s | 0.035s | 2.755s - 2.869s |
+| `/dev/shm` | 32MB | 298.8 MB/s | 0.214s | 0.009s | 0.195s - 0.229s |
+| `/dev/shm` | 256MB | 635.6 MB/s | 0.805s | 0.011s | 0.788s - 0.826s |
+| `/dev/shm` | 1024MB | 734.9 MB/s | 2.787s | 0.027s | 2.734s - 2.832s |
+
+The many-small-files benchmark transfers a 1GiB flat directory made of 10,251
+varied-size files, then downloads the files back in the same OpenSSH `sftp`
+session. The batch lists each file explicitly to measure per-file transfer
+overhead without relying on SFTP glob expansion.
+
+| Workload | Files | Payload | Throughput | File ops | Mean time | Std dev | Range |
+|----------|-------|---------|------------|----------|-----------|---------|-------|
+| varied small files | 10,251 | 1GiB upload + 1GiB download | 228.1 MB/s | 2,283.4 files/s | 8.979s | 2.031s | 7.872s - 14.684s |
+
 ## Docker Deployment
 
 ### Quick Start
