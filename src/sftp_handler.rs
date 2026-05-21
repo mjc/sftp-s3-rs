@@ -78,13 +78,11 @@ impl From<BackendError> for StatusCode {
 }
 
 fn ok_status(id: u32) -> Status {
-    // TODO(perf): Status.error_message/language_tag are String; change to Cow<'static, str>
-    // in russh-sftp fork to eliminate 2 small allocations per successful operation.
     Status {
         id,
         status_code: StatusCode::Ok,
-        error_message: "Ok".to_string(),
-        language_tag: "en".to_string(),
+        error_message: "Ok".into(),
+        language_tag: "en".into(),
     }
 }
 

@@ -3202,7 +3202,7 @@ dependencies = [
 [[package]]
 name = "russh-sftp"
 version = "3.0.0"
-source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#0935652939d4fd08faaad3d3bbf5251f0d415952"
+source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#ca4494ebdd73e0210ea152b83e54f07010051830"
 dependencies = [
  "bitflags",
  "bytes",
