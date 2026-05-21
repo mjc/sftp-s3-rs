@@ -260,3 +260,28 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sftp_subsystem_uses_owned_bytes_sender_path() {
+        let source = include_str!("ssh_handler.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("ssh_handler source should contain production code");
+
+        assert!(
+            production_source.contains("russh_sftp::server::serve_with_sender"),
+            "SFTP subsystem must keep using the russh-sftp owned-bytes server path"
+        );
+        assert!(
+            production_source.contains("write_half.data_bytes(bytes).await"),
+            "SFTP responses must be sent through russh ChannelWriteHalf::data_bytes"
+        );
+        assert!(
+            !production_source.contains("russh_sftp::server::run("),
+            "SFTP subsystem must not regress to the copying stream-based server::run path"
+        );
+    }
+}
