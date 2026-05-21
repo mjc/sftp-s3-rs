@@ -284,12 +284,15 @@ impl ReadHandle for LocalReadHandle {
             .await
             .map_err(LocalBackend::map_io_error)?;
 
-        buf.clear(); // Reset length to 0, keeps capacity
-        buf.reserve(usize::try_from(len).unwrap_or(usize::MAX)); // Ensure capacity, reuses existing allocation
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        buf.clear();
+        buf.resize(len, 0);
 
-        file.read_buf(buf)
+        let bytes_read = file
+            .read(&mut buf[..])
             .await
             .map_err(LocalBackend::map_io_error)?;
+        buf.truncate(bytes_read);
 
         // split() transfers the buffer to a new BytesMut, then freeze() makes it Bytes.
         // This avoids a copy but the buffer needs to be re-allocated next read.
@@ -350,6 +353,24 @@ mod tests {
             .unwrap();
         let read = backend.read_file("test.txt").await.unwrap();
         assert_eq!(read, content);
+    }
+
+    #[tokio::test]
+    async fn test_open_read_respects_requested_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+        let content = Bytes::from(vec![42; 65_536]);
+
+        backend
+            .write_file("test.bin", content.clone())
+            .await
+            .unwrap();
+
+        let handle = backend.open_read("test.bin").await.unwrap();
+        let read = handle.read_at(0, 32_768).await.unwrap();
+
+        assert_eq!(read.len(), 32_768);
+        assert_eq!(read.as_ref(), &content[..32_768]);
     }
 
     #[tokio::test]
