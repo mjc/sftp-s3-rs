@@ -340,6 +340,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_normalize_parent_and_current_dir_segments() {
+        for (path, expected) in [
+            ("/debugdir/..", ""),
+            ("a/b/../c.txt", "a/c.txt"),
+            ("a/./b.txt", "a/b.txt"),
+            ("a//b///c.txt", "a/b/c.txt"),
+            ("a/b/../../root.txt", "root.txt"),
+        ] {
+            assert_eq!(normalize_path(path).as_ref(), expected, "{path:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_list_root() {
         let backend = MemoryBackend::new();

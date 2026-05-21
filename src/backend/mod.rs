@@ -306,18 +306,43 @@ pub trait Backend: Send + Sync + 'static {
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>>;
 }
 
-/// Normalize a path: trim leading/trailing slashes, handle empty as root.
+/// Normalize a path: trim leading/trailing slashes, handle empty as root,
+/// and collapse `.` / `..` path components without escaping above root.
 /// Returns `Cow::Borrowed` when input is already normalized, avoiding allocation.
 #[must_use]
 pub fn normalize_path(path: &str) -> Cow<'_, str> {
     let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+    if trimmed.is_empty() {
+        return Cow::Borrowed("");
+    }
+
+    let needs_component_normalization = trimmed
+        .split('/')
+        .any(|component| matches!(component, "" | "." | ".."));
+
+    if !needs_component_normalization {
+        return if trimmed.len() == path.len() {
+            Cow::Borrowed(path)
+        } else {
+            Cow::Owned(trimmed.to_string())
+        };
+    }
+
+    let mut components = Vec::new();
+    for component in trimmed.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+
+    if components.is_empty() {
         Cow::Borrowed("")
-    } else if trimmed.len() == path.len() {
-        // No slashes were trimmed, return borrowed
-        Cow::Borrowed(path)
     } else {
-        Cow::Owned(trimmed.to_string())
+        Cow::Owned(components.join("/"))
     }
 }
 

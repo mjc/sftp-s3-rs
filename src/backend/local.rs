@@ -27,6 +27,8 @@ impl LocalBackend {
     /// Get the full filesystem path for an SFTP path, rejecting traversal
     /// outside the configured root.
     fn full_path(&self, path: &str) -> BackendResult<PathBuf> {
+        Self::check_root_traversal(path)?;
+
         let normalized = normalize_path(path);
         if normalized.is_empty() {
             return Ok(self.root.clone());
@@ -49,6 +51,33 @@ impl LocalBackend {
         }
 
         Ok(self.root.join(relative_path))
+    }
+
+    fn check_root_traversal(path: &str) -> BackendResult<()> {
+        let mut depth = 0usize;
+        let mut escaped_root = false;
+
+        for component in Path::new(path).components() {
+            match component {
+                Component::Normal(_) => {
+                    if escaped_root {
+                        return Err(BackendError::PermissionDenied);
+                    }
+                    depth += 1;
+                }
+                Component::CurDir | Component::RootDir => {}
+                Component::ParentDir => {
+                    if depth == 0 {
+                        escaped_root = true;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                Component::Prefix(_) => return Err(BackendError::PermissionDenied),
+            }
+        }
+
+        Ok(())
     }
 
     /// Convert `std::io::Error` to `BackendError`.

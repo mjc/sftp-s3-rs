@@ -648,6 +648,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stat_parent_segment_resolves_to_root() {
+        let mut handler = make_handler();
+
+        handler
+            .mkdir(1, "/debugdir".to_string(), FileAttributes::default())
+            .await
+            .unwrap();
+
+        let attrs = handler.stat(2, "/debugdir/..".to_string()).await.unwrap();
+        assert_eq!(
+            attrs.attrs.permissions.map(|mode| mode & 0o777),
+            Some(0o755)
+        );
+    }
+
+    #[tokio::test]
     async fn test_remove_then_stat_fails() {
         let mut handler = make_handler();
 
