@@ -1487,7 +1487,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2621,7 +2621,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "git+https://github.com/mjc/russh.git?branch=main#1947d6b1bb3a9d79840b5adf7eb9b33df2c6e4a7"
+source = "git+https://github.com/mjc/russh.git?branch=main#668d55d75096cf98688c406d1d58f31543f8a5cc"
 dependencies = [
  "base16ct 1.0.0",
  "byteorder",
@@ -3121,7 +3121,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=main#1947d6b1bb3a9d79840b5adf7eb9b33df2c6e4a7"
+source = "git+https://github.com/mjc/russh.git?branch=main#668d55d75096cf98688c406d1d58f31543f8a5cc"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3191,7 +3191,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=main#1947d6b1bb3a9d79840b5adf7eb9b33df2c6e4a7"
+source = "git+https://github.com/mjc/russh.git?branch=main#668d55d75096cf98688c406d1d58f31543f8a5cc"
 dependencies = [
  "log",
  "nix",
@@ -3218,7 +3218,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=main#1947d6b1bb3a9d79840b5adf7eb9b33df2c6e4a7"
+source = "git+https://github.com/mjc/russh.git?branch=main#668d55d75096cf98688c406d1d58f31543f8a5cc"
 dependencies = [
  "chrono",
  "tokio",
@@ -3266,7 +3266,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3832,7 +3832,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4371,7 +4371,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
