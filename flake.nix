@@ -28,6 +28,7 @@
 
       # Nightly toolchain for tools that require it (cargo-udeps)
       rustNightlyForUdeps = pkgs.rust-bin.nightly.latest.default;
+      openssh = pkgs.openssh;
 
       # Wrapper for cargo-udeps that uses nightly
       cargo-udeps-wrapped = pkgs.writeShellScriptBin "cargo-udeps" ''
@@ -100,6 +101,7 @@
 
           echo "sftp-s3-rs development environment"
           echo "  Rust: $(rustc --version)"
+          echo "  OpenSSH: $(${openssh}/bin/ssh -V 2>&1)"
           echo ""
           echo "Commands:"
           echo "  cargo build          - Build the project"
