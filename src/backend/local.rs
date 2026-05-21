@@ -33,7 +33,10 @@ impl LocalBackend {
             return Ok(self.root.clone());
         }
 
-        let mut full_path = self.root.clone();
+        let mut full_path = PathBuf::with_capacity(
+            self.root.as_os_str().as_encoded_bytes().len() + normalized.len() + 1,
+        );
+        full_path.push(&self.root);
         for component in Path::new(normalized.as_ref()).components() {
             match component {
                 Component::Normal(part) => full_path.push(part),
