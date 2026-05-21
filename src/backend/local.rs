@@ -3,9 +3,8 @@ use super::{
     ReadHandle, WriteHandle,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -34,13 +33,13 @@ impl LocalBackend {
             return Ok(self.root.clone());
         }
 
-        let mut relative_path = PathBuf::new();
+        let mut full_path = self.root.clone();
         for component in Path::new(normalized.as_ref()).components() {
             match component {
-                Component::Normal(part) => relative_path.push(part),
+                Component::Normal(part) => full_path.push(part),
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    if !relative_path.pop() {
+                    if !full_path.pop() {
                         return Err(BackendError::PermissionDenied);
                     }
                 }
@@ -50,7 +49,7 @@ impl LocalBackend {
             }
         }
 
-        Ok(self.root.join(relative_path))
+        Ok(full_path)
     }
 
     fn check_root_traversal(path: &str) -> BackendResult<()> {
@@ -254,9 +253,7 @@ impl Backend for LocalBackend {
 
         let file = File::create(&full_path).await.map_err(Self::map_io_error)?;
 
-        Ok(Box::new(LocalWriteHandle {
-            file: Arc::new(Mutex::new(file)),
-        }))
+        Ok(Box::new(LocalWriteHandle { file }))
     }
 }
 
@@ -284,19 +281,16 @@ impl ReadHandle for LocalReadHandle {
             .await
             .map_err(LocalBackend::map_io_error)?;
 
-        let len = usize::try_from(len).unwrap_or(usize::MAX);
         buf.clear();
-        buf.resize(len, 0);
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        buf.reserve(len);
 
         let bytes_read = file
-            .read(&mut buf[..])
+            .read_buf(&mut buf.limit(len))
             .await
             .map_err(LocalBackend::map_io_error)?;
-        buf.truncate(bytes_read);
 
-        // split() transfers the buffer to a new BytesMut, then freeze() makes it Bytes.
-        // This avoids a copy but the buffer needs to be re-allocated next read.
-        Ok(buf.split().freeze())
+        Ok(buf.split_to(bytes_read).freeze())
     }
 
     fn size(&self) -> u64 {
@@ -306,25 +300,28 @@ impl ReadHandle for LocalReadHandle {
 
 /// Write handle for local filesystem - writes directly to file
 struct LocalWriteHandle {
-    file: Arc<Mutex<File>>,
+    file: File,
 }
 
 #[async_trait]
 impl WriteHandle for LocalWriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset))
+        self.file
+            .seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(LocalBackend::map_io_error)?;
-        file.write_all(&data)
+        self.file
+            .write_all(&data)
             .await
             .map_err(LocalBackend::map_io_error)?;
         Ok(())
     }
 
-    async fn finish(self: Box<Self>) -> BackendResult<()> {
-        let mut file = self.file.lock().await;
-        file.flush().await.map_err(LocalBackend::map_io_error)?;
+    async fn finish(mut self: Box<Self>) -> BackendResult<()> {
+        self.file
+            .flush()
+            .await
+            .map_err(LocalBackend::map_io_error)?;
         Ok(())
     }
 

@@ -321,11 +321,7 @@ pub fn normalize_path(path: &str) -> Cow<'_, str> {
         .any(|component| matches!(component, "" | "." | ".."));
 
     if !needs_component_normalization {
-        return if trimmed.len() == path.len() {
-            Cow::Borrowed(path)
-        } else {
-            Cow::Owned(trimmed.to_string())
-        };
+        return Cow::Borrowed(trimmed);
     }
 
     let mut components = Vec::new();
@@ -362,6 +358,14 @@ pub(crate) fn unix_secs_to_u32(secs: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_trimmed_paths_borrow() {
+        assert!(matches!(
+            normalize_path("/normal/file.txt/"),
+            Cow::Borrowed("normal/file.txt")
+        ));
+    }
 
     #[tokio::test]
     async fn test_buffered_read_rejects_offset_too_large_for_platform() {
