@@ -143,7 +143,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         }
 
         let handle = self.handles.create_dir_handle(normalized.as_ref());
-        Ok(Handle { id, handle })
+        Ok(Handle {
+            id,
+            handle: handle.into(),
+        })
     }
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
@@ -221,7 +224,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
         };
 
-        Ok(Handle { id, handle })
+        Ok(Handle {
+            id,
+            handle: handle.into(),
+        })
     }
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
@@ -528,8 +534,8 @@ mod tests {
         SftpHandler::new(Arc::new(MemoryBackend::new()))
     }
 
-    fn to_sftp_handle(s: String) -> SftpHandle {
-        Bytes::from(s.into_bytes())
+    fn to_sftp_handle(s: impl Into<Bytes>) -> SftpHandle {
+        s.into()
     }
 
     fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
