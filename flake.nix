@@ -80,6 +80,7 @@
           perf
           cargo-llvm-cov
           valgrind  # Required for IAI benchmarks
+          heaptrack
           mold
         ];
 
@@ -115,6 +116,7 @@
           echo "  cargo bench          - Run benchmarks"
           ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
           echo "  perf                 - Linux perf tools"
+          echo "  heaptrack            - Heap allocation profiler"
           ''}
           echo ""
           echo "Code quality:"

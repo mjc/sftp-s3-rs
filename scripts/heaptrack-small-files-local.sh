@@ -141,7 +141,7 @@ echo "Building profiling binary"
 cargo build --profile profiling --bin sftp-s3 -q
 
 echo "Starting local disk server under heaptrack on port $PORT"
-RUST_LOG=error nix shell nixpkgs#heaptrack -c heaptrack \
+RUST_LOG=error heaptrack \
     --output "$RESULTS_DIR/heaptrack" \
     "$BINARY" \
     --backend local \
@@ -202,7 +202,7 @@ if [[ -z "$HEAP_FILE" ]]; then
 fi
 echo "Heaptrack data: $HEAP_FILE"
 echo "Writing heaptrack summary"
-nix shell nixpkgs#heaptrack -c heaptrack_print "$HEAP_FILE" > "$RESULTS_DIR/heaptrack-print.txt"
+heaptrack_print "$HEAP_FILE" > "$RESULTS_DIR/heaptrack-print.txt"
 
 jq -r \
     --argjson mb "$TRANSFER_MB" \
