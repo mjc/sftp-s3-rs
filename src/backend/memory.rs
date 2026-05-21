@@ -257,49 +257,56 @@ impl WriteHandle for MemoryWriteHandle {
     }
 
     async fn finish(self: Box<Self>) -> BackendResult<()> {
-        // Merge sparse chunks into a single contiguous buffer only at the end.
-        // This is not in the hot path, so zero-padding overhead here is acceptable.
-
-        if self.chunks.is_empty() {
-            self.files.write().insert(
-                self.path,
-                FileData {
-                    content: Bytes::new(),
-                    mtime: super::current_timestamp(),
-                },
-            );
-            return Ok(());
-        }
-
-        // Calculate total file size
-        let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
-            max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
-        });
-        let total_size = usize::try_from(total_size_u64)
-            .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
-
-        // Only allocate the actual needed size
-        let mut result = Vec::with_capacity(total_size);
-
-        for (offset, data) in self.chunks {
-            let offset = usize::try_from(offset).map_err(|_| {
-                BackendError::Other("file offset too large for this platform".into())
-            })?;
-            // Pad with zeros only if there's a gap (rare)
-            if result.len() < offset {
-                result.resize(offset, 0);
+        let content = if self.chunks.is_empty() {
+            Bytes::new()
+        } else if self.chunks.len() == 1 {
+            let (offset, data) = self.chunks.into_iter().next().expect("one chunk");
+            if offset == 0 {
+                data
+            } else {
+                let offset = usize::try_from(offset).map_err(|_| {
+                    BackendError::Other("file offset too large for this platform".into())
+                })?;
+                let total_size = offset.checked_add(data.len()).ok_or_else(|| {
+                    BackendError::Other("file size too large for this platform".into())
+                })?;
+                let mut result = vec![0; total_size];
+                result[offset..].copy_from_slice(&data);
+                Bytes::from(result)
             }
-            let end = offset + data.len();
-            if result.len() < end {
-                result.resize(end, 0);
+        } else {
+            // Calculate total file size
+            let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
+                max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
+            });
+            let total_size = usize::try_from(total_size_u64)
+                .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
+
+            // Only allocate the actual needed size
+            let mut result = Vec::with_capacity(total_size);
+
+            for (offset, data) in self.chunks {
+                let offset = usize::try_from(offset).map_err(|_| {
+                    BackendError::Other("file offset too large for this platform".into())
+                })?;
+                // Pad with zeros only if there's a gap (rare)
+                if result.len() < offset {
+                    result.resize(offset, 0);
+                }
+                let end = offset + data.len();
+                if result.len() < end {
+                    result.resize(end, 0);
+                }
+                result[offset..end].copy_from_slice(&data);
             }
-            result[offset..end].copy_from_slice(&data);
-        }
+
+            Bytes::from(result)
+        };
 
         self.files.write().insert(
             self.path,
             FileData {
-                content: Bytes::from(result),
+                content,
                 mtime: super::current_timestamp(),
             },
         );
@@ -654,6 +661,21 @@ mod tests {
         // Verify temp file is gone
         let temp_result = backend.read_file(temp_path).await;
         assert!(matches!(temp_result, Err(BackendError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_single_chunk_write_finishes_without_copying() {
+        let backend = MemoryBackend::new();
+        let content = Bytes::from(vec![0xABu8; 1024]);
+        let content_ptr = content.as_ptr();
+        let mut handle = backend.open_write("single.bin").await.unwrap();
+
+        handle.write_at(0, content).await.unwrap();
+        handle.finish().await.unwrap();
+
+        let read = backend.read_file("single.bin").await.unwrap();
+        assert_eq!(read.len(), 1024);
+        assert_eq!(read.as_ptr(), content_ptr);
     }
 
     #[tokio::test]
