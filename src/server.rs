@@ -345,10 +345,12 @@ impl<B: Backend> Server<B> {
         if let Some(ref ciphers) = self.config.ciphers {
             preferred.cipher = Cow::Owned(ciphers.clone());
         } else {
-            // Default to ChaCha20-Poly1305 first (faster with AVX2), then AES-GCM
+            // Prefer hardware-accelerated AES-GCM on modern hosts, while keeping
+            // ChaCha20-Poly1305 available for clients that prefer it.
             preferred.cipher = Cow::Borrowed(&[
-                cipher::CHACHA20_POLY1305,
+                cipher::AES_128_GCM,
                 cipher::AES_256_GCM,
+                cipher::CHACHA20_POLY1305,
                 cipher::AES_256_CTR,
                 cipher::AES_128_CTR,
             ]);
@@ -429,6 +431,7 @@ pub use crate::ssh_handler::{PasswordAuthCallback, PubkeyAuthCallback};
 #[must_use]
 pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
     match s.trim() {
+        "aes128-gcm" | "aes128-gcm@openssh.com" => Some(cipher::AES_128_GCM),
         "aes256-gcm" | "aes256-gcm@openssh.com" => Some(cipher::AES_256_GCM),
         "aes128-ctr" => Some(cipher::AES_128_CTR),
         "aes192-ctr" => Some(cipher::AES_192_CTR),
@@ -443,6 +446,7 @@ pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
 
 /// List of available cipher names for help text
 pub const AVAILABLE_CIPHERS: &[&str] = &[
+    "aes128-gcm",
     "aes256-gcm",
     "aes128-ctr",
     "aes192-ctr",
