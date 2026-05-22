@@ -1,7 +1,10 @@
+use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use futures::future::try_join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use russh::{client, ChannelId, Preferred};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::RawSftpSession;
+use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use sftp_s3::{parse_cipher, AVAILABLE_CIPHERS};
 use std::borrow::Cow;
 use std::{
@@ -9,12 +12,13 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const KIB: u64 = 1024;
 const MIB: u64 = 1024 * KIB;
+const DEFAULT_READ_DEPTH: usize = 64;
+const DEFAULT_WRITE_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Operation {
@@ -72,6 +76,14 @@ struct Cli {
     #[arg(long, default_value = "256KiB", value_parser = parse_size_usize)]
     chunk_size: usize,
 
+    /// Number of concurrent SFTP read requests per file
+    #[arg(long, default_value_t = DEFAULT_READ_DEPTH)]
+    read_depth: usize,
+
+    /// Number of concurrent SFTP write requests per file
+    #[arg(long, default_value_t = DEFAULT_WRITE_DEPTH)]
+    write_depth: usize,
+
     /// Leave benchmark files on the server
     #[arg(long)]
     keep_files: bool,
@@ -126,7 +138,7 @@ async fn main() -> Result<(), BoxError> {
     validate_cli(&cli)?;
 
     let addr = format!("{}:{}", cli.host, cli.port);
-    let sftp = connect_sftp(&addr, &cli).await?;
+    let sftp = Arc::new(connect_sftp(&addr, &cli).await?);
     let run_id = run_id();
     let payload = Arc::new(make_payload(
         cli.chunk_size.min(max_file_size(cli.size, cli.files)),
@@ -147,11 +159,12 @@ async fn main() -> Result<(), BoxError> {
     };
 
     print_summary(&results, cli.size, cli.operation);
-    sftp.close().await?;
+    sftp.close_session()
+        .map_err(|error| boxed(format!("failed to close SFTP session: {error}")))?;
     Ok(())
 }
 
-async fn connect_sftp(addr: &str, cli: &Cli) -> Result<SftpSession, BoxError> {
+async fn connect_sftp(addr: &str, cli: &Cli) -> Result<RawSftpSession, BoxError> {
     let mut config = client::Config {
         nodelay: cli.nodelay,
         ..Default::default()
@@ -189,13 +202,15 @@ async fn connect_sftp(addr: &str, cli: &Cli) -> Result<SftpSession, BoxError> {
         .await
         .map_err(|error| boxed(format!("failed to request SFTP subsystem: {error}")))?;
 
-    SftpSession::new(channel.into_stream())
+    let sftp = RawSftpSession::new(channel.into_stream());
+    sftp.init()
         .await
-        .map_err(|error| boxed(format!("failed to initialize SFTP session: {error}")))
+        .map_err(|error| boxed(format!("failed to initialize SFTP session: {error}")))?;
+    Ok(sftp)
 }
 
 async fn run_upload_benchmark(
-    sftp: &SftpSession,
+    sftp: &Arc<RawSftpSession>,
     cli: &Cli,
     payload: &Arc<Vec<u8>>,
     run_id: &str,
@@ -204,7 +219,7 @@ async fn run_upload_benchmark(
 
     for iteration in 0..cli.iterations {
         let paths = iteration_paths(cli, run_id, iteration);
-        let upload = upload_paths(sftp, &paths, cli.size, payload).await?;
+        let upload = upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
 
         if !cli.keep_files {
             cleanup_paths(sftp, &paths).await;
@@ -221,17 +236,18 @@ async fn run_upload_benchmark(
 }
 
 async fn run_download_benchmark(
-    sftp: &SftpSession,
+    sftp: &Arc<RawSftpSession>,
     cli: &Cli,
     payload: &Arc<Vec<u8>>,
     run_id: &str,
 ) -> Result<Vec<IterationResult>, BoxError> {
     let paths = iteration_paths(cli, run_id, 0);
-    upload_paths(sftp, &paths, cli.size, payload).await?;
+    upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
 
     let mut results = Vec::with_capacity(cli.iterations as usize);
     for iteration in 0..cli.iterations {
-        let download = download_paths(sftp, &paths, cli.chunk_size).await?;
+        let download =
+            download_paths(sftp, &paths, cli.chunk_size, cli.size, cli.read_depth).await?;
         print_iteration(iteration, cli.size, None, Some(download));
         results.push(IterationResult {
             upload: None,
@@ -247,7 +263,7 @@ async fn run_download_benchmark(
 }
 
 async fn run_roundtrip_benchmark(
-    sftp: &SftpSession,
+    sftp: &Arc<RawSftpSession>,
     cli: &Cli,
     payload: &Arc<Vec<u8>>,
     run_id: &str,
@@ -256,8 +272,9 @@ async fn run_roundtrip_benchmark(
 
     for iteration in 0..cli.iterations {
         let paths = iteration_paths(cli, run_id, iteration);
-        let upload = upload_paths(sftp, &paths, cli.size, payload).await?;
-        let download = download_paths(sftp, &paths, cli.chunk_size).await?;
+        let upload = upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+        let download =
+            download_paths(sftp, &paths, cli.chunk_size, cli.size, cli.read_depth).await?;
 
         if !cli.keep_files {
             cleanup_paths(sftp, &paths).await;
@@ -274,40 +291,23 @@ async fn run_roundtrip_benchmark(
 }
 
 async fn upload_paths(
-    sftp: &SftpSession,
+    sftp: &Arc<RawSftpSession>,
     paths: &[String],
     total_size: u64,
     payload: &Arc<Vec<u8>>,
+    write_depth: usize,
 ) -> Result<Duration, BoxError> {
     let per_file_sizes = split_sizes(total_size, paths.len());
-    let mut files = Vec::with_capacity(paths.len());
-
-    for path in paths {
-        files.push(
-            sftp.create(path.clone())
-                .await
-                .map_err(|error| boxed(format!("failed to create {path}: {error}")))?,
-        );
-    }
-
     let start = Instant::now();
     try_join_all(
-        files
-            .into_iter()
+        paths
+            .iter()
+            .cloned()
             .zip(per_file_sizes)
-            .map(|(mut file, file_size)| async move {
-                let mut remaining = file_size as usize;
-                while remaining > 0 {
-                    let chunk_len = remaining.min(payload.len());
-                    file.write_all(&payload[..chunk_len])
-                        .await
-                        .map_err(|error| boxed(format!("failed to write remote file: {error}")))?;
-                    remaining -= chunk_len;
-                }
-                file.shutdown()
-                    .await
-                    .map_err(|error| boxed(format!("failed to close remote file: {error}")))?;
-                Ok::<(), BoxError>(())
+            .map(|(path, file_size)| {
+                let sftp = Arc::clone(sftp);
+                let payload = Arc::clone(payload);
+                async move { upload_path(&sftp, path, file_size, &payload, write_depth).await }
             }),
     )
     .await?;
@@ -315,43 +315,118 @@ async fn upload_paths(
     Ok(start.elapsed())
 }
 
-async fn download_paths(
-    sftp: &SftpSession,
-    paths: &[String],
-    chunk_size: usize,
-) -> Result<Duration, BoxError> {
-    let mut files = Vec::with_capacity(paths.len());
+async fn upload_path(
+    sftp: &Arc<RawSftpSession>,
+    path: String,
+    file_size: u64,
+    payload: &[u8],
+    write_depth: usize,
+) -> Result<(), BoxError> {
+    let handle = sftp
+        .open(
+            path.clone(),
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            FileAttributes::empty(),
+        )
+        .await
+        .map_err(|error| boxed(format!("failed to create {path}: {error}")))?
+        .handle;
+    let mut next_offset = 0_u64;
+    let mut writes = FuturesUnordered::new();
+    let write_depth = write_depth.max(1);
 
-    for path in paths {
-        files.push(
-            sftp.open(path.clone())
-                .await
-                .map_err(|error| boxed(format!("failed to open {path}: {error}")))?,
-        );
+    while next_offset < file_size || !writes.is_empty() {
+        while next_offset < file_size && writes.len() < write_depth {
+            let remaining = (file_size - next_offset) as usize;
+            let chunk_len = remaining.min(payload.len());
+            writes.push(sftp.write_bytes(
+                handle.clone(),
+                next_offset,
+                Bytes::copy_from_slice(&payload[..chunk_len]),
+            ));
+            next_offset += chunk_len as u64;
+        }
+
+        if let Some(result) = writes.next().await {
+            result.map_err(|error| boxed(format!("failed to write remote file: {error}")))?;
+        }
     }
 
+    sftp.close_bytes(handle)
+        .await
+        .map_err(|error| boxed(format!("failed to close remote file: {error}")))?;
+
+    Ok(())
+}
+
+async fn download_paths(
+    sftp: &Arc<RawSftpSession>,
+    paths: &[String],
+    chunk_size: usize,
+    total_size: u64,
+    read_depth: usize,
+) -> Result<Duration, BoxError> {
+    let per_file_sizes = split_sizes(total_size, paths.len());
+
     let start = Instant::now();
-    try_join_all(files.into_iter().map(|mut file| async move {
-        let mut buf = vec![0; chunk_size];
-        loop {
-            let read = file
-                .read(&mut buf)
-                .await
-                .map_err(|error| boxed(format!("failed to read remote file: {error}")))?;
-            if read == 0 {
-                break;
-            }
-        }
-        Ok::<(), BoxError>(())
-    }))
+    try_join_all(
+        paths
+            .iter()
+            .cloned()
+            .zip(per_file_sizes)
+            .map(|(path, file_size)| {
+                let sftp = Arc::clone(sftp);
+                async move { download_path(&sftp, path, file_size, chunk_size, read_depth).await }
+            }),
+    )
     .await?;
 
     Ok(start.elapsed())
 }
 
-async fn cleanup_paths(sftp: &SftpSession, paths: &[String]) {
+async fn download_path(
+    sftp: &Arc<RawSftpSession>,
+    path: String,
+    file_size: u64,
+    chunk_size: usize,
+    read_depth: usize,
+) -> Result<(), BoxError> {
+    let handle = sftp
+        .open(path.clone(), OpenFlags::READ, FileAttributes::empty())
+        .await
+        .map_err(|error| boxed(format!("failed to open {path}: {error}")))?
+        .handle;
+    let mut next_offset = 0_u64;
+    let mut reads = FuturesUnordered::new();
+    let read_depth = read_depth.max(1);
+    let chunk_size = chunk_size.min(u32::MAX as usize);
+
+    while next_offset < file_size || !reads.is_empty() {
+        while next_offset < file_size && reads.len() < read_depth {
+            let len = (file_size - next_offset).min(chunk_size as u64) as u32;
+            reads.push(sftp.read_bytes(handle.clone(), next_offset, len));
+            next_offset += u64::from(len);
+        }
+
+        if let Some(result) = reads.next().await {
+            let data =
+                result.map_err(|error| boxed(format!("failed to read remote file: {error}")))?;
+            if data.data.is_empty() {
+                break;
+            }
+        }
+    }
+
+    sftp.close_bytes(handle)
+        .await
+        .map_err(|error| boxed(format!("failed to close remote file: {error}")))?;
+
+    Ok::<(), BoxError>(())
+}
+
+async fn cleanup_paths(sftp: &Arc<RawSftpSession>, paths: &[String]) {
     for path in paths {
-        let _ = sftp.remove_file(path.clone()).await;
+        let _ = sftp.remove(path.clone()).await;
     }
 }
 
@@ -482,6 +557,12 @@ fn validate_cli(cli: &Cli) -> Result<(), BoxError> {
     }
     if cli.files == 0 {
         return Err(boxed("--files must be greater than zero"));
+    }
+    if cli.read_depth == 0 {
+        return Err(boxed("--read-depth must be greater than zero"));
+    }
+    if cli.write_depth == 0 {
+        return Err(boxed("--write-depth must be greater than zero"));
     }
     if cli.iterations == 0 {
         return Err(boxed("--iterations must be greater than zero"));
