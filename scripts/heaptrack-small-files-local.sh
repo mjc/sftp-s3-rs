@@ -53,6 +53,10 @@ KEY_DIR=${KEY_DIR:-/tmp/sftp-small-files-bench-keys}
 KEY="$KEY_DIR/id_ed25519"
 PORT=${PORT:-22230}
 USER=${SFTP_USER:-benchmark}
+SFTP_REQUESTS=${SFTP_REQUESTS:-}
+SFTP_JOBS=${SFTP_JOBS:-1}
+SFTP_CIPHER=${SFTP_CIPHER:-}
+SFTP_BUFFER=${SFTP_BUFFER-131072}
 BINARY="$ROOT/target/profiling/sftp-s3"
 
 mkdir -p "$RESULTS_DIR" "$KEY_DIR"
@@ -92,47 +96,85 @@ PORT=$1
 DATASET_DIR=$2
 DOWNLOAD_ROOT=$3
 USER=$4
+SFTP_REQUESTS=${5:-}
+SFTP_JOBS=${6:-1}
+SFTP_CIPHER=${7:-}
+SFTP_BUFFER=${8:-}
 
-REMOTE_DIR="small-files-$USER-$$-$RANDOM"
-DOWNLOAD_DIR="$DOWNLOAD_ROOT/$REMOTE_DIR"
-BATCH_FILE="/tmp/sftp-small-files-batch-$$.txt"
 SFTP_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compression=no)
+if [[ -n "$SFTP_REQUESTS" ]]; then
+    SFTP_OPTS+=(-R "$SFTP_REQUESTS")
+fi
+if [[ -n "$SFTP_CIPHER" ]]; then
+    SFTP_OPTS+=(-c "$SFTP_CIPHER")
+fi
+if [[ -n "$SFTP_BUFFER" ]]; then
+    SFTP_OPTS+=(-B "$SFTP_BUFFER")
+fi
+export SFTP_REQUESTS SFTP_JOBS SFTP_CIPHER SFTP_BUFFER
 
 cleanup() {
-    rm -f "$BATCH_FILE"
-    rm -rf "$DOWNLOAD_DIR"
+    rm -f /tmp/sftp-small-files-batch-$$-*.txt
+    rm -f /tmp/sftp-small-files-stderr-$$-*.txt
+    rm -rf "$DOWNLOAD_ROOT"/small-files-"$USER"-$$-*
 }
 trap cleanup EXIT
 
-mkdir -p "$DOWNLOAD_DIR"
+run_job() {
+    local job=$1
+    local remote_dir="small-files-$USER-$$-$job-$RANDOM"
+    local download_dir="$DOWNLOAD_ROOT/$remote_dir"
+    local batch_file="/tmp/sftp-small-files-batch-$$-$job.txt"
+    local stderr_file="/tmp/sftp-small-files-stderr-$$-$job.txt"
 
-{
-    echo "mkdir $REMOTE_DIR"
-    echo "cd $REMOTE_DIR"
-    echo "lcd $DATASET_DIR"
-    find "$DATASET_DIR" -maxdepth 1 -type f ! -name .manifest -printf "%f\n" |
-        sort |
-        while IFS= read -r file; do
-            echo "put $file"
-        done
-    echo "lcd $DOWNLOAD_DIR"
-    find "$DATASET_DIR" -maxdepth 1 -type f ! -name .manifest -printf "%f\n" |
-        sort |
-        while IFS= read -r file; do
-            echo "get $file"
-        done
-    find "$DATASET_DIR" -maxdepth 1 -type f ! -name .manifest -printf "%f\n" |
-        sort |
-        while IFS= read -r file; do
-            echo "rm $file"
-        done
-    echo "cd .."
-    echo "rmdir $REMOTE_DIR"
-    echo "bye"
-} > "$BATCH_FILE"
+    mkdir -p "$download_dir"
 
-timeout 900 sftp -q -o BatchMode=yes -o IdentityFile="$SFTP_IDENTITY_FILE" \
-    "${SFTP_OPTS[@]}" -b "$BATCH_FILE" -P "$PORT" "$USER@localhost" >/dev/null
+    {
+        echo "mkdir $remote_dir"
+        echo "cd $remote_dir"
+        echo "lcd $DATASET_DIR"
+        find "$DATASET_DIR" -maxdepth 1 -type f ! -name .manifest -printf "%f\n" |
+            sort |
+            awk -v jobs="$SFTP_JOBS" -v job="$job" 'NR % jobs == job' |
+            while IFS= read -r file; do
+                echo "put $file"
+            done
+        echo "lcd $download_dir"
+        find "$DATASET_DIR" -maxdepth 1 -type f ! -name .manifest -printf "%f\n" |
+            sort |
+            awk -v jobs="$SFTP_JOBS" -v job="$job" 'NR % jobs == job' |
+            while IFS= read -r file; do
+                echo "get $file"
+            done
+        find "$DATASET_DIR" -maxdepth 1 -type f ! -name .manifest -printf "%f\n" |
+            sort |
+            awk -v jobs="$SFTP_JOBS" -v job="$job" 'NR % jobs == job' |
+            while IFS= read -r file; do
+                echo "rm $file"
+            done
+        echo "cd /"
+        echo "rmdir $remote_dir"
+        echo "bye"
+    } > "$batch_file"
+
+    local status=0
+    timeout 900 sftp -q -o BatchMode=yes -o IdentityFile="$SFTP_IDENTITY_FILE" \
+        "${SFTP_OPTS[@]}" -b "$batch_file" -P "$PORT" "$USER@localhost" \
+        >/dev/null 2>"$stderr_file" || status=$?
+    if [[ "$status" != 0 || -s "$stderr_file" ]]; then
+        cat "$stderr_file" >&2
+        return 1
+    fi
+}
+
+pids=()
+for ((job = 0; job < SFTP_JOBS; job++)); do
+    run_job "$job" &
+    pids+=("$!")
+done
+for pid in "${pids[@]}"; do
+    wait "$pid"
+done
 RUNONE
 chmod +x "$RUN_SCRIPT"
 
@@ -184,12 +226,16 @@ fi
 
 echo "Heaptracking local-disk many-small-files benchmark"
 echo "Results: $RESULTS_DIR"
+echo "SFTP requests: ${SFTP_REQUESTS:-default}"
+echo "SFTP jobs: $SFTP_JOBS"
+echo "SFTP cipher: ${SFTP_CIPHER:-default}"
+echo "SFTP buffer: ${SFTP_BUFFER:-default}"
 hyperfine \
     --warmup 1 \
     --runs 10 \
     --export-json "$RESULTS_DIR/results.json" \
-    --command-name "small-files-${TOTAL_MB}mb-local-heaptrack-hotpath" \
-    "bash '$RUN_SCRIPT' '$PORT' '$DATASET_DIR' '$DOWNLOAD_ROOT' '$USER'"
+    --command-name "small-files-${TOTAL_MB}mb-local-heaptrack-hotpath-r${SFTP_REQUESTS:-default}-j${SFTP_JOBS}-${SFTP_CIPHER:-default}-b${SFTP_BUFFER:-default}" \
+    "bash '$RUN_SCRIPT' '$PORT' '$DATASET_DIR' '$DOWNLOAD_ROOT' '$USER' '${SFTP_REQUESTS}' '$SFTP_JOBS' '$SFTP_CIPHER' '${SFTP_BUFFER}'"
 
 echo "Stopping heaptracked server"
 cleanup_server
