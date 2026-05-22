@@ -82,7 +82,7 @@ SCENARIOS=(
     "shm|/dev/shm|memory"
 )
 if [[ "$BENCH_CLIENT" == "rust" ]]; then
-    SCENARIOS=("generated|$SFTP_DIR|memory")
+    SCENARIOS=("generated-benchmark|$SFTP_DIR|benchmark")
 fi
 export SFTP_BENCH_CIPHERS="$BENCH_CIPHERS"
 # Uncomment to test all combinations (requires testing/debugging local backend)
@@ -331,6 +331,11 @@ port_responding() {
     nc -z localhost "$port" >/dev/null 2>&1
 }
 
+has_benchmark_result() {
+    local outjson=$1
+    [[ -s "$outjson" ]] && jq -e '.results[0].mean | numbers' "$outjson" >/dev/null 2>&1
+}
+
 wait_for_port_release() {
     local label=$1
     local port=$2
@@ -453,6 +458,12 @@ for scenario in "${SCENARIOS[@]}"; do
             warmup=${rest##*:}
             testfile="$SFTP_DIR/testfile_${size}mb.bin"
             outjson="$RESULTS_DIR/${size}mb-${scenario_label}-${label}.json"
+
+            if has_benchmark_result "$outjson"; then
+                echo ""
+                echo "--- $label ${size}MB already complete ---"
+                continue
+            fi
 
             echo ""
             echo "--- $label ${size}MB × ${iters} runs (${warmup} warmup) ---"

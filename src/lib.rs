@@ -82,7 +82,7 @@ pub use backend::local::LocalBackend;
 pub use backend::memory::MemoryBackend;
 pub use backend::{
     Backend, BackendCapabilities, BackendError, BackendRequest, BackendResponse, BackendResult,
-    DelegatedBackend, DelegatedBackendFn, DirEntry, FileInfo, FileKind, SetAttrs,
+    BenchmarkBackend, DelegatedBackend, DelegatedBackendFn, DirEntry, FileInfo, FileKind, SetAttrs,
 };
 #[cfg(feature = "s3")]
 pub use backend::{S3Backend, S3Config};
