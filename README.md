@@ -240,6 +240,51 @@ nix develop -c cargo run --release --bin sftp-bench-client -- \
 It supports `upload`, `download`, and `roundtrip` modes. Download mode uploads fixture files before
 measurement, then times repeated reads. By default benchmark files are removed after each run; pass
 `--keep-files` to inspect them on the server.
+
+## Benchmark Matrix
+
+Run the russh/russh-sftp benchmark matrix from a Nix development shell:
+
+```bash
+nix develop -c ./benchmark-all.sh --client rust --ciphers aes256-gcm
+```
+
+The matrix builds isolated server binaries for each configured russh and russh-sftp ref, then runs
+roundtrip transfer benchmarks. For the Rust client matrix, the server uses the `benchmark` backend:
+it records file sizes and metadata, discards uploaded bytes, and synthesizes zero-filled reads so
+large 50-100GiB protocol runs do not exhaust RAM. The Rust benchmark client is built once from the
+current checkout and reused across the matrix.
+
+Default transfer sizes are:
+
+```text
+1MiB, 32MiB, 256MiB, 1GiB, 10GiB, 50GiB, 100GiB
+```
+
+Existing valid result JSON files are skipped, so interrupted runs can be resumed by running the same
+command again. Empty or malformed result files are treated as missing and rerun.
+
+Results are written under `benchmark_results/`:
+
+- `run-*.log` captures the full matrix output
+- `<size>mb-<scenario>-<config>.json` stores hyperfine JSON for each completed case
+- `server-<config>.log` captures server output for the most recent run of a config
+
+Large disk fixtures are created sparsely with `truncate`; the Rust benchmark client generates its
+payload in memory from the requested size. Per-transfer timeouts scale with fixture size and can be
+overridden with `SFTP_BENCH_TRANSFER_TIMEOUT`.
+
+Benchmark dependency patches live in `benchmark_patches/`. The matrix applies matching patches to
+temporary dependency checkouts before building:
+
+```text
+benchmark_patches/<component>/all/*.patch
+benchmark_patches/<component>/<ref-name>/*.patch
+benchmark_patches/<component>/<matrix-label>/*.patch
+```
+
+Use `SFTP_BENCH_CHUNK_SIZE` to override the Rust client's request size. The default is `64KiB`, which
+keeps the Rust client compatible with older server refs that reject larger SFTP packets.
 ## Docker Deployment
 
 ### Quick Start

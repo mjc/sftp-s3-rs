@@ -1,7 +1,10 @@
 //! SFTP server with pluggable backends (local filesystem, S3, memory)
 
 use clap::Parser;
-use sftp_s3::{parse_cipher, LocalBackend, MemoryBackend, Server, ServerConfig, AVAILABLE_CIPHERS};
+use sftp_s3::{
+    parse_cipher, BenchmarkBackend, LocalBackend, MemoryBackend, Server, ServerConfig,
+    AVAILABLE_CIPHERS,
+};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -11,6 +14,7 @@ enum Backend {
     #[cfg(feature = "s3")]
     S3,
     Memory,
+    Benchmark,
 }
 
 impl std::str::FromStr for Backend {
@@ -22,11 +26,12 @@ impl std::str::FromStr for Backend {
             #[cfg(feature = "s3")]
             "s3" => Ok(Backend::S3),
             "memory" => Ok(Backend::Memory),
+            "benchmark" => Ok(Backend::Benchmark),
             other => {
                 let available = if cfg!(feature = "s3") {
-                    "local, s3, memory"
+                    "local, s3, memory, benchmark"
                 } else {
-                    "local, memory"
+                    "local, memory, benchmark"
                 };
                 Err(format!(
                     "unknown backend '{other}', choose from: {available}"
@@ -268,6 +273,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Backend::Memory => {
             eprintln!("Backend: in-memory (data will be lost on exit)");
             run_server(MemoryBackend::new(), config, users, authorized_keys).await
+        }
+        Backend::Benchmark => {
+            eprintln!("Backend: benchmark discard/synthetic data");
+            run_server(BenchmarkBackend::new(), config, users, authorized_keys).await
         }
     }
 }

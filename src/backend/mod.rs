@@ -3,12 +3,14 @@ use bytes::Bytes;
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod benchmark;
 pub mod delegated;
 pub mod local;
 pub mod memory;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+pub use benchmark::BenchmarkBackend;
 pub use delegated::{BackendRequest, BackendResponse, DelegatedBackend, DelegatedBackendFn};
 pub use local::LocalBackend;
 pub use memory::MemoryBackend;
