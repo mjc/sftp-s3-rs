@@ -10,10 +10,13 @@
 set -euo pipefail
 
 SFTP_DIR="/home/mjc/projects/sftp-s3-rs"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RESULTS_DIR="$SFTP_DIR/benchmark_results"
 BINS_DIR="$SFTP_DIR/benchmark_bins"
 LOG="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
 SFTP_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compression=no)
+BENCH_CLIENT="openssh"
+BENCH_CIPHERS="${SFTP_BENCH_CIPHERS:-}"
 RUSSH_GIT_URL="https://github.com/mjc/russh.git"
 RUSSH_SFTP_GIT_URL="https://github.com/mjc/russh-sftp.git"
 BENCH_KEY_DIR="/tmp/sftp-bench-keys"
@@ -21,12 +24,54 @@ BENCH_KEY="$BENCH_KEY_DIR/id_ed25519"
 BENCH_AUTHORIZED_KEYS="$BENCH_KEY.pub"
 
 if [[ "${BENCHMARK_ALL_IN_ENV:-0}" != 1 ]] && command -v direnv >/dev/null 2>&1 && [[ -f "$SFTP_DIR/.envrc" ]]; then
-    exec env BENCHMARK_ALL_IN_ENV=1 direnv exec "$SFTP_DIR" "$0" "$@"
+    exec env BENCHMARK_ALL_IN_ENV=1 direnv exec "$SFTP_DIR" "$SCRIPT_PATH" "$@"
 fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --client)
+            BENCH_CLIENT=$2
+            shift 2
+            ;;
+        --client=*)
+            BENCH_CLIENT=${1#*=}
+            shift
+            ;;
+        --ciphers)
+            BENCH_CIPHERS=$2
+            shift 2
+            ;;
+        --ciphers=*)
+            BENCH_CIPHERS=${1#*=}
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2]"
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$BENCH_CLIENT" in
+    openssh|rust) ;;
+    *)
+        echo "unknown benchmark client '$BENCH_CLIENT' (expected openssh or rust)" >&2
+        exit 2
+        ;;
+esac
 
 mkdir -p "$RESULTS_DIR"
 exec > >(tee "$LOG") 2>&1
 echo "Logging to $LOG"
+echo "Benchmark client: $BENCH_CLIENT"
+if [[ -n "$BENCH_CIPHERS" ]]; then
+    echo "Benchmark ciphers: $BENCH_CIPHERS"
+fi
 
 # Scenarios: (label_suffix|client_source|server_backend)
 # client_source: where client reads files from (disk directory or /dev/shm)
@@ -35,6 +80,10 @@ SCENARIOS=(
     "disk|$SFTP_DIR|memory"
     "shm|/dev/shm|memory"
 )
+if [[ "$BENCH_CLIENT" == "rust" ]]; then
+    SCENARIOS=("generated|$SFTP_DIR|memory")
+fi
+export SFTP_BENCH_CIPHERS="$BENCH_CIPHERS"
 # Uncomment to test all combinations (requires testing/debugging local backend)
 #SCENARIOS=(
 #    "disk|$SFTP_DIR|memory"
@@ -142,6 +191,18 @@ echo "Using russh-sftp remote branches from $RUSSH_SFTP_GIT_URL"
 ensure_benchmark_key
 echo "Using benchmark client key $BENCH_KEY"
 
+if [[ "$BENCH_CLIENT" == "rust" ]]; then
+    echo "Building Rust benchmark client..."
+    (
+        cd "$SFTP_DIR"
+        unset NIX_ENFORCE_NO_NATIVE
+        RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache \
+            cargo build --release --bin sftp-bench-client -q
+    )
+    export SFTP_BENCH_CLIENT_BIN="$SFTP_DIR/target/release/sftp-bench-client"
+    echo "Using Rust benchmark client $SFTP_BENCH_CLIENT_BIN"
+fi
+
 _build_one() {
     local label=$1 russh_kind=$2 russh_ref=$3 sftp=$4 features=$5
     local wt="/tmp/bench-wt-$label"
@@ -232,10 +293,10 @@ start_server() {
     if [[ "$backend" == "local" ]]; then
         local root="/tmp/sftp-bench-root-$label"
         mkdir -p "$root"
-        "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --backend local --root "$root" \
+        "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend local --root "$root" \
             >"$RESULTS_DIR/server-$label.log" 2>&1 &
     else
-        "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --backend memory \
+        "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend memory \
             >"$RESULTS_DIR/server-$label.log" 2>&1 &
     fi
     echo $! > "/tmp/sftp-bench-$port.pid"
@@ -340,7 +401,7 @@ for scenario in "${SCENARIOS[@]}"; do
                 --runs "$iters" \
                 --export-json "$outjson" \
                 --command-name "$label" \
-                "bash $SFTP_DIR/run-one.sh $port $testfile $client_source"; then
+                "bash $SFTP_DIR/run-one.sh --client $BENCH_CLIENT ${BENCH_CIPHERS:+--ciphers $BENCH_CIPHERS} $port $testfile $client_source"; then
                 echo "ERROR: benchmark failed for $label at ${size}MB; see $RESULTS_DIR/server-$label.log" >&2
                 stop_server "$label"
                 continue
