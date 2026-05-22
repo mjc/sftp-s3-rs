@@ -162,17 +162,18 @@ OpenSSH `sftp` round-trip benchmark against the memory backend, measured on May
 22, 2026 with release binaries. The client requests the SSH `sftp` subsystem
 (`sftp -vv` reports `Sending subsystem: sftp` and remote SFTP version 3); it is
 not using legacy scp protocol. Each row is 10 measured runs after 2 warmups using
-public-key authentication, `Compression=no`, `-R 16`, and `-B 131072`.
-Throughput is calculated as upload plus download bytes divided by wall time.
+public-key authentication, `Compression=no`, `-R 16`, `-B 131072`, and
+`aes256-gcm@openssh.com`. Throughput is calculated as upload plus download bytes
+divided by wall time.
 
 | Client file source | Size | Cipher | main throughput | main time | current throughput | current time | Change |
 |--------------------|------|--------|-----------------|-----------|--------------------|--------------|--------|
-| disk | 32MB | default OpenSSH | 404.9 MB/s | 0.158s +/- 0.004s | 419.1 MB/s | 0.153s +/- 0.005s | +3.5% |
-| disk | 256MB | default OpenSSH | 678.6 MB/s | 0.754s +/- 0.039s | 699.0 MB/s | 0.732s +/- 0.023s | +3.0% |
+| disk | 32MB | aes256-gcm | 463.5 MB/s | 0.138s +/- 0.007s | 550.8 MB/s | 0.116s +/- 0.011s | +18.8% |
+| disk | 256MB | aes256-gcm | 873.7 MB/s | 0.586s +/- 0.044s | 1203.9 MB/s | 0.425s +/- 0.015s | +37.8% |
 | disk | 1024MB | aes256-gcm | 937.7 MB/s | 2.184s +/- 0.081s | 1304.0 MB/s | 1.571s +/- 0.020s | +39.1% |
-| `/dev/shm` | 32MB | default OpenSSH | 424.9 MB/s | 0.151s +/- 0.004s | 430.1 MB/s | 0.149s +/- 0.006s | +1.2% |
-| `/dev/shm` | 256MB | default OpenSSH | 661.6 MB/s | 0.774s +/- 0.043s | 645.9 MB/s | 0.793s +/- 0.035s | -2.4% |
-| `/dev/shm` | 1024MB | default OpenSSH | 763.8 MB/s | 2.681s +/- 0.056s | 765.6 MB/s | 2.675s +/- 0.035s | +0.2% |
+| `/dev/shm` | 32MB | aes256-gcm | 484.3 MB/s | 0.132s +/- 0.005s | 559.4 MB/s | 0.114s +/- 0.005s | +15.5% |
+| `/dev/shm` | 256MB | aes256-gcm | 862.8 MB/s | 0.593s +/- 0.029s | 1230.8 MB/s | 0.416s +/- 0.021s | +42.7% |
+| `/dev/shm` | 1024MB | aes256-gcm | 988.5 MB/s | 2.072s +/- 0.118s | 1376.1 MB/s | 1.488s +/- 0.087s | +39.2% |
 
 The many-small-files benchmark transfers a 1GiB flat directory made of 10,251
 varied-size files, then downloads the files back in the same OpenSSH `sftp`
