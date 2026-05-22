@@ -492,7 +492,7 @@ for scenario in "${SCENARIOS[@]}"; do
 
             echo "  Throughput (roundtrip = upload+download / wall time):"
             jq -r --argjson mb "$((size * 2))" \
-                '.results[] | "    \(.command): \($mb / .mean | . * 10 | round / 10) MB/s  (±\($mb * .stddev / (.mean * .mean) | . * 10 | round / 10))"' \
+                '.results[] | "    \(.command): \($mb / .mean | . * 10 | round / 10) MB/s  (±\($mb * (.stddev // 0) / (.mean * .mean) | . * 10 | round / 10))"' \
                 "$outjson"
         done
     done
