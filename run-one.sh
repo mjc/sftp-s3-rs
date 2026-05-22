@@ -6,6 +6,7 @@
 
 CLIENT="openssh"
 CIPHERS="${SFTP_BENCH_CIPHERS:-}"
+RUST_CHUNK_SIZE="${SFTP_BENCH_CHUNK_SIZE:-64KiB}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -76,6 +77,7 @@ if [[ "$CLIENT" == "rust" ]]; then
         --operation roundtrip \
         --size "${size_bytes}B" \
         --iterations 1 \
+        --chunk-size "$RUST_CHUNK_SIZE" \
     )
     if [[ -n "$CIPHERS" ]]; then
         RUST_ARGS+=(--ciphers "$CIPHERS")
