@@ -271,8 +271,8 @@ Results are written under `benchmark_results/`:
 - `server-<config>.log` captures server output for the most recent run of a config
 
 Large disk fixtures are created sparsely with `truncate`; the Rust benchmark client generates its
-payload in memory from the requested size. Per-transfer timeouts scale with fixture size and can be
-overridden with `SFTP_BENCH_TRANSFER_TIMEOUT`.
+payload in memory from the requested size. Transfer commands are not wrapped in a timeout, so large
+cases run until the client finishes or fails on its own.
 
 Benchmark dependency patches live in `benchmark_patches/`. The matrix applies matching patches to
 temporary dependency checkouts before building:
