@@ -19,6 +19,7 @@ BENCH_CLIENT="openssh"
 BENCH_CIPHERS="${SFTP_BENCH_CIPHERS:-}"
 RUSSH_GIT_URL="https://github.com/mjc/russh.git"
 RUSSH_SFTP_GIT_URL="https://github.com/mjc/russh-sftp.git"
+PATCHES_DIR="$SFTP_DIR/benchmark_patches"
 BENCH_KEY_DIR="/tmp/sftp-bench-keys"
 BENCH_KEY="$BENCH_KEY_DIR/id_ed25519"
 BENCH_AUTHORIZED_KEYS="$BENCH_KEY.pub"
@@ -183,6 +184,45 @@ ensure_benchmark_key() {
     export SFTP_IDENTITY_FILE="$BENCH_KEY"
 }
 
+collect_dependency_patches() {
+    local component=$1 label=$2 ref=$3
+    local dir
+    for dir in \
+        "$PATCHES_DIR/$component/all" \
+        "$PATCHES_DIR/$component/$ref" \
+        "$PATCHES_DIR/$component/$label"
+    do
+        if [[ -d "$dir" ]]; then
+            find "$dir" -maxdepth 1 -type f -name '*.patch' | sort
+        fi
+    done
+}
+
+prepare_patched_russh() {
+    local label=$1 ref=$2 commit=$3 logfile=$4
+    local dep_dir="/tmp/bench-deps/russh-$label"
+    local patch
+    shift 4
+    local patches=("$@")
+
+    rm -rf "$dep_dir"
+    mkdir -p "$(dirname "$dep_dir")"
+    git clone -q "$RUSSH_GIT_URL" "$dep_dir" >>"$logfile" 2>&1
+    git -C "$dep_dir" checkout -q "$commit" >>"$logfile" 2>&1
+    for patch in "${patches[@]}"; do
+        if git -C "$dep_dir" apply --check "$patch" >>"$logfile" 2>&1; then
+            git -C "$dep_dir" apply "$patch" >>"$logfile" 2>&1
+            echo "applied russh patch $(basename "$patch") for $label" >>"$logfile"
+        elif git -C "$dep_dir" apply -R --check "$patch" >>"$logfile" 2>&1; then
+            echo "russh patch $(basename "$patch") already present for $label" >>"$logfile"
+        else
+            echo "ERROR: failed to apply russh patch $(basename "$patch") for $label ($ref)" >&2
+            return 1
+        fi
+    done
+    echo "$dep_dir/russh"
+}
+
 # Build all configs in isolated worktrees so dependency rewrites stay local to the benchmark.
 echo ""
 echo "=== Building ==="
@@ -209,7 +249,8 @@ _build_one() {
     local tgt="/tmp/bench-target-$label"
     local bin="$BINS_DIR/sftp-s3-$label"
     local logfile="$RESULTS_DIR/build-$label.log"
-    local russh_commit russh_spec
+    local russh_commit russh_spec russh_path
+    local russh_patches=()
 
     : >"$logfile"
 
@@ -233,10 +274,16 @@ _build_one() {
         echo "ERROR: failed to resolve russh $russh_kind '$russh_ref' for $label" >&2
         return 1
     fi
-    russh_spec="rev = \"$russh_commit\""
+    mapfile -t russh_patches < <(collect_dependency_patches russh "$label" "$russh_ref")
+    if ((${#russh_patches[@]})); then
+        russh_path=$(prepare_patched_russh "$label" "$russh_ref" "$russh_commit" "$logfile" "${russh_patches[@]}")
+        russh_spec="path = \"$russh_path\""
+    else
+        russh_spec="git = \"$RUSSH_GIT_URL\", rev = \"$russh_commit\""
+    fi
 
     sed -i \
-        -e "s|^russh = .*|russh = { git = \"$RUSSH_GIT_URL\", $russh_spec, default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }|" \
+        -e "s|^russh = .*|russh = { $russh_spec, default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }|" \
         -e "s|^russh-sftp = .*|russh-sftp = { git = \"$RUSSH_SFTP_GIT_URL\", branch = \"$sftp\" }|" \
         "$wt/Cargo.toml"
 
