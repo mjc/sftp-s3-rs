@@ -30,9 +30,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Connect with: sftp -P {} user@localhost", port);
     println!("Username: user, Password: pass");
 
-    Server::new(backend)
+    let handle = Server::new(backend)
         .config(config)
         .with_users(vec![("user".into(), "pass".into())])
-        .run()
-        .await
+        .serve()
+        .await?;
+
+    println!("Listening on {}", handle.local_addr());
+    handle.wait().await
 }

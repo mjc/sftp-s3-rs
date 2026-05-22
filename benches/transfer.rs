@@ -15,7 +15,7 @@ fn bench_streaming_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("streaming_write");
     group.measurement_time(Duration::from_secs(10));
 
-    for size in [1 * MB, 10 * MB, 100 * MB, 1024 * MB] {
+    for size in [MB, 10 * MB, 100 * MB, 1024 * MB] {
         let size_name = if size >= 1024 * MB {
             format!("{}GB", size / (1024 * MB))
         } else {
@@ -35,7 +35,10 @@ fn bench_streaming_write(c: &mut Criterion) {
                 while offset < size as u64 {
                     let write_size = std::cmp::min(CHUNK_SIZE as u64, size as u64 - offset);
                     handle
-                        .write_at(offset, &chunk[..write_size as usize])
+                        .write_at(
+                            offset,
+                            Bytes::copy_from_slice(&chunk[..write_size as usize]),
+                        )
                         .await
                         .unwrap();
                     offset += write_size;
@@ -55,7 +58,7 @@ fn bench_streaming_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("streaming_read");
     group.measurement_time(Duration::from_secs(10));
 
-    for size in [1 * MB, 10 * MB, 100 * MB, 1024 * MB] {
+    for size in [MB, 10 * MB, 100 * MB, 1024 * MB] {
         let size_name = if size >= 1024 * MB {
             format!("{}GB", size / (1024 * MB))
         } else {
@@ -96,7 +99,7 @@ fn bench_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("roundtrip");
     group.measurement_time(Duration::from_secs(15));
 
-    for size in [1 * MB, 10 * MB, 100 * MB, 1024 * MB] {
+    for size in [MB, 10 * MB, 100 * MB, 1024 * MB] {
         let size_name = if size >= 1024 * MB {
             format!("{}GB", size / (1024 * MB))
         } else {
@@ -117,7 +120,10 @@ fn bench_roundtrip(c: &mut Criterion) {
                 while offset < size as u64 {
                     let write_size = std::cmp::min(CHUNK_SIZE as u64, size as u64 - offset);
                     write_handle
-                        .write_at(offset, &chunk[..write_size as usize])
+                        .write_at(
+                            offset,
+                            Bytes::copy_from_slice(&chunk[..write_size as usize]),
+                        )
                         .await
                         .unwrap();
                     offset += write_size;

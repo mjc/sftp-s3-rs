@@ -11,13 +11,7 @@ fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
     data
 }
 
-type SftpResponseData = Bytes;
-
-fn bytes_into_response_data(b: Bytes) -> SftpResponseData {
-    b
-}
-
-use crate::backend::{normalize_path, Backend, BackendError, FileInfo};
+use crate::backend::{normalize_path, Backend, BackendError, FileInfo, FileKind, SetAttrs};
 use crate::handle::{HandleInfo, HandleManager};
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
@@ -27,13 +21,18 @@ use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 // Unix file type bits for SFTP
-const S_IFREG: u32 = 0o100_000; // Regular file
-const S_IFDIR: u32 = 0o040_000; // Directory
+const S_IFREG: u32 = 0o100000; // Regular file
+const S_IFDIR: u32 = 0o040000; // Directory
+const S_IFLNK: u32 = 0o120000; // Symlink
 
 /// Convert `FileInfo` to `russh_sftp` `FileAttributes`.
 fn to_file_attributes(info: &FileInfo) -> FileAttributes {
     // SFTP requires file type bits in permissions
-    let file_type = if info.is_dir { S_IFDIR } else { S_IFREG };
+    let file_type = match info.kind {
+        FileKind::File => S_IFREG,
+        FileKind::Directory => S_IFDIR,
+        FileKind::Symlink => S_IFLNK,
+    };
     let permissions = file_type | (info.permissions & 0o7777);
 
     FileAttributes {
@@ -44,6 +43,17 @@ fn to_file_attributes(info: &FileInfo) -> FileAttributes {
         uid: Some(info.uid),
         gid: Some(info.gid),
         ..Default::default()
+    }
+}
+
+fn attrs_to_set_attrs(attrs: &FileAttributes) -> SetAttrs {
+    SetAttrs {
+        size: attrs.size,
+        permissions: attrs.permissions.map(|permissions| permissions & 0o7777),
+        atime: attrs.atime,
+        mtime: attrs.mtime,
+        uid: attrs.uid,
+        gid: attrs.gid,
     }
 }
 
@@ -68,11 +78,13 @@ impl From<BackendError> for StatusCode {
         match err {
             BackendError::NotFound | BackendError::NotADirectory => StatusCode::NoSuchFile,
             BackendError::PermissionDenied => StatusCode::PermissionDenied,
-            BackendError::AlreadyExists
-            | BackendError::IsADirectory
-            | BackendError::DirectoryNotEmpty
-            | BackendError::Io(_)
-            | BackendError::Other(_) => StatusCode::Failure,
+            BackendError::AlreadyExists => StatusCode::Failure,
+            BackendError::NotADirectory => StatusCode::NoSuchFile,
+            BackendError::IsADirectory => StatusCode::Failure,
+            BackendError::DirectoryNotEmpty => StatusCode::Failure,
+            BackendError::Unsupported => StatusCode::OpUnsupported,
+            BackendError::Io(_) => StatusCode::Failure,
+            BackendError::Other(_) => StatusCode::Failure,
         }
     }
 }
@@ -140,7 +152,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let handle = self.handles.create_dir_handle(normalized.as_ref());
+        let handle = self.handles.create_dir_handle(normalized.into_owned());
         Ok(Handle {
             id,
             handle: handle.into(),
@@ -252,10 +264,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::Eof);
         }
 
-        Ok(Data {
-            id,
-            data: bytes_into_response_data(data),
-        })
+        Ok(Data { id, data })
     }
 
     #[instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len()))]
@@ -299,8 +308,16 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        // No symlink support, same as stat
-        self.stat(id, path).await
+        let info = self
+            .backend
+            .lstat(&normalize_path(&path))
+            .await
+            .map_err(StatusCode::from)?;
+
+        Ok(Attrs {
+            id,
+            attrs: to_file_attributes(&info),
+        })
     }
 
     async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, Self::Error> {
@@ -330,6 +347,33 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         };
 
         Ok(Attrs { id, attrs })
+    }
+
+    async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        let target = self
+            .backend
+            .read_link(&normalize_path(&path))
+            .await
+            .map_err(StatusCode::from)?;
+
+        Ok(Name {
+            id,
+            files: vec![File::dummy(&target)],
+        })
+    }
+
+    async fn symlink(
+        &mut self,
+        id: u32,
+        linkpath: String,
+        targetpath: String,
+    ) -> Result<Status, Self::Error> {
+        self.backend
+            .symlink(&normalize_path(&linkpath), &targetpath)
+            .await
+            .map_err(StatusCode::from)?;
+
+        Ok(ok_status(id))
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
@@ -404,20 +448,49 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
     async fn setstat(
         &mut self,
         id: u32,
-        _path: String,
-        _attrs: FileAttributes,
+        path: String,
+        attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        // S3 doesn't support setting attributes, just acknowledge
+        if attrs.is_empty() {
+            return Ok(ok_status(id));
+        }
+        let attrs = attrs_to_set_attrs(&attrs);
+
+        self.backend
+            .set_attrs(&normalize_path(&path), attrs)
+            .await
+            .map_err(StatusCode::from)?;
+
         Ok(ok_status(id))
     }
 
     async fn fsetstat(
         &mut self,
         id: u32,
-        _handle: SftpHandle,
-        _attrs: FileAttributes,
+        handle: SftpHandle,
+        attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        // S3 doesn't support setting attributes, just acknowledge
+        if attrs.is_empty() {
+            return Ok(ok_status(id));
+        }
+        let attrs = attrs_to_set_attrs(&attrs);
+
+        let info = self
+            .handles
+            .get_handle_info(handle_as_bytes(&handle))
+            .ok_or(StatusCode::Failure)?;
+
+        let path = match info {
+            HandleInfo::Dir { path }
+            | HandleInfo::Read { path, .. }
+            | HandleInfo::Write { path } => path,
+        };
+
+        self.backend
+            .set_attrs(&path, attrs)
+            .await
+            .map_err(StatusCode::from)?;
+
         Ok(ok_status(id))
     }
 
@@ -686,6 +759,123 @@ mod tests {
 
         let result = handler.stat(3, "/todel.txt".to_string()).await;
         assert!(matches!(result, Err(StatusCode::NoSuchFile)));
+    }
+
+    #[tokio::test]
+    async fn test_lstat_reports_symlink_kind_and_stat_follows() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        let wh = handler
+            .open(
+                1,
+                "/target.txt".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = to_sftp_handle(wh.handle);
+        handler
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"hello"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        handler
+            .symlink(2, "/link.txt".to_string(), "target.txt".to_string())
+            .await
+            .unwrap();
+
+        let lstat = handler.lstat(3, "/link.txt".to_string()).await.unwrap();
+        let stat = handler.stat(4, "/link.txt".to_string()).await.unwrap();
+
+        assert!(lstat.attrs.is_symlink());
+        assert_eq!(lstat.attrs.size, Some("target.txt".len() as u64));
+        assert!(stat.attrs.is_regular());
+        assert_eq!(stat.attrs.size, Some(5));
+    }
+
+    #[tokio::test]
+    async fn test_readlink_returns_target() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        handler
+            .symlink(1, "/link.txt".to_string(), "target.txt".to_string())
+            .await
+            .unwrap();
+
+        let reply = handler.readlink(2, "/link.txt".to_string()).await.unwrap();
+        assert_eq!(reply.files.len(), 1);
+        assert_eq!(reply.files[0].filename, "target.txt");
+    }
+
+    #[tokio::test]
+    async fn test_setstat_updates_metadata() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        let wh = handler
+            .open(
+                1,
+                "/data.bin".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = to_sftp_handle(wh.handle);
+        handler
+            .write(1, wh_bytes.clone(), 0, to_sftp_data(b"abc"))
+            .await
+            .unwrap();
+        handler.close(1, wh_bytes).await.unwrap();
+
+        handler
+            .setstat(
+                2,
+                "/data.bin".to_string(),
+                FileAttributes {
+                    size: Some(5),
+                    permissions: Some(0o600),
+                    atime: Some(100),
+                    mtime: Some(200),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let stat = handler.stat(3, "/data.bin".to_string()).await.unwrap();
+        assert_eq!(stat.attrs.size, Some(5));
+        assert_eq!(stat.attrs.permissions.map(|p| p & 0o777), Some(0o600));
+        assert_eq!(stat.attrs.atime, Some(100));
+        assert_eq!(stat.attrs.mtime, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_fsetstat_empty_attrs_is_ok() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        let wh = handler
+            .open(
+                1,
+                "/data.bin".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = to_sftp_handle(wh.handle.clone());
+
+        handler
+            .fsetstat(2, wh_bytes.clone(), FileAttributes::default())
+            .await
+            .unwrap();
+
+        handler.close(3, wh_bytes).await.unwrap();
     }
 
     #[tokio::test]

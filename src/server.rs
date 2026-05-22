@@ -1,9 +1,10 @@
 use crate::backend::Backend;
 use crate::ssh_handler::{AuthConfig, SshServer};
 use russh::keys::PublicKey;
-use russh::server::{Config as SshConfig, Server as _};
+use russh::server::{run_stream, Config as SshConfig, Server as _};
 use russh::{cipher, compression, Limits, Preferred};
 use std::borrow::Cow;
+use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -11,10 +12,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::{info, warn};
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{debug, info, warn};
 
 const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
-type ServerSetup<B> = (u16, SshServer<B>, Arc<SshConfig>);
 
 /// Server configuration
 #[derive(Clone)]
@@ -39,6 +41,8 @@ pub struct ServerConfig {
     pub maximum_packet_size: u32,
     /// Rekey write limit in bytes (default: 1GB). Lower for testing.
     pub rekey_write_limit: usize,
+    /// Maximum concurrent SSH connections. `None` means unlimited.
+    pub max_connections: Option<usize>,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +57,7 @@ impl Default for ServerConfig {
             window_size: 2 * 1024 * 1024, // 2MB default
             maximum_packet_size: 65_535, // russh caps this at the TCP packet limit
             rekey_write_limit: 1 << 30, // 1GB default (matches russh default)
+            max_connections: None,
         }
     }
 }
@@ -100,6 +105,12 @@ impl ServerConfig {
     /// Set rekey write limit in bytes (default: 1GB). Useful for testing rekey behaviour.
     pub fn with_rekey_write_limit(mut self, limit: usize) -> Self {
         self.rekey_write_limit = limit;
+        self
+    }
+
+    /// Limit the maximum number of concurrent SSH connections.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = Some(max);
         self
     }
 
@@ -230,6 +241,40 @@ pub struct Server<B: Backend> {
     auth_config: AuthConfig,
 }
 
+type BoxError = Box<dyn Error + Send + Sync>;
+
+struct PreparedServer<B: Backend> {
+    port: u16,
+    max_connections: Option<usize>,
+    server: SshServer<B>,
+    ssh_config: Arc<SshConfig>,
+}
+
+/// Running server handle for lifecycle control.
+pub struct ServerHandle {
+    local_addr: std::net::SocketAddr,
+    shutdown_tx: watch::Sender<bool>,
+    accept_task: JoinHandle<Result<(), BoxError>>,
+}
+
+impl ServerHandle {
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.local_addr
+    }
+
+    pub async fn shutdown(self) -> Result<(), BoxError> {
+        let _ = self.shutdown_tx.send(true);
+        self.wait().await
+    }
+
+    pub async fn wait(self) -> Result<(), BoxError> {
+        match self.accept_task.await {
+            Ok(result) => result,
+            Err(err) => Err(Box::new(err)),
+        }
+    }
+}
+
 impl<B: Backend> Server<B> {
     pub fn new(backend: B) -> Self {
         Self {
@@ -311,8 +356,10 @@ impl<B: Backend> Server<B> {
     }
 
     /// Build SSH config and server from current settings (shared setup for `run`/`run_on_socket`).
-    fn prepare(mut self) -> Result<ServerSetup<B>, Box<dyn std::error::Error + Send + Sync>> {
+    #[allow(clippy::type_complexity)]
+    fn prepare(mut self) -> Result<PreparedServer<B>, BoxError> {
         let port = self.config.port;
+        let max_connections = self.config.max_connections;
         let mut keys = self.config.keys.clone();
         if keys.is_empty() {
             keys.push(russh::keys::PrivateKey::random(
@@ -376,20 +423,59 @@ impl<B: Backend> Server<B> {
         });
 
         let server = SshServer::new(self.backend, self.auth_config);
-        Ok((port, server, ssh_config))
+        Ok(PreparedServer {
+            port,
+            max_connections,
+            server,
+            ssh_config,
+        })
     }
 
-    /// Run the server
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if SSH server setup fails or the listener cannot run.
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (port, mut server, ssh_config) = self.prepare()?;
-        let addr = format!("0.0.0.0:{port}");
-        info!(addr = %addr, "Starting SFTP server");
-        server.run_on_address(ssh_config, ("0.0.0.0", port)).await?;
-        Ok(())
+    /// Start the server and return a lifecycle handle.
+    pub async fn serve(self) -> Result<ServerHandle, BoxError> {
+        let prepared = self.prepare()?;
+        let bind_addr = ("0.0.0.0", prepared.port);
+        let socket = TcpListener::bind(bind_addr).await?;
+        Self::serve_prepared_on_socket(prepared, socket).await
+    }
+
+    /// Start the server on a pre-bound listener and return a lifecycle handle.
+    pub async fn serve_on_socket(self, socket: TcpListener) -> Result<ServerHandle, BoxError> {
+        let prepared = self.prepare()?;
+        Self::serve_prepared_on_socket(prepared, socket).await
+    }
+
+    async fn serve_prepared_on_socket(
+        prepared: PreparedServer<B>,
+        socket: TcpListener,
+    ) -> Result<ServerHandle, BoxError> {
+        let local_addr = socket.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        if let Some(limit) = prepared.max_connections {
+            info!(addr = %local_addr, max_connections = limit, "Starting SFTP server");
+        } else {
+            info!(addr = %local_addr, "Starting SFTP server");
+        }
+
+        let accept_task = tokio::spawn(run_accept_loop(
+            socket,
+            prepared.server,
+            prepared.ssh_config,
+            prepared.max_connections,
+            shutdown_rx,
+        ));
+
+        Ok(ServerHandle {
+            local_addr,
+            shutdown_tx,
+            accept_task,
+        })
+    }
+
+    /// Run the server until it exits.
+    pub async fn run(self) -> Result<(), BoxError> {
+        self.serve().await?.wait().await
     }
 
     /// Run the server on a pre-bound `TcpListener` (useful for testing with dynamic ports).
@@ -397,13 +483,9 @@ impl<B: Backend> Server<B> {
     /// # Errors
     ///
     /// Returns an error if SSH server setup fails or the listener cannot run.
-    pub async fn run_on_socket(
-        self,
-        socket: &TcpListener,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (_, mut server, ssh_config) = self.prepare()?;
-        server.run_on_socket(ssh_config, socket).await?;
-        Ok(())
+    pub async fn run_on_socket(self, socket: &TcpListener) -> Result<(), BoxError> {
+        let cloned = clone_listener(socket)?;
+        self.serve_on_socket(cloned).await?.wait().await
     }
 }
 
@@ -422,6 +504,182 @@ pub async fn run<B: Backend>(
         .with_users(users)
         .run()
         .await
+}
+
+async fn run_accept_loop<B: Backend>(
+    socket: TcpListener,
+    mut server: SshServer<B>,
+    ssh_config: Arc<SshConfig>,
+    max_connections: Option<usize>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<(), BoxError> {
+    let semaphore = max_connections.map(|limit| Arc::new(Semaphore::new(limit)));
+    let mut connections: JoinSet<Result<(), BoxError>> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            biased;
+
+            shutdown = shutdown_rx.changed() => {
+                match shutdown {
+                    Ok(()) if *shutdown_rx.borrow() => {
+                        debug!("Server shutdown requested");
+                        break;
+                    }
+                    Ok(()) => {}
+                    Err(_) => break,
+                }
+            }
+
+            Some(join_result) = connections.join_next(), if !connections.is_empty() => {
+                handle_connection_result(join_result)?;
+            }
+
+            accept_result = socket.accept() => {
+                let (stream, peer_addr) = accept_result?;
+                let PermitState::Continue(permit) =
+                    acquire_connection_permit(semaphore.clone(), &mut shutdown_rx).await?
+                else {
+                    break;
+                };
+
+                let handler = server.new_client(Some(peer_addr));
+                let config = ssh_config.clone();
+                let mut connection_shutdown = shutdown_rx.clone();
+
+                connections.spawn(async move {
+                    run_connection(stream, config, handler, &mut connection_shutdown, permit).await
+                });
+            }
+        }
+    }
+
+    while let Some(join_result) = connections.join_next().await {
+        handle_connection_result(join_result)?;
+    }
+
+    Ok(())
+}
+
+enum PermitState {
+    Continue(Option<OwnedSemaphorePermit>),
+    Shutdown,
+}
+
+async fn acquire_connection_permit(
+    semaphore: Option<Arc<Semaphore>>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<PermitState, BoxError> {
+    let Some(semaphore) = semaphore else {
+        return Ok(PermitState::Continue(None));
+    };
+
+    tokio::select! {
+        biased;
+
+        shutdown = shutdown_rx.changed() => {
+            match shutdown {
+                Ok(()) if *shutdown_rx.borrow() => Ok(PermitState::Shutdown),
+                Ok(()) => unreachable!("shutdown receiver changed without a shutdown signal"),
+                Err(_) => Ok(PermitState::Shutdown),
+            }
+        }
+        permit = semaphore.acquire_owned() => {
+            Ok(PermitState::Continue(Some(permit?)))
+        }
+    }
+}
+
+async fn run_connection<H>(
+    socket: tokio::net::TcpStream,
+    config: Arc<SshConfig>,
+    handler: H,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    _permit: Option<OwnedSemaphorePermit>,
+) -> Result<(), BoxError>
+where
+    H: russh::server::Handler<Error = russh::Error> + Send + 'static,
+{
+    if config.nodelay {
+        if let Err(err) = socket.set_nodelay(true) {
+            warn!("set_nodelay() failed: {err:?}");
+        }
+    }
+
+    let session = tokio::select! {
+        biased;
+
+        shutdown = shutdown_rx.changed() => {
+            match shutdown {
+                Ok(()) if *shutdown_rx.borrow() => return Ok(()),
+                Ok(()) => unreachable!("shutdown receiver changed without a shutdown signal"),
+                Err(_) => return Ok(()),
+            }
+        }
+        session = run_stream(config, socket, handler) => session.map_err(|err| -> BoxError { Box::new(err) })?,
+    };
+
+    let handle = session.handle();
+
+    tokio::select! {
+        biased;
+
+        shutdown = shutdown_rx.changed() => {
+            match shutdown {
+                Ok(()) if *shutdown_rx.borrow() => {
+                    if let Err(err) = handle.disconnect(
+                        russh::Disconnect::ByApplication,
+                        "server shutting down".into(),
+                        "".into(),
+                    ).await {
+                        debug!("Failed to send disconnect message: {err:?}");
+                    }
+                }
+                Ok(()) => {}
+                Err(_) => {}
+            }
+        }
+        result = session => {
+            result.map_err(|err| -> BoxError { Box::new(err) })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_connection_result(
+    join_result: Result<Result<(), BoxError>, tokio::task::JoinError>,
+) -> Result<(), BoxError> {
+    match join_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => {
+            warn!("Connection closed with error: {err}");
+            Ok(())
+        }
+        Err(err) => Err(Box::new(err)),
+    }
+}
+
+#[cfg(unix)]
+fn clone_listener(socket: &TcpListener) -> Result<TcpListener, BoxError> {
+    use std::net::TcpListener as StdTcpListener;
+    use std::os::fd::{AsFd, OwnedFd};
+
+    let owned: OwnedFd = socket.as_fd().try_clone_to_owned()?;
+    let std_listener = StdTcpListener::from(owned);
+    std_listener.set_nonblocking(true)?;
+    Ok(TcpListener::from_std(std_listener)?)
+}
+
+#[cfg(windows)]
+fn clone_listener(socket: &TcpListener) -> Result<TcpListener, BoxError> {
+    use std::net::TcpListener as StdTcpListener;
+    use std::os::windows::io::{AsSocket, OwnedSocket};
+
+    let owned: OwnedSocket = socket.as_socket().try_clone_to_owned()?;
+    let std_listener = StdTcpListener::from(owned);
+    std_listener.set_nonblocking(true)?;
+    Ok(TcpListener::from_std(std_listener)?)
 }
 
 // Re-export auth types for advanced usage
@@ -460,6 +718,10 @@ pub const AVAILABLE_CIPHERS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::MemoryBackend;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::timeout;
 
     // --- ServerConfig defaults and builder ---
 
@@ -474,6 +736,7 @@ mod tests {
         assert!(config.nodelay);
         assert_eq!(config.window_size, 2 * 1024 * 1024);
         assert_eq!(config.maximum_packet_size, 65_535);
+        assert!(config.max_connections.is_none());
     }
 
     #[test]
@@ -481,9 +744,11 @@ mod tests {
         let config = ServerConfig::new()
             .port(2345)
             .with_compression()
+            .with_max_connections(4)
             .with_generated_key();
         assert_eq!(config.port, 2345);
         assert!(config.compression);
+        assert_eq!(config.max_connections, Some(4));
         assert_eq!(config.keys.len(), 1);
     }
 
@@ -533,8 +798,6 @@ mod tests {
 
     #[test]
     fn test_server_with_users() {
-        use crate::backend::MemoryBackend;
-
         let server = Server::new(MemoryBackend::new())
             .with_users(vec![("alice".to_string(), "pass".to_string())]);
 
@@ -551,7 +814,6 @@ mod tests {
 
     #[test]
     fn test_server_with_authorized_keys() {
-        use crate::backend::MemoryBackend;
         let key =
             russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
                 .unwrap();
@@ -563,5 +825,126 @@ mod tests {
         assert!(server.auth_config.pubkey_callback.is_some());
         let cb = server.auth_config.pubkey_callback.as_ref().unwrap();
         assert!(cb("user", &pubkey));
+    }
+
+    fn test_server() -> Server<MemoryBackend> {
+        Server::new(MemoryBackend::new())
+            .config(ServerConfig::new().port(0).with_generated_key())
+            .with_users(vec![("test".to_string(), "pass".to_string())])
+    }
+
+    async fn connect_raw(addr: std::net::SocketAddr) -> TcpStream {
+        TcpStream::connect(addr).await.unwrap()
+    }
+
+    async fn read_ssh_banner(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stream.read_exact(&mut byte).await.unwrap();
+            buf.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_serve_returns_handle_with_bound_address() {
+        let handle = test_server().serve().await.unwrap();
+        let addr = handle.local_addr();
+
+        assert_ne!(addr.port(), 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_stops_accepting_new_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = test_server().serve_on_socket(listener).await.unwrap();
+        let addr = handle.local_addr();
+
+        handle.shutdown().await.unwrap();
+
+        let connect_result = TcpStream::connect(addr).await;
+        assert!(connect_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_drains_existing_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = test_server().serve_on_socket(listener).await.unwrap();
+        let addr = handle.local_addr();
+
+        let mut stream = connect_raw(addr).await;
+        let banner = read_ssh_banner(&mut stream).await;
+        assert!(banner.starts_with("SSH-2.0-"));
+
+        stream.write_all(b"SSH-2.0-test-client\r\n").await.unwrap();
+
+        timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_max_connections_one_queues_second_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = Server::new(MemoryBackend::new())
+            .config(
+                ServerConfig::new()
+                    .port(0)
+                    .with_generated_key()
+                    .with_max_connections(1),
+            )
+            .serve_on_socket(listener)
+            .await
+            .unwrap();
+        let addr = handle.local_addr();
+
+        let mut first = connect_raw(addr).await;
+        let first_banner = read_ssh_banner(&mut first).await;
+        assert!(first_banner.starts_with("SSH-2.0-"));
+
+        let mut second = connect_raw(addr).await;
+        let queued = timeout(Duration::from_millis(200), read_ssh_banner(&mut second)).await;
+        assert!(
+            queued.is_err(),
+            "second connection should wait for a permit"
+        );
+
+        drop(first);
+
+        let second_banner = timeout(Duration::from_secs(2), read_ssh_banner(&mut second))
+            .await
+            .unwrap();
+        assert!(second_banner.starts_with("SSH-2.0-"));
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unlimited_connections_preserve_current_behavior() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = test_server().serve_on_socket(listener).await.unwrap();
+        let addr = handle.local_addr();
+
+        let mut first = connect_raw(addr).await;
+        let mut second = connect_raw(addr).await;
+
+        let first_banner = timeout(Duration::from_secs(2), read_ssh_banner(&mut first))
+            .await
+            .unwrap();
+        let second_banner = timeout(Duration::from_secs(2), read_ssh_banner(&mut second))
+            .await
+            .unwrap();
+
+        assert!(first_banner.starts_with("SSH-2.0-"));
+        assert!(second_banner.starts_with("SSH-2.0-"));
+
+        handle.shutdown().await.unwrap();
     }
 }

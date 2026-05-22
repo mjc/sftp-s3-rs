@@ -1,6 +1,6 @@
 use super::{
-    current_timestamp, normalize_path, unix_secs_to_u32, Backend, BackendError, BackendResult,
-    DirEntry, FileInfo, ReadHandle, WriteHandle,
+    current_timestamp, normalize_path, unix_secs_to_u32, Backend, BackendCapabilities,
+    BackendError, BackendResult, DirEntry, FileInfo, ReadHandle, SetAttrs, WriteHandle,
 };
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
@@ -137,10 +137,73 @@ impl S3Backend {
             Err(head_error.unwrap_or(BackendError::NotFound))
         }
     }
+
+    fn dir_prefix(&self, path: &str) -> String {
+        format!("{}/", self.build_key(path))
+    }
+
+    fn dir_marker_key(&self, path: &str) -> String {
+        format!("{}/{}", self.build_key(path), KEEP_MARKER)
+    }
+
+    async fn list_all_keys(&self, prefix: &str) -> BackendResult<Vec<String>> {
+        let mut continuation_token = None;
+        let mut keys = Vec::new();
+
+        loop {
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.config.bucket)
+                .prefix(prefix);
+
+            if let Some(token) = continuation_token.as_deref() {
+                request = request.continuation_token(token);
+            }
+
+            let result = request.send().await.map_err(Self::map_s3_error)?;
+            if let Some(contents) = result.contents {
+                keys.extend(contents.into_iter().filter_map(|object| object.key));
+            }
+
+            if result.is_truncated.unwrap_or(false) {
+                continuation_token = result.next_continuation_token;
+            } else {
+                break;
+            }
+        }
+
+        Ok(keys)
+    }
+
+    async fn object_exists(&self, key: &str) -> BackendResult<bool> {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(err) => match Self::map_s3_error(err) {
+                BackendError::NotFound => Ok(false),
+                other => Err(other),
+            },
+        }
+    }
 }
 
 #[async_trait]
 impl Backend for S3Backend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            symlinks: false,
+            set_attrs: false,
+            delegated_safe_streaming_fallback: true,
+        }
+    }
+
     async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
         let normalized = normalize_path(path);
         let prefix = if normalized.is_empty() {
@@ -293,12 +356,29 @@ impl Backend for S3Backend {
     }
 
     async fn del_dir(&self, path: &str) -> BackendResult<()> {
-        let key = format!("{}/{}", self.build_key(path), KEEP_MARKER);
+        let normalized = normalize_path(path);
+        if normalized.is_empty() {
+            return Err(BackendError::PermissionDenied);
+        }
+
+        let prefix = self.dir_prefix(normalized.as_ref());
+        let marker = self.dir_marker_key(normalized.as_ref());
+        let keys = self.list_all_keys(&prefix).await?;
+
+        if keys.is_empty() {
+            return Err(BackendError::NotFound);
+        }
+        if keys.iter().any(|key| key != &marker) {
+            return Err(BackendError::DirectoryNotEmpty);
+        }
+        if !keys.iter().any(|key| key == &marker) {
+            return Err(BackendError::NotFound);
+        }
 
         self.client
             .delete_object()
             .bucket(&self.config.bucket)
-            .key(&key)
+            .key(&marker)
             .send()
             .await
             .map_err(Self::map_s3_error)?;
@@ -307,7 +387,18 @@ impl Backend for S3Backend {
     }
 
     async fn delete(&self, path: &str) -> BackendResult<()> {
-        let key = self.build_key(path);
+        let normalized = normalize_path(path);
+        let key = self.build_key(normalized.as_ref());
+        let dir_keys = self
+            .list_all_keys(&self.dir_prefix(normalized.as_ref()))
+            .await?;
+
+        if !dir_keys.is_empty() {
+            return Err(BackendError::IsADirectory);
+        }
+        if !self.object_exists(&key).await? {
+            return Err(BackendError::NotFound);
+        }
 
         self.client
             .delete_object()
@@ -323,9 +414,48 @@ impl Backend for S3Backend {
     async fn rename(&self, src: &str, dst: &str) -> BackendResult<()> {
         let src_key = self.build_key(src);
         let dst_key = self.build_key(dst);
+        let src_prefix = format!("{src_key}/");
+        let dir_keys = self.list_all_keys(&src_prefix).await?;
+
+        if !dir_keys.is_empty() {
+            for old_key in &dir_keys {
+                let suffix = old_key.strip_prefix(&src_prefix).unwrap_or("");
+                let new_key = if suffix.is_empty() {
+                    dst_key.clone()
+                } else {
+                    format!("{dst_key}/{suffix}")
+                };
+                let copy_source = format!("{}/{}", self.config.bucket, old_key);
+
+                self.client
+                    .copy_object()
+                    .bucket(&self.config.bucket)
+                    .copy_source(&copy_source)
+                    .key(&new_key)
+                    .send()
+                    .await
+                    .map_err(Self::map_s3_error)?;
+            }
+
+            for old_key in dir_keys {
+                self.client
+                    .delete_object()
+                    .bucket(&self.config.bucket)
+                    .key(&old_key)
+                    .send()
+                    .await
+                    .map_err(Self::map_s3_error)?;
+            }
+
+            return Ok(());
+        }
+
+        if !self.object_exists(&src_key).await? {
+            return Err(BackendError::NotFound);
+        }
+
         let copy_source = format!("{}/{}", self.config.bucket, src_key);
 
-        // Copy to new location
         self.client
             .copy_object()
             .bucket(&self.config.bucket)
@@ -335,7 +465,6 @@ impl Backend for S3Backend {
             .await
             .map_err(Self::map_s3_error)?;
 
-        // Delete original
         self.client
             .delete_object()
             .bucket(&self.config.bucket)
@@ -420,6 +549,18 @@ impl Backend for S3Backend {
             part_number: 1,
             next_offset: 0,
         }))
+    }
+
+    async fn read_link(&self, _path: &str) -> BackendResult<String> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn symlink(&self, _linkpath: &str, _targetpath: &str) -> BackendResult<()> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn set_attrs(&self, _path: &str, _attrs: SetAttrs) -> BackendResult<()> {
+        Err(BackendError::Unsupported)
     }
 }
 
