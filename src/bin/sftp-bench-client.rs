@@ -128,7 +128,9 @@ async fn main() -> Result<(), BoxError> {
     let addr = format!("{}:{}", cli.host, cli.port);
     let sftp = connect_sftp(&addr, &cli).await?;
     let run_id = run_id();
-    let payload = Arc::new(make_payload(max_file_size(cli.size, cli.files)));
+    let payload = Arc::new(make_payload(
+        cli.chunk_size.min(max_file_size(cli.size, cli.files)),
+    ));
 
     println!("target:     {addr}");
     println!("user:       {}", cli.user);
@@ -150,8 +152,10 @@ async fn main() -> Result<(), BoxError> {
 }
 
 async fn connect_sftp(addr: &str, cli: &Cli) -> Result<SftpSession, BoxError> {
-    let mut config = client::Config::default();
-    config.nodelay = cli.nodelay;
+    let mut config = client::Config {
+        nodelay: cli.nodelay,
+        ..Default::default()
+    };
     if let Some(cipher_names) = cli.ciphers.as_ref() {
         let ciphers = parse_ciphers(cipher_names)?;
         let mut preferred = Preferred::DEFAULT;
@@ -292,10 +296,14 @@ async fn upload_paths(
             .into_iter()
             .zip(per_file_sizes)
             .map(|(mut file, file_size)| async move {
-                let file_size = file_size as usize;
-                file.write_all(&payload[..file_size])
-                    .await
-                    .map_err(|error| boxed(format!("failed to write remote file: {error}")))?;
+                let mut remaining = file_size as usize;
+                while remaining > 0 {
+                    let chunk_len = remaining.min(payload.len());
+                    file.write_all(&payload[..chunk_len])
+                        .await
+                        .map_err(|error| boxed(format!("failed to write remote file: {error}")))?;
+                    remaining -= chunk_len;
+                }
                 file.shutdown()
                     .await
                     .map_err(|error| boxed(format!("failed to close remote file: {error}")))?;
@@ -457,11 +465,11 @@ fn format_rate(bytes: u64, elapsed: Duration) -> String {
 }
 
 fn format_bytes(bytes: u64) -> String {
-    if bytes % (1024 * MIB) == 0 {
+    if bytes.is_multiple_of(1024 * MIB) {
         format!("{} GiB", bytes / (1024 * MIB))
-    } else if bytes % MIB == 0 {
+    } else if bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
-    } else if bytes % KIB == 0 {
+    } else if bytes.is_multiple_of(KIB) {
         format!("{} KiB", bytes / KIB)
     } else {
         format!("{bytes} B")
