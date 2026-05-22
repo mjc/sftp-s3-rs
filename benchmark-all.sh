@@ -365,15 +365,22 @@ start_server() {
     [[ -z "$config" ]] && { echo "ERROR: config not found for $label" >&2; return 1; }
     IFS='|' read -r label russh_kind russh_ref sftp port features <<< "$config"
 
-    if [[ "$backend" == "local" ]]; then
-        local root="/tmp/sftp-bench-root-$label"
-        mkdir -p "$root"
-        "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend local --root "$root" \
-            >"$RESULTS_DIR/server-$label.log" 2>&1 &
-    else
-        "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend memory \
-            >"$RESULTS_DIR/server-$label.log" 2>&1 &
-    fi
+    case "$backend" in
+        local)
+            local root="/tmp/sftp-bench-root-$label"
+            mkdir -p "$root"
+            "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend local --root "$root" \
+                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+            ;;
+        memory|benchmark)
+            "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend "$backend" \
+                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+            ;;
+        *)
+            echo "ERROR: unknown benchmark backend '$backend' for $label" >&2
+            return 1
+            ;;
+    esac
     echo $! > "/tmp/sftp-bench-$port.pid"
 
     # Wait for server to be ready
