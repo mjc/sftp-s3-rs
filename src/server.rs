@@ -17,7 +17,18 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
 
 const CWD_KEY_PATH: &str = "ssh_host_ed25519_key";
-
+fn generate_ed25519_key() -> Result<russh::keys::PrivateKey, BoxError> {
+    let mut seed = [0u8; russh::keys::ssh_key::private::Ed25519PrivateKey::BYTE_SIZE];
+    getrandom::fill(&mut seed).map_err(|error| -> BoxError {
+        Box::new(std::io::Error::other(format!(
+            "failed to generate host key seed: {error}"
+        )))
+    })?;
+    let private = russh::keys::ssh_key::private::Ed25519PrivateKey::from_bytes(&seed);
+    Ok(russh::keys::PrivateKey::from(
+        russh::keys::ssh_key::private::Ed25519Keypair::from(private),
+    ))
+}
 /// Server configuration
 #[derive(Clone)]
 #[must_use]
@@ -95,9 +106,7 @@ impl ServerConfig {
     ///
     /// Panics if the operating system random number generator fails.
     pub fn with_generated_key(mut self) -> Self {
-        let key =
-            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
-                .unwrap();
+        let key = generate_ed25519_key().unwrap();
         self.keys.push(key);
         self
     }
@@ -197,9 +206,7 @@ impl ServerConfig {
         }
 
         // Generate and try to save to cwd
-        let key =
-            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
-                .unwrap();
+        let key = generate_ed25519_key().unwrap();
 
         let key_str = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
@@ -362,10 +369,7 @@ impl<B: Backend> Server<B> {
         let max_connections = self.config.max_connections;
         let mut keys = self.config.keys.clone();
         if keys.is_empty() {
-            keys.push(russh::keys::PrivateKey::random(
-                &mut rand::rng(),
-                russh::keys::Algorithm::Ed25519,
-            )?);
+            keys.push(generate_ed25519_key()?);
         }
 
         // If no auth configured, try ~/.ssh/authorized_keys
@@ -814,9 +818,7 @@ mod tests {
 
     #[test]
     fn test_server_with_authorized_keys() {
-        let key =
-            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
-                .unwrap();
+        let key = generate_ed25519_key().unwrap();
         let pubkey = key.public_key().clone();
 
         let server = Server::new(MemoryBackend::new())
