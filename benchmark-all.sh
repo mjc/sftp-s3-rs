@@ -400,13 +400,6 @@ for scenario in "${SCENARIOS[@]}"; do
             testfile="$SFTP_DIR/testfile_${size}mb.bin"
             outjson="$RESULTS_DIR/${size}mb-${scenario_label}-${label}.json"
 
-            if [[ "$size" -eq 1024 && ( "$_russh_ref" == "main" || "$_russh_ref" == "v0.57.0" ) ]]; then
-                echo ""
-                echo "--- $label ${size}MB skipped ---"
-                echo "  Skipping ${size}MB benchmark for $label: ${_russh_ref} is expected to fail this case"
-                continue
-            fi
-
             echo ""
             echo "--- $label ${size}MB × ${iters} runs (${warmup} warmup) ---"
 
