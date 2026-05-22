@@ -72,6 +72,10 @@ struct Cli {
     #[arg(short, long, default_value_t = 3)]
     iterations: u64,
 
+    /// Stable identifier used in benchmark file names
+    #[arg(long, env = "SFTP_BENCH_RUN_ID")]
+    run_id: Option<String>,
+
     /// Read buffer size for downloads, accepts suffixes B, KiB, MiB, GiB
     #[arg(long, default_value = "256KiB", value_parser = parse_size_usize)]
     chunk_size: usize,
@@ -87,6 +91,14 @@ struct Cli {
     /// Leave benchmark files on the server
     #[arg(long)]
     keep_files: bool,
+
+    /// For download benchmarks, upload the fixture and exit without measuring
+    #[arg(long)]
+    prepare_only: bool,
+
+    /// For download benchmarks, reuse an existing fixture instead of uploading it first
+    #[arg(long)]
+    skip_download_setup: bool,
 
     /// Set TCP_NODELAY on the SSH connection
     #[arg(long)]
@@ -139,7 +151,7 @@ async fn main() -> Result<(), BoxError> {
 
     let addr = format!("{}:{}", cli.host, cli.port);
     let sftp = Arc::new(connect_sftp(&addr, &cli).await?);
-    let run_id = run_id();
+    let run_id = cli.run_id.clone().unwrap_or_else(run_id);
     let payload = Arc::new(make_payload(
         cli.chunk_size.min(max_file_size(cli.size, cli.files)),
     ));
@@ -150,7 +162,16 @@ async fn main() -> Result<(), BoxError> {
     println!("total size: {}", format_bytes(cli.size));
     println!("files:      {}", cli.files);
     println!("iterations: {}", cli.iterations);
+    println!("run id:     {run_id}");
     println!();
+
+    if cli.prepare_only {
+        prepare_download_fixture(&sftp, &cli, &payload, &run_id).await?;
+        println!("prepared download fixture");
+        sftp.close_session()
+            .map_err(|error| boxed(format!("failed to close SFTP session: {error}")))?;
+        return Ok(());
+    }
 
     let results = match cli.operation {
         Operation::Upload => run_upload_benchmark(&sftp, &cli, &payload, &run_id).await?,
@@ -242,7 +263,9 @@ async fn run_download_benchmark(
     run_id: &str,
 ) -> Result<Vec<IterationResult>, BoxError> {
     let paths = iteration_paths(cli, run_id, 0);
-    upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+    if !cli.skip_download_setup {
+        upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+    }
 
     let mut results = Vec::with_capacity(cli.iterations as usize);
     for iteration in 0..cli.iterations {
@@ -260,6 +283,17 @@ async fn run_download_benchmark(
     }
 
     Ok(results)
+}
+
+async fn prepare_download_fixture(
+    sftp: &Arc<RawSftpSession>,
+    cli: &Cli,
+    payload: &Arc<Vec<u8>>,
+    run_id: &str,
+) -> Result<(), BoxError> {
+    let paths = iteration_paths(cli, run_id, 0);
+    upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+    Ok(())
 }
 
 async fn run_roundtrip_benchmark(
@@ -566,6 +600,22 @@ fn validate_cli(cli: &Cli) -> Result<(), BoxError> {
     }
     if cli.iterations == 0 {
         return Err(boxed("--iterations must be greater than zero"));
+    }
+    if cli.run_id.as_deref() == Some("") {
+        return Err(boxed("--run-id must not be empty"));
+    }
+    if cli.prepare_only && !matches!(cli.operation, Operation::Download) {
+        return Err(boxed("--prepare-only only applies to --operation download"));
+    }
+    if cli.skip_download_setup && !matches!(cli.operation, Operation::Download) {
+        return Err(boxed(
+            "--skip-download-setup only applies to --operation download",
+        ));
+    }
+    if cli.prepare_only && cli.skip_download_setup {
+        return Err(boxed(
+            "--prepare-only and --skip-download-setup cannot be used together",
+        ));
     }
     if cli.chunk_size == 0 {
         return Err(boxed("--chunk-size must be greater than zero"));
