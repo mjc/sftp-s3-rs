@@ -1,14 +1,56 @@
 use bytes::{Buf, Bytes};
 
+#[cfg(not(feature = "sftp-master"))]
 type SftpHandle = Bytes;
-type SftpWriteData = Bytes;
+#[cfg(feature = "sftp-master")]
+type SftpHandle = String;
 
+#[cfg(not(feature = "sftp-master"))]
+type SftpWriteData = Bytes;
+#[cfg(feature = "sftp-master")]
+type SftpWriteData = Vec<u8>;
+
+#[cfg(not(feature = "sftp-master"))]
 fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
     h.as_ref()
 }
 
+#[cfg(feature = "sftp-master")]
+fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
+    h.as_bytes()
+}
+
+#[cfg(not(feature = "sftp-master"))]
+fn handle_for_log(h: &SftpHandle) -> String {
+    String::from_utf8_lossy(h).into_owned()
+}
+
+#[cfg(feature = "sftp-master")]
+fn handle_for_log(h: &SftpHandle) -> &str {
+    h
+}
+
+#[cfg(not(feature = "sftp-master"))]
 fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
     data
+}
+
+#[cfg(feature = "sftp-master")]
+fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
+    Bytes::from(data)
+}
+
+#[cfg(not(feature = "sftp-master"))]
+fn sftp_data(id: u32, data: Bytes) -> Data {
+    Data { id, data }
+}
+
+#[cfg(feature = "sftp-master")]
+fn sftp_data(id: u32, data: Bytes) -> Data {
+    Data {
+        id,
+        data: data.into(),
+    }
 }
 
 use crate::backend::{normalize_path, Backend, BackendError, FileInfo, FileKind, SetAttrs};
@@ -122,7 +164,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(v)
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %handle_for_log(&handle)))]
     async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
         let hb = handle_as_bytes(&handle);
         // If it's a write handle, finish it
@@ -159,7 +201,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %handle_for_log(&handle)))]
     async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, Self::Error> {
         let hb = handle_as_bytes(&handle);
         let (path, read_done) = self.handles.get_dir_handle(hb).ok_or(StatusCode::Failure)?;
@@ -240,7 +282,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %handle_for_log(&handle)))]
     async fn read(
         &mut self,
         id: u32,
@@ -264,10 +306,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::Eof);
         }
 
-        Ok(Data { id, data })
+        Ok(sftp_data(id, data))
     }
 
-    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %String::from_utf8_lossy(&handle), len = data.len()))]
+    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %handle_for_log(&handle), len = data.len()))]
     async fn write(
         &mut self,
         id: u32,
@@ -605,12 +647,24 @@ mod tests {
         SftpHandler::new(Arc::new(MemoryBackend::new()))
     }
 
+    #[cfg(not(feature = "sftp-master"))]
     fn to_sftp_handle(s: impl Into<Bytes>) -> SftpHandle {
         s.into()
     }
 
+    #[cfg(feature = "sftp-master")]
+    fn to_sftp_handle(s: impl Into<String>) -> SftpHandle {
+        s.into()
+    }
+
+    #[cfg(not(feature = "sftp-master"))]
     fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
         Bytes::from(v.into())
+    }
+
+    #[cfg(feature = "sftp-master")]
+    fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
+        v.into()
     }
 
     // Helper: init the SFTP session

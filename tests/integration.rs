@@ -323,11 +323,15 @@ async fn test_transfer_survives_rekey() {
 /// Start a server that accepts a specific public key, return (port, tempdir_with_private_key).
 /// The private key is written in OpenSSH format so the system sftp client can use it.
 async fn start_test_server_with_pubkey(rekey_write_limit: usize) -> (u16, tempfile::TempDir) {
-    use russh::keys::{Algorithm, PrivateKey};
+    use russh::keys::{ssh_key::private::Ed25519PrivateKey, PrivateKey};
     use std::io::Write as _;
 
     // Generate a key pair
-    let privkey = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    let mut seed = [0u8; Ed25519PrivateKey::BYTE_SIZE];
+    getrandom::fill(&mut seed).unwrap();
+    let privkey = PrivateKey::from(russh::keys::ssh_key::private::Ed25519Keypair::from(
+        Ed25519PrivateKey::from_bytes(&seed),
+    ));
     let pubkey = privkey.public_key().clone();
 
     // Write private key to a tempdir (needs 0600 permissions for sftp to accept it)

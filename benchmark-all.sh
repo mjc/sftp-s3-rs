@@ -209,25 +209,41 @@ _build_one() {
     local tgt="/tmp/bench-target-$label"
     local bin="$BINS_DIR/sftp-s3-$label"
     local logfile="$RESULTS_DIR/build-$label.log"
-    local russh_spec
+    local russh_commit russh_spec
+
+    : >"$logfile"
 
     git -C "$SFTP_DIR" worktree remove --force "$wt" 2>/dev/null || true
     rm -rf "$wt"
     git -C "$SFTP_DIR" worktree add -q "$wt" HEAD
 
     case "$russh_kind" in
-        branch) russh_spec="branch = \"$russh_ref\"" ;;
-        tag) russh_spec="tag = \"$russh_ref\"" ;;
+        branch)
+            russh_commit=$(git ls-remote "$RUSSH_GIT_URL" "refs/heads/$russh_ref" | awk '{print $1}')
+            ;;
+        tag)
+            russh_commit=$(git ls-remote "$RUSSH_GIT_URL" "refs/tags/$russh_ref" | awk '{print $1}')
+            ;;
         *)
             echo "ERROR: unsupported russh ref kind '$russh_kind' for $label" >&2
             return 1
             ;;
     esac
+    if [[ -z "$russh_commit" ]]; then
+        echo "ERROR: failed to resolve russh $russh_kind '$russh_ref' for $label" >&2
+        return 1
+    fi
+    russh_spec="rev = \"$russh_commit\""
 
     sed -i \
         -e "s|^russh = .*|russh = { git = \"$RUSSH_GIT_URL\", $russh_spec, default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }|" \
         -e "s|^russh-sftp = .*|russh-sftp = { git = \"$RUSSH_SFTP_GIT_URL\", branch = \"$sftp\" }|" \
         "$wt/Cargo.toml"
+
+    # Each matrix entry intentionally rewrites core git dependencies. Reusing
+    # HEAD's lockfile can force incompatible transitive versions onto older
+    # russh/russh-sftp combinations, so resolve the rewritten graph directly.
+    rm -f "$wt/Cargo.lock"
 
     echo "  $label (russh $russh_kind=$russh_ref sftp=$sftp${features:+ features=$features})"
     (
@@ -235,7 +251,7 @@ _build_one() {
         cargo update --quiet >>"$logfile" 2>&1 || true
         unset NIX_ENFORCE_NO_NATIVE
         CARGO_TARGET_DIR="$tgt" RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache \
-            cargo build --release ${features:+--features $features} -q >>"$logfile" 2>&1
+            cargo build --release --bin sftp-s3 ${features:+--features $features} -q >>"$logfile" 2>&1
     )
     cp "$tgt/release/sftp-s3" "$bin"
     git -C "$SFTP_DIR" worktree remove --force "$wt" 2>/dev/null || true
