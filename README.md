@@ -159,32 +159,29 @@ nix develop -c cargo test --all-features --test s3_minio_integration -- --ignore
 ## Performance
 
 OpenSSH `sftp` round-trip benchmark against the memory backend, measured on May
-21, 2026 with the release binary. The client requests the SSH `sftp` subsystem
+22, 2026 with release binaries. The client requests the SSH `sftp` subsystem
 (`sftp -vv` reports `Sending subsystem: sftp` and remote SFTP version 3); it is
 not using legacy scp protocol. Each row is 10 measured runs after 2 warmups using
-public-key authentication and `Compression=no`. The default server preference
-puts AES-GCM before ChaCha20-Poly1305 while still offering both. Stock OpenSSH
-clients prefer ChaCha20 when it is offered; the AES-GCM rows below were measured
-with the client constrained to `aes128-gcm@openssh.com`. Throughput is calculated
-as upload plus download bytes divided by wall time.
+public-key authentication, `Compression=no`, `-R 16`, and `-B 131072`.
+Throughput is calculated as upload plus download bytes divided by wall time.
 
-| Client file source | Size | Cipher | Throughput | Mean time | Std dev | Range |
-|--------------------|------|--------|------------|-----------|---------|-------|
-| disk | 32MB | default OpenSSH | 285.2 MB/s | 0.224s | 0.013s | 0.215s - 0.261s |
-| disk | 256MB | default OpenSSH | 642.3 MB/s | 0.797s | 0.021s | 0.768s - 0.847s |
-| disk | 1024MB | aes128-gcm | 1258.5 MB/s | 1.627s | 0.052s | 1.560s - 1.712s |
-| `/dev/shm` | 32MB | default OpenSSH | 298.8 MB/s | 0.214s | 0.009s | 0.195s - 0.229s |
-| `/dev/shm` | 256MB | default OpenSSH | 635.6 MB/s | 0.805s | 0.011s | 0.788s - 0.826s |
-| `/dev/shm` | 1024MB | default OpenSSH | 734.9 MB/s | 2.787s | 0.027s | 2.734s - 2.832s |
+| Client file source | Size | Cipher | main throughput | main time | current throughput | current time | Change |
+|--------------------|------|--------|-----------------|-----------|--------------------|--------------|--------|
+| disk | 32MB | default OpenSSH | 404.9 MB/s | 0.158s +/- 0.004s | 419.1 MB/s | 0.153s +/- 0.005s | +3.5% |
+| disk | 256MB | default OpenSSH | 678.6 MB/s | 0.754s +/- 0.039s | 699.0 MB/s | 0.732s +/- 0.023s | +3.0% |
+| disk | 1024MB | aes256-gcm | 937.7 MB/s | 2.184s +/- 0.081s | 1304.0 MB/s | 1.571s +/- 0.020s | +39.1% |
+| `/dev/shm` | 32MB | default OpenSSH | 424.9 MB/s | 0.151s +/- 0.004s | 430.1 MB/s | 0.149s +/- 0.006s | +1.2% |
+| `/dev/shm` | 256MB | default OpenSSH | 661.6 MB/s | 0.774s +/- 0.043s | 645.9 MB/s | 0.793s +/- 0.035s | -2.4% |
+| `/dev/shm` | 1024MB | default OpenSSH | 763.8 MB/s | 2.681s +/- 0.056s | 765.6 MB/s | 2.675s +/- 0.035s | +0.2% |
 
 The many-small-files benchmark transfers a 1GiB flat directory made of 10,251
 varied-size files, then downloads the files back in the same OpenSSH `sftp`
 session. The batch lists each file explicitly to measure per-file transfer
 overhead without relying on SFTP glob expansion.
 
-| Workload | Files | Payload | Cipher | Throughput | File ops | Mean time | Std dev | Range |
-|----------|-------|---------|--------|------------|----------|-----------|---------|-------|
-| varied small files | 10,251 | 1GiB upload + 1GiB download | aes128-gcm | 326.8 MB/s | 3,271.1 files/s | 6.268s | 0.113s | 6.136s - 6.443s |
+| Workload | Files | Payload | Cipher | main throughput | main file ops | main time | current throughput | current file ops | current time | Change |
+|----------|-------|---------|--------|-----------------|---------------|-----------|--------------------|------------------|--------------|--------|
+| varied small files | 10,251 | 1GiB upload + 1GiB download | aes256-gcm | 256.1 MB/s | 2,563.4 files/s | 7.998s +/- 0.131s | 334.6 MB/s | 3,349.8 files/s | 6.120s +/- 0.077s | +30.7% |
 
 ## Docker Deployment
 

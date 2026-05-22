@@ -58,6 +58,7 @@
           # Utilities
           tokei
           gh
+          netcat
 
           # Performance profiling
           cargo-flamegraph
@@ -78,6 +79,8 @@
         ]
         ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
           perf
+          bpftrace
+          inferno
           cargo-llvm-cov
           valgrind  # Required for IAI benchmarks
           heaptrack
