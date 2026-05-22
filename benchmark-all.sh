@@ -506,7 +506,7 @@ done  # End scenario loop
 echo ""
 echo "=== FINAL SUMMARY (by scenario) ==="
 
-config_width=${#"Config"}
+config_width=6
 for config in "${CONFIGS[@]}"; do
     IFS='|' read -r label _ _ _ _ _ <<< "$config"
     if (( ${#label} > config_width )); then
