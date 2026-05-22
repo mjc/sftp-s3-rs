@@ -3,9 +3,8 @@ use super::{
     ReadHandle, WriteHandle,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -27,18 +26,23 @@ impl LocalBackend {
     /// Get the full filesystem path for an SFTP path, rejecting traversal
     /// outside the configured root.
     fn full_path(&self, path: &str) -> BackendResult<PathBuf> {
+        Self::check_root_traversal(path)?;
+
         let normalized = normalize_path(path);
         if normalized.is_empty() {
             return Ok(self.root.clone());
         }
 
-        let mut relative_path = PathBuf::new();
+        let mut full_path = PathBuf::with_capacity(
+            self.root.as_os_str().as_encoded_bytes().len() + normalized.len() + 1,
+        );
+        full_path.push(&self.root);
         for component in Path::new(normalized.as_ref()).components() {
             match component {
-                Component::Normal(part) => relative_path.push(part),
+                Component::Normal(part) => full_path.push(part),
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    if !relative_path.pop() {
+                    if !full_path.pop() {
                         return Err(BackendError::PermissionDenied);
                     }
                 }
@@ -48,7 +52,34 @@ impl LocalBackend {
             }
         }
 
-        Ok(self.root.join(relative_path))
+        Ok(full_path)
+    }
+
+    fn check_root_traversal(path: &str) -> BackendResult<()> {
+        let mut depth = 0usize;
+        let mut escaped_root = false;
+
+        for component in Path::new(path).components() {
+            match component {
+                Component::Normal(_) => {
+                    if escaped_root {
+                        return Err(BackendError::PermissionDenied);
+                    }
+                    depth += 1;
+                }
+                Component::CurDir | Component::RootDir => {}
+                Component::ParentDir => {
+                    if depth == 0 {
+                        escaped_root = true;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                Component::Prefix(_) => return Err(BackendError::PermissionDenied),
+            }
+        }
+
+        Ok(())
     }
 
     /// Convert `std::io::Error` to `BackendError`.
@@ -225,9 +256,7 @@ impl Backend for LocalBackend {
 
         let file = File::create(&full_path).await.map_err(Self::map_io_error)?;
 
-        Ok(Box::new(LocalWriteHandle {
-            file: Arc::new(Mutex::new(file)),
-        }))
+        Ok(Box::new(LocalWriteHandle { file }))
     }
 }
 
@@ -255,16 +284,16 @@ impl ReadHandle for LocalReadHandle {
             .await
             .map_err(LocalBackend::map_io_error)?;
 
-        buf.clear(); // Reset length to 0, keeps capacity
-        buf.reserve(usize::try_from(len).unwrap_or(usize::MAX)); // Ensure capacity, reuses existing allocation
+        buf.clear();
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        buf.reserve(len);
 
-        file.read_buf(buf)
+        let bytes_read = file
+            .read_buf(&mut buf.limit(len))
             .await
             .map_err(LocalBackend::map_io_error)?;
 
-        // split() transfers the buffer to a new BytesMut, then freeze() makes it Bytes.
-        // This avoids a copy but the buffer needs to be re-allocated next read.
-        Ok(buf.split().freeze())
+        Ok(buf.split_to(bytes_read).freeze())
     }
 
     fn size(&self) -> u64 {
@@ -274,25 +303,28 @@ impl ReadHandle for LocalReadHandle {
 
 /// Write handle for local filesystem - writes directly to file
 struct LocalWriteHandle {
-    file: Arc<Mutex<File>>,
+    file: File,
 }
 
 #[async_trait]
 impl WriteHandle for LocalWriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset))
+        self.file
+            .seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(LocalBackend::map_io_error)?;
-        file.write_all(&data)
+        self.file
+            .write_all(&data)
             .await
             .map_err(LocalBackend::map_io_error)?;
         Ok(())
     }
 
-    async fn finish(self: Box<Self>) -> BackendResult<()> {
-        let mut file = self.file.lock().await;
-        file.flush().await.map_err(LocalBackend::map_io_error)?;
+    async fn finish(mut self: Box<Self>) -> BackendResult<()> {
+        self.file
+            .flush()
+            .await
+            .map_err(LocalBackend::map_io_error)?;
         Ok(())
     }
 
@@ -321,6 +353,24 @@ mod tests {
             .unwrap();
         let read = backend.read_file("test.txt").await.unwrap();
         assert_eq!(read, content);
+    }
+
+    #[tokio::test]
+    async fn test_open_read_respects_requested_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+        let content = Bytes::from(vec![42; 65_536]);
+
+        backend
+            .write_file("test.bin", content.clone())
+            .await
+            .unwrap();
+
+        let handle = backend.open_read("test.bin").await.unwrap();
+        let read = handle.read_at(0, 32_768).await.unwrap();
+
+        assert_eq!(read.len(), 32_768);
+        assert_eq!(read.as_ref(), &content[..32_768]);
     }
 
     #[tokio::test]

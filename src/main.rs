@@ -91,7 +91,7 @@ struct Cli {
     region: String,
 
     /// Preferred ciphers (comma-separated, in order of preference)
-    /// Available: aes256-gcm, aes128-ctr, aes256-ctr, chacha20-poly1305
+    /// Available: aes128-gcm, aes256-gcm, aes128-ctr, aes256-ctr, chacha20-poly1305
     #[arg(long, env = "CIPHERS", value_delimiter = ',')]
     ciphers: Option<Vec<String>>,
 

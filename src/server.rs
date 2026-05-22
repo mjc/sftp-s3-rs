@@ -1,6 +1,5 @@
 use crate::backend::Backend;
 use crate::ssh_handler::{AuthConfig, SshServer};
-use russh::keys::ssh_key::rand_core::OsRng;
 use russh::keys::PublicKey;
 use russh::server::{Config as SshConfig, Server as _};
 use russh::{cipher, compression, Limits, Preferred};
@@ -52,7 +51,7 @@ impl Default for ServerConfig {
             compression: false,
             nodelay: true, // Enable by default for better small file performance
             window_size: 2 * 1024 * 1024, // 2MB default
-            maximum_packet_size: 256 * 1024, // 256KB (max allowed) for fewer round trips
+            maximum_packet_size: 65_535, // russh caps this at the TCP packet limit
             rekey_write_limit: 1 << 30, // 1GB default (matches russh default)
         }
     }
@@ -92,7 +91,8 @@ impl ServerConfig {
     /// Panics if the operating system random number generator fails.
     pub fn with_generated_key(mut self) -> Self {
         let key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap();
         self.keys.push(key);
         self
     }
@@ -187,7 +187,8 @@ impl ServerConfig {
 
         // Generate and try to save to cwd
         let key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap();
 
         let key_str = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
@@ -315,7 +316,7 @@ impl<B: Backend> Server<B> {
         let mut keys = self.config.keys.clone();
         if keys.is_empty() {
             keys.push(russh::keys::PrivateKey::random(
-                &mut OsRng,
+                &mut rand::rng(),
                 russh::keys::Algorithm::Ed25519,
             )?);
         }
@@ -344,10 +345,12 @@ impl<B: Backend> Server<B> {
         if let Some(ref ciphers) = self.config.ciphers {
             preferred.cipher = Cow::Owned(ciphers.clone());
         } else {
-            // Default to ChaCha20-Poly1305 first (faster with AVX2), then AES-GCM
+            // Prefer hardware-accelerated AES-GCM on modern hosts, while keeping
+            // ChaCha20-Poly1305 available for clients that prefer it.
             preferred.cipher = Cow::Borrowed(&[
-                cipher::CHACHA20_POLY1305,
+                cipher::AES_128_GCM,
                 cipher::AES_256_GCM,
+                cipher::CHACHA20_POLY1305,
                 cipher::AES_256_CTR,
                 cipher::AES_128_CTR,
             ]);
@@ -428,6 +431,7 @@ pub use crate::ssh_handler::{PasswordAuthCallback, PubkeyAuthCallback};
 #[must_use]
 pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
     match s.trim() {
+        "aes128-gcm" | "aes128-gcm@openssh.com" => Some(cipher::AES_128_GCM),
         "aes256-gcm" | "aes256-gcm@openssh.com" => Some(cipher::AES_256_GCM),
         "aes128-ctr" => Some(cipher::AES_128_CTR),
         "aes192-ctr" => Some(cipher::AES_192_CTR),
@@ -442,6 +446,7 @@ pub fn parse_cipher(s: &str) -> Option<cipher::Name> {
 
 /// List of available cipher names for help text
 pub const AVAILABLE_CIPHERS: &[&str] = &[
+    "aes128-gcm",
     "aes256-gcm",
     "aes128-ctr",
     "aes192-ctr",
@@ -468,7 +473,7 @@ mod tests {
         assert!(!config.compression);
         assert!(config.nodelay);
         assert_eq!(config.window_size, 2 * 1024 * 1024);
-        assert_eq!(config.maximum_packet_size, 256 * 1024);
+        assert_eq!(config.maximum_packet_size, 65_535);
     }
 
     #[test]
@@ -547,10 +552,9 @@ mod tests {
     #[test]
     fn test_server_with_authorized_keys() {
         use crate::backend::MemoryBackend;
-        use russh::keys::ssh_key::rand_core::OsRng;
-
         let key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap();
         let pubkey = key.public_key().clone();
 
         let server = Server::new(MemoryBackend::new())

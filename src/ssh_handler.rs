@@ -172,7 +172,22 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
                 "sftp" => {
                     if let Some(channel) = channels.lock().await.remove(&channel_id) {
                         let sftp_handler = SftpHandler::new(backend);
-                        russh_sftp::server::run(channel.into_stream(), sftp_handler).await;
+                        let (mut read_half, write_half) = channel.split();
+                        let write_half = Arc::new(write_half);
+                        tokio::spawn(async move {
+                            let mut reader = read_half.make_reader();
+                            let mut handler = sftp_handler;
+                            let mut send_bytes = move |bytes| {
+                                let write_half = Arc::clone(&write_half);
+                                async move { write_half.data_bytes(bytes).await }
+                            };
+                            russh_sftp::server::serve_with_sender(
+                                &mut reader,
+                                &mut send_bytes,
+                                &mut handler,
+                            )
+                            .await;
+                        });
                     }
                 }
                 "scp" => {
@@ -243,5 +258,30 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
             result?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sftp_subsystem_uses_owned_bytes_sender_path() {
+        let source = include_str!("ssh_handler.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("ssh_handler source should contain production code");
+
+        assert!(
+            production_source.contains("russh_sftp::server::serve_with_sender"),
+            "SFTP subsystem must keep using the russh-sftp owned-bytes server path"
+        );
+        assert!(
+            production_source.contains("write_half.data_bytes(bytes).await"),
+            "SFTP responses must be sent through russh ChannelWriteHalf::data_bytes"
+        );
+        assert!(
+            !production_source.contains("russh_sftp::server::run("),
+            "SFTP subsystem must not regress to the copying stream-based server::run path"
+        );
     }
 }

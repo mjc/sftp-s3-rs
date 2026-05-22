@@ -78,13 +78,11 @@ impl From<BackendError> for StatusCode {
 }
 
 fn ok_status(id: u32) -> Status {
-    // TODO(perf): Status.error_message/language_tag are String; change to Cow<'static, str>
-    // in russh-sftp fork to eliminate 2 small allocations per successful operation.
     Status {
         id,
         status_code: StatusCode::Ok,
-        error_message: "Ok".to_string(),
-        language_tag: "en".to_string(),
+        error_message: "Ok".into(),
+        language_tag: "en".into(),
     }
 }
 
@@ -143,7 +141,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         }
 
         let handle = self.handles.create_dir_handle(normalized.as_ref());
-        Ok(Handle { id, handle })
+        Ok(Handle {
+            id,
+            handle: handle.into(),
+        })
     }
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
@@ -221,7 +222,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
         };
 
-        Ok(Handle { id, handle })
+        Ok(Handle {
+            id,
+            handle: handle.into(),
+        })
     }
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %String::from_utf8_lossy(&handle)))]
@@ -528,8 +532,8 @@ mod tests {
         SftpHandler::new(Arc::new(MemoryBackend::new()))
     }
 
-    fn to_sftp_handle(s: String) -> SftpHandle {
-        Bytes::from(s.into_bytes())
+    fn to_sftp_handle(s: impl Into<Bytes>) -> SftpHandle {
+        s.into()
     }
 
     fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
@@ -639,6 +643,22 @@ mod tests {
         // Second readdir should return EOF
         let eof = handler.readdir(3, dir_bytes).await;
         assert!(matches!(eof, Err(StatusCode::Eof)));
+    }
+
+    #[tokio::test]
+    async fn test_stat_parent_segment_resolves_to_root() {
+        let mut handler = make_handler();
+
+        handler
+            .mkdir(1, "/debugdir".to_string(), FileAttributes::default())
+            .await
+            .unwrap();
+
+        let attrs = handler.stat(2, "/debugdir/..".to_string()).await.unwrap();
+        assert_eq!(
+            attrs.attrs.permissions.map(|mode| mode & 0o777),
+            Some(0o755)
+        );
     }
 
     #[tokio::test]

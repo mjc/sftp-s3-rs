@@ -28,6 +28,7 @@
 
       # Nightly toolchain for tools that require it (cargo-udeps)
       rustNightlyForUdeps = pkgs.rust-bin.nightly.latest.default;
+      openssh = pkgs.openssh;
 
       # Wrapper for cargo-udeps that uses nightly
       cargo-udeps-wrapped = pkgs.writeShellScriptBin "cargo-udeps" ''
@@ -57,6 +58,7 @@
           # Utilities
           tokei
           gh
+          netcat
 
           # Performance profiling
           cargo-flamegraph
@@ -77,8 +79,11 @@
         ]
         ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
           perf
+          bpftrace
+          inferno
           cargo-llvm-cov
           valgrind  # Required for IAI benchmarks
+          heaptrack
           mold
         ];
 
@@ -100,6 +105,7 @@
 
           echo "sftp-s3-rs development environment"
           echo "  Rust: $(rustc --version)"
+          echo "  OpenSSH: $(${openssh}/bin/ssh -V 2>&1)"
           echo ""
           echo "Commands:"
           echo "  cargo build          - Build the project"
@@ -113,6 +119,7 @@
           echo "  cargo bench          - Run benchmarks"
           ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
           echo "  perf                 - Linux perf tools"
+          echo "  heaptrack            - Heap allocation profiler"
           ''}
           echo ""
           echo "Code quality:"
