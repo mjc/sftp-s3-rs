@@ -88,6 +88,10 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_WRITE_DEPTH)]
     write_depth: usize,
 
+    /// Per-request SFTP timeout in seconds; 0 disables request timeouts
+    #[arg(long, default_value_t = 0)]
+    request_timeout: u64,
+
     /// Leave benchmark files on the server
     #[arg(long)]
     keep_files: bool,
@@ -224,6 +228,7 @@ async fn connect_sftp(addr: &str, cli: &Cli) -> Result<RawSftpSession, BoxError>
         .map_err(|error| boxed(format!("failed to request SFTP subsystem: {error}")))?;
 
     let sftp = RawSftpSession::new(channel.into_stream());
+    sftp.set_timeout(cli.request_timeout).await;
     sftp.init()
         .await
         .map_err(|error| boxed(format!("failed to initialize SFTP session: {error}")))?;
