@@ -132,6 +132,9 @@ SIZES_ITERS=(
     "32:45:3"
     "256:18:5"
     "1024:9:5"
+    "10240:3:1"
+    "51200:1:0"
+    "102400:1:0"
 )
 
 mkdir -p "$BINS_DIR"
@@ -143,7 +146,11 @@ for si in "${SIZES_ITERS[@]}"; do
     f="$SFTP_DIR/testfile_${size}mb.bin"
     if [[ ! -f "$f" ]]; then
         echo "  Creating ${size}MB (disk)..."
-        dd if=/dev/urandom of="$f" bs=1M count="$size" status=none
+        if [[ "$size" -gt 1024 ]]; then
+            truncate -s "${size}M" "$f"
+        else
+            dd if=/dev/urandom of="$f" bs=1M count="$size" status=none
+        fi
     else
         echo "  ${size}MB (disk) exists"
     fi

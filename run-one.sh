@@ -36,6 +36,8 @@ USER="benchmark"
 PASS="benchmark"
 DLFILE="/tmp/sftp-dl-${PORT}.bin"
 SFTPOPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compression=no)
+size_bytes=$(wc -c < "$TESTFILE" | tr -d '[:space:]')
+TRANSFER_TIMEOUT=${SFTP_BENCH_TRANSFER_TIMEOUT:-$((300 + (size_bytes * 2 + 67108863) / 67108864))}
 
 case "$CLIENT" in
     openssh|rust) ;;
@@ -68,7 +70,6 @@ if [[ "$CLIENT" == "rust" ]]; then
         exit 1
     }
 
-    size_bytes=$(wc -c < "$TESTFILE" | tr -d '[:space:]')
     RUST_ARGS=(
         --host 127.0.0.1 \
         --port "$PORT" \
@@ -83,7 +84,7 @@ if [[ "$CLIENT" == "rust" ]]; then
         RUST_ARGS+=(--ciphers "$CIPHERS")
     fi
 
-    timeout 300 "$RUST_CLIENT" "${RUST_ARGS[@]}" >/dev/null 2>&1
+    timeout "$TRANSFER_TIMEOUT" "$RUST_CLIENT" "${RUST_ARGS[@]}" >/dev/null 2>&1
     exit $?
 fi
 
@@ -110,18 +111,18 @@ echo "quit" >> "$BATCH_UP"
 echo "get $FILENAME $DLFILE" > "$BATCH_DL"
 echo "quit" >> "$BATCH_DL"
 
-# Use 5 minute timeout for large transfers with -b batch mode
+# Use a size-scaled timeout for large transfers with -b batch mode.
 if [[ -n "${SFTP_IDENTITY_FILE:-}" ]]; then
-    timeout 300 "${SFTP_CMD[@]}" -b "$BATCH_UP" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+    timeout "$TRANSFER_TIMEOUT" "${SFTP_CMD[@]}" -b "$BATCH_UP" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
 else
-    timeout 300 "${SFTP_CMD[@]}" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" < "$BATCH_UP" >/dev/null 2>&1
+    timeout "$TRANSFER_TIMEOUT" "${SFTP_CMD[@]}" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" < "$BATCH_UP" >/dev/null 2>&1
 fi
 [[ $? -eq 0 ]] || { rm -f "$BATCH_UP" "$BATCH_DL"; exit 1; }
 
 if [[ -n "${SFTP_IDENTITY_FILE:-}" ]]; then
-    timeout 300 "${SFTP_CMD[@]}" -b "$BATCH_DL" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
+    timeout "$TRANSFER_TIMEOUT" "${SFTP_CMD[@]}" -b "$BATCH_DL" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" >/dev/null 2>&1
 else
-    timeout 300 "${SFTP_CMD[@]}" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" < "$BATCH_DL" >/dev/null 2>&1
+    timeout "$TRANSFER_TIMEOUT" "${SFTP_CMD[@]}" "${SFTPOPTS[@]}" -P "$PORT" "$USER@localhost" < "$BATCH_DL" >/dev/null 2>&1
 fi
 [[ $? -eq 0 ]] || { rm -f "$BATCH_UP" "$BATCH_DL"; exit 1; }
 
