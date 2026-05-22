@@ -1,6 +1,6 @@
 use super::{
-    normalize_path, unix_secs_to_u32, Backend, BackendError, BackendResult, DirEntry, FileInfo,
-    ReadHandle, WriteHandle,
+    normalize_path, unix_secs_to_u32, Backend, BackendCapabilities, BackendError, BackendResult,
+    DirEntry, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
@@ -89,6 +89,7 @@ impl LocalBackend {
             std::io::ErrorKind::PermissionDenied => BackendError::PermissionDenied,
             std::io::ErrorKind::AlreadyExists => BackendError::AlreadyExists,
             std::io::ErrorKind::DirectoryNotEmpty => BackendError::DirectoryNotEmpty,
+            std::io::ErrorKind::NotADirectory => BackendError::NotADirectory,
             std::io::ErrorKind::IsADirectory => BackendError::IsADirectory,
             _ => BackendError::Io(err),
         }
@@ -123,9 +124,18 @@ impl LocalBackend {
             }
         };
 
+        let kind = if metadata.file_type().is_symlink() {
+            FileKind::Symlink
+        } else if metadata.is_dir() {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+
         FileInfo {
             size: metadata.len(),
-            is_dir: metadata.is_dir(),
+            kind,
+            is_dir: kind == FileKind::Directory,
             permissions,
             mtime,
             atime,
@@ -133,10 +143,26 @@ impl LocalBackend {
             gid,
         }
     }
+
+    async fn lstat_path(&self, path: &str) -> BackendResult<FileInfo> {
+        let full_path = self.full_path(path);
+        let metadata = fs::symlink_metadata(&full_path)
+            .await
+            .map_err(Self::map_io_error)?;
+        Ok(Self::metadata_to_info(&metadata))
+    }
 }
 
 #[async_trait]
 impl Backend for LocalBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            symlinks: true,
+            set_attrs: true,
+            delegated_safe_streaming_fallback: true,
+        }
+    }
+
     async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
         let full_path = self.full_path(path)?;
 
@@ -157,7 +183,9 @@ impl Backend for LocalBackend {
 
         while let Some(entry) = read_dir.next_entry().await.map_err(Self::map_io_error)? {
             let name = entry.file_name().to_string_lossy().to_string();
-            let metadata = entry.metadata().await.map_err(Self::map_io_error)?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .await
+                .map_err(Self::map_io_error)?;
             let attrs = Self::metadata_to_info(&metadata);
 
             entries.push(DirEntry { name, attrs });
@@ -173,6 +201,11 @@ impl Backend for LocalBackend {
 
         let metadata = fs::metadata(&full_path).await.map_err(Self::map_io_error)?;
         Ok(Self::metadata_to_info(&metadata))
+    }
+
+    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
+        let normalized = normalize_path(path);
+        self.lstat_path(normalized.as_ref()).await
     }
 
     async fn make_dir(&self, path: &str) -> BackendResult<()> {
@@ -257,6 +290,116 @@ impl Backend for LocalBackend {
         let file = File::create(&full_path).await.map_err(Self::map_io_error)?;
 
         Ok(Box::new(LocalWriteHandle { file }))
+    }
+
+    async fn read_link(&self, path: &str) -> BackendResult<String> {
+        let normalized = normalize_path(path);
+        let full_path = self.full_path(&normalized);
+        let target = fs::read_link(&full_path)
+            .await
+            .map_err(Self::map_io_error)?;
+        Ok(target.to_string_lossy().to_string())
+    }
+
+    async fn symlink(&self, linkpath: &str, targetpath: &str) -> BackendResult<()> {
+        let linkpath = self.full_path(&normalize_path(linkpath));
+        let targetpath_owned = targetpath.to_string();
+        #[cfg(windows)]
+        let target_exists_path = self.full_path(&normalize_path(targetpath));
+
+        tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&targetpath_owned, &linkpath)
+            }
+
+            #[cfg(windows)]
+            {
+                let target_is_dir = target_exists_path.is_dir() || targetpath_owned.ends_with('/');
+                if target_is_dir {
+                    std::os::windows::fs::symlink_dir(&targetpath_owned, &linkpath)
+                } else {
+                    std::os::windows::fs::symlink_file(&targetpath_owned, &linkpath)
+                }
+            }
+        })
+        .await
+        .map_err(|err| BackendError::Other(err.to_string()))?
+        .map_err(Self::map_io_error)?;
+
+        Ok(())
+    }
+
+    async fn set_attrs(&self, path: &str, attrs: SetAttrs) -> BackendResult<()> {
+        let normalized = normalize_path(path);
+        let full_path = self.full_path(&normalized);
+        let lstat = self.lstat_path(normalized.as_ref()).await?;
+
+        if lstat.kind == FileKind::Symlink {
+            return Err(BackendError::Unsupported);
+        }
+        if lstat.kind == FileKind::Directory && attrs.size.is_some() {
+            return Err(BackendError::Unsupported);
+        }
+
+        if let Some(size) = attrs.size {
+            let file = File::options()
+                .write(true)
+                .open(&full_path)
+                .await
+                .map_err(Self::map_io_error)?;
+            file.set_len(size).await.map_err(Self::map_io_error)?;
+        }
+
+        if let Some(mode) = attrs.permissions {
+            let metadata = fs::metadata(&full_path).await.map_err(Self::map_io_error)?;
+            let mut permissions = metadata.permissions();
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(mode);
+            }
+
+            #[cfg(not(unix))]
+            {
+                permissions.set_readonly(mode & 0o222 == 0);
+            }
+
+            fs::set_permissions(&full_path, permissions)
+                .await
+                .map_err(Self::map_io_error)?;
+        }
+
+        if attrs.atime.is_some() || attrs.mtime.is_some() {
+            let atime =
+                filetime::FileTime::from_unix_time(attrs.atime.unwrap_or(lstat.atime) as i64, 0);
+            let mtime =
+                filetime::FileTime::from_unix_time(attrs.mtime.unwrap_or(lstat.mtime) as i64, 0);
+            let path = full_path.clone();
+            tokio::task::spawn_blocking(move || filetime::set_file_times(&path, atime, mtime))
+                .await
+                .map_err(|err| BackendError::Other(err.to_string()))?
+                .map_err(Self::map_io_error)?;
+        }
+
+        #[cfg(unix)]
+        if attrs.uid.is_some() || attrs.gid.is_some() {
+            let uid = attrs.uid.map(nix::unistd::Uid::from_raw);
+            let gid = attrs.gid.map(nix::unistd::Gid::from_raw);
+            let path = full_path.clone();
+            tokio::task::spawn_blocking(move || nix::unistd::chown(&path, uid, gid))
+                .await
+                .map_err(|err| BackendError::Other(err.to_string()))?
+                .map_err(|err| BackendError::Other(err.to_string()))?;
+        }
+
+        #[cfg(not(unix))]
+        if attrs.uid.is_some() || attrs.gid.is_some() {
+            return Err(BackendError::Unsupported);
+        }
+
+        Ok(())
     }
 }
 
@@ -410,6 +553,7 @@ mod tests {
 
         let info = backend.file_info("subdir").await.unwrap();
         assert!(info.is_dir);
+        assert_eq!(info.kind, FileKind::Directory);
     }
 
     #[tokio::test]
@@ -585,6 +729,130 @@ mod tests {
 
         let old_result = backend.read_file("old.txt").await;
         assert!(matches!(old_result, Err(BackendError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_symlink_readlink_and_stat() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend
+            .write_file("target.txt", Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        backend.symlink("link.txt", "target.txt").await.unwrap();
+
+        assert_eq!(backend.read_link("link.txt").await.unwrap(), "target.txt");
+        assert_eq!(
+            backend.lstat("link.txt").await.unwrap().kind,
+            FileKind::Symlink
+        );
+        assert_eq!(
+            backend.file_info("link.txt").await.unwrap().kind,
+            FileKind::File
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broken_symlink_stat_fails_lstat_succeeds() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.symlink("broken", "missing").await.unwrap();
+
+        assert_eq!(
+            backend.lstat("broken").await.unwrap().kind,
+            FileKind::Symlink
+        );
+        assert!(matches!(
+            backend.file_info("broken").await,
+            Err(BackendError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_set_attrs_updates_permissions_times_and_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend
+            .write_file("data.bin", Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        backend
+            .set_attrs(
+                "data.bin",
+                SetAttrs {
+                    size: Some(5),
+                    permissions: Some(0o600),
+                    atime: Some(100),
+                    mtime: Some(200),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let info = backend.file_info("data.bin").await.unwrap();
+        let content = backend.read_file("data.bin").await.unwrap();
+        assert_eq!(info.size, 5);
+        assert_eq!(info.permissions & 0o777, 0o600);
+        assert_eq!(info.atime, 100);
+        assert_eq!(info.mtime, 200);
+        assert_eq!(content.as_ref(), b"abc\0\0");
+    }
+
+    #[tokio::test]
+    async fn test_set_attrs_size_on_symlink_unsupported() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend
+            .write_file("target.txt", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        backend.symlink("link.txt", "target.txt").await.unwrap();
+
+        let result = backend
+            .set_attrs(
+                "link.txt",
+                SetAttrs {
+                    size: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(BackendError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn test_directory_delete_semantics() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend.make_dir("dir").await.unwrap();
+        backend
+            .write_file("file.txt", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        backend
+            .write_file("dir/child.txt", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            backend.delete("dir").await,
+            Err(BackendError::IsADirectory)
+        ));
+        assert!(matches!(
+            backend.del_dir("file.txt").await,
+            Err(BackendError::NotADirectory)
+        ));
+        assert!(matches!(
+            backend.del_dir("dir").await,
+            Err(BackendError::DirectoryNotEmpty)
+        ));
     }
 
     proptest! {

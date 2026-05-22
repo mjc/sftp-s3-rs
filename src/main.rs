@@ -98,6 +98,10 @@ struct Cli {
     /// Enable compression (disabled by default for better throughput)
     #[arg(long, env = "COMPRESSION")]
     compression: bool,
+
+    /// Maximum concurrent SSH connections
+    #[arg(long, env = "MAX_CONNECTIONS")]
+    max_connections: Option<usize>,
 }
 
 /// Parse an OpenSSH public key line
@@ -213,6 +217,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if cli.compression {
         config = config.with_compression();
         eprintln!("Compression enabled");
+    }
+
+    if let Some(limit) = cli.max_connections {
+        config = config.with_max_connections(limit);
+        eprintln!("Max connections: {}", limit);
     }
 
     // Parse credentials

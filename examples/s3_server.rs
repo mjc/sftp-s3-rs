@@ -6,7 +6,7 @@
 //!   AWS_ACCESS_KEY_ID
 //!   AWS_SECRET_ACCESS_KEY
 //!   AWS_REGION (or AWS_DEFAULT_REGION)
-//!   SFTP_BUCKET - S3 bucket name
+//!   S3_BUCKET - S3 bucket name
 //!
 //! For LocalStack:
 //!   AWS_ENDPOINT_URL=http://localhost:4566
@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("sftp_s3=debug".parse()?))
         .init();
 
-    let bucket = std::env::var("SFTP_BUCKET").expect("SFTP_BUCKET environment variable required");
+    let bucket = std::env::var("S3_BUCKET").expect("S3_BUCKET environment variable required");
 
     let s3_config = S3Config::new(&bucket);
     let backend = S3Backend::from_env(s3_config).await;
@@ -33,9 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Connect with: sftp -P 2222 user@localhost");
     println!("Username: user, Password: pass");
 
-    Server::new(backend)
+    let handle = Server::new(backend)
         .config(config)
         .with_users(vec![("user".into(), "pass".into())])
-        .run()
-        .await
+        .serve()
+        .await?;
+
+    println!("Listening on {}", handle.local_addr());
+    handle.wait().await
 }

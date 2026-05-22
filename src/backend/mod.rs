@@ -1,14 +1,15 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::borrow::Cow;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod delegated;
 pub mod local;
 pub mod memory;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+pub use delegated::{BackendRequest, BackendResponse, DelegatedBackend, DelegatedBackendFn};
 pub use local::LocalBackend;
 pub use memory::MemoryBackend;
 #[cfg(feature = "s3")]
@@ -32,6 +33,8 @@ pub enum BackendError {
     IsADirectory,
     #[error("Directory not empty")]
     DirectoryNotEmpty,
+    #[error("Operation not supported by this backend")]
+    Unsupported,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Backend error: {0}")]
@@ -46,10 +49,37 @@ pub struct DirEntry {
 }
 
 /// File metadata information
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+/// Settable file attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetAttrs {
+    pub size: Option<u64>,
+    pub permissions: Option<u32>,
+    pub atime: Option<u32>,
+    pub mtime: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+/// Backend capability flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub symlinks: bool,
+    pub set_attrs: bool,
+    pub delegated_safe_streaming_fallback: bool,
+}
+
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct FileInfo {
     pub size: u64,
+    pub kind: FileKind,
     pub is_dir: bool,
     pub permissions: u32,
     pub mtime: u32,
@@ -60,55 +90,53 @@ pub struct FileInfo {
 
 impl FileInfo {
     /// Create `FileInfo` for a directory.
-    pub fn directory() -> Self {
+    fn new(
+        size: u64,
+        kind: FileKind,
+        permissions: u32,
+        mtime: u32,
+        atime: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Self {
         Self {
-            size: 4096,
-            is_dir: true,
-            permissions: 0o755,
-            mtime: current_timestamp(),
-            atime: current_timestamp(),
-            uid: 1000,
-            gid: 1000,
+            size,
+            kind,
+            is_dir: kind == FileKind::Directory,
+            permissions,
+            mtime,
+            atime,
+            uid,
+            gid,
         }
+    }
+
+    /// Create `FileInfo` for a directory.
+    pub fn directory() -> Self {
+        let now = current_timestamp();
+        Self::new(4096, FileKind::Directory, 0o755, now, now, 1000, 1000)
     }
 
     /// Create `FileInfo` for a directory with specific mtime.
     pub fn directory_with_mtime(mtime: u32) -> Self {
-        Self {
-            size: 4096,
-            is_dir: true,
-            permissions: 0o755,
-            mtime,
-            atime: mtime,
-            uid: 1000,
-            gid: 1000,
-        }
+        Self::new(4096, FileKind::Directory, 0o755, mtime, mtime, 1000, 1000)
     }
 
     /// Create `FileInfo` for a regular file.
     pub fn file(size: u64) -> Self {
-        Self {
-            size,
-            is_dir: false,
-            permissions: 0o644,
-            mtime: current_timestamp(),
-            atime: current_timestamp(),
-            uid: 1000,
-            gid: 1000,
-        }
+        let now = current_timestamp();
+        Self::new(size, FileKind::File, 0o644, now, now, 1000, 1000)
     }
 
     /// Create `FileInfo` for a regular file with specific mtime.
     pub fn file_with_mtime(size: u64, mtime: u32) -> Self {
-        Self {
-            size,
-            is_dir: false,
-            permissions: 0o644,
-            mtime,
-            atime: mtime,
-            uid: 1000,
-            gid: 1000,
-        }
+        Self::new(size, FileKind::File, 0o644, mtime, mtime, 1000, 1000)
+    }
+
+    /// Create FileInfo for a symlink.
+    pub fn symlink(size: u64) -> Self {
+        let now = current_timestamp();
+        Self::new(size, FileKind::Symlink, 0o777, now, now, 1000, 1000)
     }
 }
 
@@ -227,11 +255,11 @@ impl WriteHandle for BufferedWriteHandle {
 pub struct BufferedWriteWithBackend<B: Backend> {
     inner: BufferedWriteHandle,
     path: String,
-    backend: Arc<B>,
+    backend: B,
 }
 
 impl<B: Backend> BufferedWriteWithBackend<B> {
-    pub fn new(path: String, backend: Arc<B>) -> Self {
+    pub fn new(path: String, backend: B) -> Self {
         Self {
             inner: BufferedWriteHandle::new(),
             path,
@@ -262,6 +290,15 @@ impl<B: Backend> WriteHandle for BufferedWriteWithBackend<B> {
 /// All paths are normalized strings without leading slashes.
 #[async_trait]
 pub trait Backend: Send + Sync + 'static {
+    /// Return backend capability flags.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            symlinks: false,
+            set_attrs: false,
+            delegated_safe_streaming_fallback: true,
+        }
+    }
+
     /// List directory contents
     ///
     /// Returns entries for the directory at `path`.
@@ -270,6 +307,11 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Get file or directory information
     async fn file_info(&self, path: &str) -> BackendResult<FileInfo>;
+
+    /// Get file or directory information without following symlinks.
+    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
+        self.file_info(path).await
+    }
 
     /// Create a directory
     ///
@@ -304,6 +346,21 @@ pub trait Backend: Send + Sync + 'static {
     /// For backends that support multipart uploads (e.g., S3), this enables
     /// uploading large files without buffering them entirely in memory.
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>>;
+
+    /// Read the target of a symlink.
+    async fn read_link(&self, _path: &str) -> BackendResult<String> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Create a symlink.
+    async fn symlink(&self, _linkpath: &str, _targetpath: &str) -> BackendResult<()> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Apply supported metadata mutations to a path.
+    async fn set_attrs(&self, _path: &str, _attrs: SetAttrs) -> BackendResult<()> {
+        Err(BackendError::Unsupported)
+    }
 }
 
 /// Normalize a path: trim leading/trailing slashes, handle empty as root,

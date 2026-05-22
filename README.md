@@ -2,14 +2,26 @@
 
 A pluggable SFTP server with S3 and custom backend support, written in Rust.
 
+## Project Status / Parity Target
+
+`sftp-s3-rs` is the maintained implementation target for this project family. The Elixir
+`sftpd-s3` codebase remains a useful behavioral reference, but Rust is the canonical target for
+new lifecycle APIs, backend semantics, protocol behavior, and documentation.
+
 ## Features
 
 - SFTP server using [russh](https://github.com/Eugeny/russh)
+- SCP send and receive support for files and recursive directories
 - Pluggable backend trait for custom storage implementations
 - Built-in backends:
+  - **Local** - Local filesystem backend with symlink and metadata mutation support
   - **Memory** - In-memory storage for testing/development
   - **S3** - Amazon S3 or S3-compatible storage (LocalStack, MinIO)
+- Delegated/process-backed backend adapter for actor-style integrations
 - Password authentication
+- Public-key authentication
+- Graceful lifecycle API with `serve()` and `ServerHandle`
+- Optional SSH connection limits with `max_connections`
 - Async/await with Tokio
 
 ## Guides
@@ -18,6 +30,29 @@ A pluggable SFTP server with S3 and custom backend support, written in Rust.
 - [CUSTOM_BACKENDS.md](CUSTOM_BACKENDS.md) for implementing your own backend
 - [TELEMETRY.md](TELEMETRY.md) for tracing, span fields, and operational logging
 
+## Capability Matrix
+
+| Capability | `sftp-s3-rs` | `sftpd-s3` reference | Notes |
+|----------|----------|----------|----------|
+| Password auth | Yes | Yes | Rust CLI and embedded API |
+| Public-key auth | Yes | Yes | Authorized keys and callback-based auth |
+| SFTP | Yes | Yes | Rust is the protocol reference target |
+| SCP receive/send | Yes | Yes | Rust supports file and recursive directory transfer |
+| Local backend | Yes | Yes | Rust local backend supports symlinks and metadata mutation |
+| Memory backend | Yes | Yes | Rust memory backend is the protocol semantics reference backend |
+| S3 backend | Yes | Yes | Uses `.keep` directory markers |
+| Session limits | Yes | Yes | `ServerConfig::with_max_connections` / `MAX_CONNECTIONS` |
+| Graceful shutdown API | Yes | Yes | `serve()`, `serve_on_socket()`, `ServerHandle` |
+| Delegated backends | Yes | Yes | Rust `DelegatedBackend` is the process-backed equivalent |
+| Symlink support | Local, memory, delegated | Reference support | S3 returns explicit `OpUnsupported` |
+| Metadata mutation by backend | Local, memory, delegated | Reference support | S3 returns explicit `OpUnsupported`; empty `setstat` remains `Ok` |
+
+## Migration Note
+
+If you are moving from `sftpd-s3`, treat `sftp-s3-rs` as the canonical implementation target.
+Match behavior against Rust first. The Rust API now exposes explicit lifecycle control,
+connection limits, delegated backends, and per-backend capability differences instead of silently
+acknowledging unsupported operations.
 ## Quick Start
 
 ```rust
@@ -30,11 +65,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .port(2222)
         .with_generated_key();
 
-    Server::new(backend)
+    let handle = Server::new(backend)
         .config(config)
         .with_users(vec![("user".into(), "pass".into())])
-        .run()
-        .await
+        .serve()
+        .await?;
+
+    handle.wait().await
 }
 ```
 
@@ -132,7 +169,7 @@ cargo run --example memory_server
 Run the S3 backend example:
 
 ```bash
-SFTP_BUCKET=my-bucket cargo run --example s3_server
+S3_BUCKET=my-bucket cargo run --example s3_server
 ```
 
 Connect with an SFTP client:
@@ -184,7 +221,25 @@ overhead without relying on SFTP glob expansion.
 |----------|-------|---------|--------|-----------------|---------------|-----------|--------------------|------------------|--------------|--------|
 | varied small files | 10,251 | 1GiB upload + 1GiB download | default OpenSSH | 224.0 MB/s | 2,242.7 files/s | 9.142s +/- 0.189s | 269.0 MB/s | 2,692.8 files/s | 7.614s +/- 0.126s | +20.1% |
 | varied small files | 10,251 | 1GiB upload + 1GiB download | aes256-gcm | 256.1 MB/s | 2,563.4 files/s | 7.998s +/- 0.131s | 334.6 MB/s | 3,349.8 files/s | 6.120s +/- 0.077s | +30.7% |
+## Benchmark Client
 
+The `sftp-bench-client` binary is a Rust SFTP client for measuring this server without relying on
+the system `sftp` command:
+
+```bash
+nix develop -c cargo run --release --bin sftp-bench-client -- \
+  --host 127.0.0.1 \
+  --port 2222 \
+  --user benchmark \
+  --password benchmark \
+  --operation roundtrip \
+  --size 256MiB \
+  --iterations 5
+```
+
+It supports `upload`, `download`, and `roundtrip` modes. Download mode uploads fixture files before
+measurement, then times repeated reads. By default benchmark files are removed after each run; pass
+`--keep-files` to inspect them on the server.
 ## Docker Deployment
 
 ### Quick Start
@@ -261,6 +316,7 @@ aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
 |----------|---------|---------|---------|
 | `BACKEND` | `memory` | All | Storage backend: `memory`, `local`, or `s3` |
 | `PORT` | `2222` | All | SFTP listening port |
+| `MAX_CONNECTIONS` | - | All | Maximum concurrent SSH connections |
 | `SFTP_USERS` | - | All | Comma-separated user:password pairs (required unless using authorized_keys) |
 | `RUST_LOG` | `sftp_s3=info` | All | Logging level |
 | `HOST_KEY_FILE` | `/keys/ssh_host_ed25519_key` | All | Path to SSH host key |
