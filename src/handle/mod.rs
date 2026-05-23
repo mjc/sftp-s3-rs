@@ -1,4 +1,4 @@
-use crate::backend::{ReadHandle, WriteHandle};
+use crate::backend::{ReadHandle, SetAttrs, WriteHandle};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +25,7 @@ pub enum HandleType {
     Write {
         path: Arc<str>,
         handle: SharedWriteHandle,
+        pending_attrs: SetAttrs,
     },
 }
 
@@ -85,6 +86,7 @@ impl HandleManager {
             HandleType::Write {
                 path: Arc::from(path),
                 handle: Arc::new(Mutex::new(Some(handle))),
+                pending_attrs: SetAttrs::default(),
             },
         );
         id.to_string()
@@ -107,8 +109,22 @@ impl HandleManager {
         let id = Self::parse_handle(handle)?;
         let handles = self.handles.read();
         match handles.get(&id)? {
-            HandleType::Write { path, handle } => Some((Arc::clone(path), handle.clone())),
+            HandleType::Write { path, handle, .. } => Some((Arc::clone(path), handle.clone())),
             _ => None,
+        }
+    }
+
+    pub fn queue_write_attrs(&self, handle: &[u8], attrs: &SetAttrs) -> bool {
+        let Some(id) = Self::parse_handle(handle) else {
+            return false;
+        };
+        let mut handles = self.handles.write();
+        match handles.get_mut(&id) {
+            Some(HandleType::Write { pending_attrs, .. }) => {
+                pending_attrs.merge_from(attrs);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -133,12 +149,22 @@ impl HandleManager {
     }
 
     /// Take the write handle out (for finish/abort)
-    pub fn take_write_handle(&self, handle: &[u8]) -> Option<SharedWriteHandle> {
+    pub fn take_write_handle(
+        &self,
+        handle: &[u8],
+    ) -> Option<(Arc<str>, SharedWriteHandle, SetAttrs)> {
         let id = Self::parse_handle(handle)?;
-        let handles = self.handles.read();
-        match handles.get(&id)? {
-            HandleType::Write { handle, .. } => Some(handle.clone()),
-            _ => None,
+        let mut handles = self.handles.write();
+        match handles.remove(&id)? {
+            HandleType::Write {
+                path,
+                handle,
+                pending_attrs,
+            } => Some((path, handle, pending_attrs)),
+            other => {
+                handles.insert(id, other);
+                None
+            }
         }
     }
 

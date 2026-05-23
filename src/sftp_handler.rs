@@ -177,10 +177,16 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
     async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
         let hb = handle_as_bytes(&handle);
         // If it's a write handle, finish it
-        if let Some(write_handle_arc) = self.handles.take_write_handle(hb) {
+        if let Some((path, write_handle_arc, pending_attrs)) = self.handles.take_write_handle(hb) {
             let mut guard = write_handle_arc.lock().await;
             if let Some(write_handle) = guard.take() {
                 write_handle.finish().await.map_err(StatusCode::from)?;
+                if !pending_attrs.is_empty() {
+                    self.backend
+                        .set_attrs(&path, pending_attrs)
+                        .await
+                        .map_err(StatusCode::from)?;
+                }
             }
         }
 
@@ -512,10 +518,10 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         path: String,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
+        let attrs = attrs_to_set_attrs(&attrs);
         if attrs.is_empty() {
             return Ok(ok_status(id));
         }
-        let attrs = attrs_to_set_attrs(&attrs);
 
         self.backend
             .set_attrs(&normalize_path(&path), attrs)
@@ -531,15 +537,15 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         handle: SftpHandle,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
+        let attrs = attrs_to_set_attrs(&attrs);
         if attrs.is_empty() {
             return Ok(ok_status(id));
         }
-        let attrs = attrs_to_set_attrs(&attrs);
-
         let info = self
             .handles
             .get_handle_info(handle_as_bytes(&handle))
             .ok_or(StatusCode::Failure)?;
+        let is_write = matches!(&info, HandleInfo::Write { .. });
 
         let path = match info {
             HandleInfo::Dir { path }
@@ -547,10 +553,19 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             | HandleInfo::Write { path } => path,
         };
 
-        self.backend
-            .set_attrs(&path, attrs)
-            .await
-            .map_err(StatusCode::from)?;
+        if is_write {
+            if !self
+                .handles
+                .queue_write_attrs(handle_as_bytes(&handle), &attrs)
+            {
+                return Err(StatusCode::Failure);
+            }
+        } else {
+            self.backend
+                .set_attrs(&path, attrs)
+                .await
+                .map_err(StatusCode::from)?;
+        }
 
         Ok(ok_status(id))
     }
@@ -949,6 +964,46 @@ mod tests {
             .unwrap();
 
         handler.close(3, wh_bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fsetstat_on_new_write_handle_is_applied_on_close() {
+        let mut handler = make_handler();
+        init_handler(&mut handler).await;
+
+        let wh = handler
+            .open(
+                1,
+                "/data.bin".to_string(),
+                OpenFlags::WRITE | OpenFlags::CREATE,
+                FileAttributes::default(),
+            )
+            .await
+            .unwrap();
+        let wh_bytes = to_sftp_handle(wh.handle.clone());
+
+        handler
+            .fsetstat(
+                2,
+                wh_bytes.clone(),
+                FileAttributes {
+                    permissions: Some(0o600),
+                    mtime: Some(123),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        handler
+            .write(3, wh_bytes.clone(), 0, to_sftp_data(b"abc"))
+            .await
+            .unwrap();
+
+        handler.close(4, wh_bytes).await.unwrap();
+
+        let stat = handler.stat(5, "/data.bin".to_string()).await.unwrap();
+        assert_eq!(stat.attrs.permissions.map(|p| p & 0o777), Some(0o600));
+        assert_eq!(stat.attrs.mtime, Some(123));
     }
 
     #[tokio::test]

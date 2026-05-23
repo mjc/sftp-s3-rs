@@ -12,6 +12,9 @@ s3 = ["aws-sdk-s3", "aws-config"]
 # Deprecated compatibility flag retained for old benchmark scripts. The pinned
 # dependency already uses byte handles and byte payloads by default.
 sftp-master = []
+# Use the stream-based SFTP server path when benchmarking older russh/russh-sftp
+# combinations that predate the owned-bytes sender APIs.
+benchmark-matrix-compat = []
 
 [dependencies]
 # SSH/SFTP

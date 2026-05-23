@@ -274,7 +274,7 @@ impl MemoryBackend {
 
             let attrs = if relative.contains('/') {
                 match entries.get(&child_path) {
-                    Some(EntryData::DirMarker { .. }) => entry.lstat_info(),
+                    Some(EntryData::DirMarker { .. }) => FileInfo::directory(),
                     Some(other) => other.lstat_info(),
                     None => FileInfo::directory(),
                 }
@@ -401,6 +401,10 @@ impl Backend for MemoryBackend {
         let src = normalize_path(src).into_owned();
         let dst = normalize_path(dst).into_owned();
         let mut entries = self.entries.write();
+
+        if dst == src || dst.starts_with(&(src.clone() + "/")) {
+            return Err(BackendError::PermissionDenied);
+        }
 
         if matches!(
             entries.get(src.as_str()),
@@ -796,6 +800,39 @@ mod tests {
         let entries = backend.list_dir("mydir").await.unwrap();
         let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert!(names.contains(&"file.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_uses_directory_attrs_for_implicit_child_dirs() {
+        let backend = MemoryBackend::new();
+        backend
+            .write_file("dir/child.txt", Bytes::from_static(b"content"))
+            .await
+            .unwrap();
+
+        let entries = backend.list_dir(".").await.unwrap();
+        let dir = entries
+            .into_iter()
+            .find(|entry| entry.name == "dir")
+            .expect("dir entry");
+
+        assert_eq!(dir.attrs.kind, FileKind::Directory);
+        assert!(dir.attrs.is_dir);
+    }
+
+    #[tokio::test]
+    async fn test_rename_rejects_directory_into_own_subtree() {
+        let backend = MemoryBackend::new();
+        backend.make_dir("a").await.unwrap();
+        backend
+            .write_file("a/file.txt", Bytes::from_static(b"content"))
+            .await
+            .unwrap();
+
+        let result = backend.rename("a", "a/b").await;
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+
+        assert!(backend.file_info("a/file.txt").await.is_ok());
     }
 
     // Concurrent access test

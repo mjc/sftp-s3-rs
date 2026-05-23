@@ -16,6 +16,9 @@ pub enum BackendRequest {
     FileInfo {
         path: String,
     },
+    Lstat {
+        path: String,
+    },
     MakeDir {
         path: String,
     },
@@ -105,6 +108,20 @@ impl Backend for DelegatedBackend {
             BackendResponse::FileInfo(info) => Ok(info),
             other => Err(super::BackendError::Other(format!(
                 "delegated backend returned unexpected response for file_info: {other:?}"
+            ))),
+        }
+    }
+
+    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
+        match self
+            .call(BackendRequest::Lstat {
+                path: path.to_string(),
+            })
+            .await?
+        {
+            BackendResponse::FileInfo(info) => Ok(info),
+            other => Err(super::BackendError::Other(format!(
+                "delegated backend returned unexpected response for lstat: {other:?}"
             ))),
         }
     }
@@ -279,6 +296,17 @@ mod tests {
                             FileInfo::file(bytes.len() as u64),
                         ))
                     }
+                    BackendRequest::Lstat { path } => {
+                        if path.ends_with(".lnk") {
+                            Ok(BackendResponse::FileInfo(FileInfo::symlink(10)))
+                        } else {
+                            let files = files.lock().await;
+                            let bytes = files.get(&path).ok_or(BackendError::NotFound)?;
+                            Ok(BackendResponse::FileInfo(
+                                FileInfo::file(bytes.len() as u64),
+                            ))
+                        }
+                    }
                     BackendRequest::ReadFile { path } => {
                         let files = files.lock().await;
                         let bytes = files.get(&path).ok_or(BackendError::NotFound)?;
@@ -379,6 +407,15 @@ mod tests {
             BackendRequest::SetAttrs { path, attrs }
             if path == "link.txt" && attrs.permissions == Some(0o777)
         )));
+    }
+
+    #[tokio::test]
+    async fn test_delegated_lstat_forwarding() {
+        let backend = memory_like_handler();
+
+        let info = backend.lstat("broken.lnk").await.unwrap();
+
+        assert_eq!(info.kind, FileKind::Symlink);
     }
 
     #[tokio::test]

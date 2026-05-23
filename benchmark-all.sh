@@ -9,20 +9,24 @@
 
 set -euo pipefail
 
-SFTP_DIR="/home/mjc/projects/sftp-s3-rs"
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SFTP_DIR="${SFTP_DIR:-$SCRIPT_DIR}"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 RESULTS_DIR="$SFTP_DIR/benchmark_results"
 BINS_DIR="$SFTP_DIR/benchmark_bins"
 LOG="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
 SFTP_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compression=no)
 BENCH_CLIENT="openssh"
 BENCH_CIPHERS="${SFTP_BENCH_CIPHERS:-}"
+BENCH_SIZES="${SFTP_BENCH_SIZES:-}"
+MATRIX_FEATURES="benchmark-matrix-compat"
 RUSSH_GIT_URL="https://github.com/mjc/russh.git"
 RUSSH_SFTP_GIT_URL="https://github.com/mjc/russh-sftp.git"
 PATCHES_DIR="$SFTP_DIR/benchmark_patches"
 BENCH_KEY_DIR="/tmp/sftp-bench-keys"
 BENCH_KEY="$BENCH_KEY_DIR/id_ed25519"
 BENCH_AUTHORIZED_KEYS="$BENCH_KEY.pub"
+WORKTREE_BASE="HEAD"
 
 if [[ "${BENCHMARK_ALL_IN_ENV:-0}" != 1 ]] && command -v direnv >/dev/null 2>&1 && [[ -f "$SFTP_DIR/.envrc" ]]; then
     exec env BENCHMARK_ALL_IN_ENV=1 direnv exec "$SFTP_DIR" "$SCRIPT_PATH" "$@"
@@ -31,6 +35,7 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --client)
+            [[ $# -ge 2 ]] || { echo "missing value for --client" >&2; exit 2; }
             BENCH_CLIENT=$2
             shift 2
             ;;
@@ -39,6 +44,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --ciphers)
+            [[ $# -ge 2 ]] || { echo "missing value for --ciphers" >&2; exit 2; }
             BENCH_CIPHERS=$2
             shift 2
             ;;
@@ -46,13 +52,22 @@ while [[ $# -gt 0 ]]; do
             BENCH_CIPHERS=${1#*=}
             shift
             ;;
+        --sizes)
+            [[ $# -ge 2 ]] || { echo "missing value for --sizes" >&2; exit 2; }
+            BENCH_SIZES=$2
+            shift 2
+            ;;
+        --sizes=*)
+            BENCH_SIZES=${1#*=}
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2]"
+            echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] [--sizes mb1,mb2,...]"
             exit 0
             ;;
         *)
             echo "unknown argument: $1" >&2
-            echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2]" >&2
+            echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] [--sizes mb1,mb2,...]" >&2
             exit 2
             ;;
     esac
@@ -72,6 +87,17 @@ echo "Logging to $LOG"
 echo "Benchmark client: $BENCH_CLIENT"
 if [[ -n "$BENCH_CIPHERS" ]]; then
     echo "Benchmark ciphers: $BENCH_CIPHERS"
+fi
+if [[ -n "$BENCH_SIZES" ]]; then
+    echo "Benchmark sizes: $BENCH_SIZES"
+fi
+if [[ -n "$(git -C "$SFTP_DIR" status --porcelain --untracked-files=no)" ]]; then
+    WORKTREE_BASE=$(git -C "$SFTP_DIR" stash create "benchmark-all-worktree-snapshot" || true)
+    if [[ -n "$WORKTREE_BASE" ]]; then
+        echo "Worktree base: snapshot $WORKTREE_BASE"
+    else
+        WORKTREE_BASE="HEAD"
+    fi
 fi
 
 # Scenarios: (label_suffix|client_source|server_backend)
@@ -102,28 +128,28 @@ pick_free_port() {
 }
 
 CONFIGS=()
-for _russh_kind_ref in tag:v0.57.0 branch:main branch:write-path-refactor; do
+for _russh_kind_ref in branch:main branch:mjc/own-inbound-channel-payloads; do
     IFS=: read -r _russh_kind _russh <<< "$_russh_kind_ref"
-    for _sftp in master deserialize-bytes-optimization zero-copy-serialize; do
+    for _sftp in master deserialize-bytes-optimization; do
         case "$_sftp" in
             master)
-                _sftp_label=master
+                _sftp_label=current
                 _feat="sftp-master"
                 ;;
             deserialize-bytes-optimization)
-                _sftp_label=deserialize
-                _feat=
-                ;;
-            zero-copy-serialize)
-                _sftp_label=zero-copy
+                _sftp_label=mjc
                 _feat=
                 ;;
         esac
-        config_entry="${_russh}-${_sftp_label}|${_russh_kind}|${_russh}|${_sftp}|$(pick_free_port)|${_feat}"
+        case "$_russh" in
+            main) _russh_label=current ;;
+            mjc/own-inbound-channel-payloads) _russh_label=mjc ;;
+        esac
+        config_entry="${_russh_label}-${_sftp_label}|${_russh_kind}|${_russh}|${_sftp}|$(pick_free_port)|${_feat}"
         CONFIGS+=("$config_entry")
     done
 done
-unset _russh_kind_ref _russh_kind _russh _sftp _sftp_label _feat
+unset _russh_kind_ref _russh_kind _russh _russh_label _sftp _sftp_label _feat
 
 # Iterations distributed across scenarios (total = iters / num_scenarios per scenario)
 # With 2 scenarios, each config gets iters/2 runs per scenario
@@ -136,6 +162,42 @@ SIZES_ITERS=(
     "51200:1:0"
     "102400:1:0"
 )
+
+if [[ -n "$BENCH_SIZES" ]]; then
+    declare -A _requested_sizes=()
+    for _raw_size in ${BENCH_SIZES//,/ }; do
+        _size=${_raw_size//[[:space:]]/}
+        if [[ -z "$_size" ]]; then
+            continue
+        fi
+        if [[ ! "$_size" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: invalid benchmark size '$_size'; expected whole MiB values like 1024,10240" >&2
+            exit 2
+        fi
+        _requested_sizes["$_size"]=1
+    done
+
+    if ((${#_requested_sizes[@]} == 0)); then
+        echo "ERROR: --sizes requires at least one MiB value" >&2
+        exit 2
+    fi
+
+    _filtered_sizes=()
+    for si in "${SIZES_ITERS[@]}"; do
+        size=${si%%:*}
+        if [[ -n "${_requested_sizes[$size]+x}" ]]; then
+            _filtered_sizes+=("$si")
+            unset '_requested_sizes[$size]'
+        fi
+    done
+
+    if ((${#_requested_sizes[@]} != 0)); then
+        printf 'ERROR: unsupported benchmark size(s): %s\n' "${!_requested_sizes[*]}" >&2
+        exit 2
+    fi
+
+    SIZES_ITERS=("${_filtered_sizes[@]}")
+fi
 
 mkdir -p "$BINS_DIR"
 
@@ -258,12 +320,13 @@ _build_one() {
     local logfile="$RESULTS_DIR/build-$label.log"
     local russh_commit russh_spec russh_path
     local russh_patches=()
+    local combined_features="$MATRIX_FEATURES"
 
     : >"$logfile"
 
     git -C "$SFTP_DIR" worktree remove --force "$wt" 2>/dev/null || true
     rm -rf "$wt"
-    git -C "$SFTP_DIR" worktree add -q "$wt" HEAD
+    git -C "$SFTP_DIR" worktree add -q "$wt" "$WORKTREE_BASE"
 
     case "$russh_kind" in
         branch)
@@ -299,13 +362,17 @@ _build_one() {
     # russh/russh-sftp combinations, so resolve the rewritten graph directly.
     rm -f "$wt/Cargo.lock"
 
+    if [[ -n "$features" ]]; then
+        combined_features="$combined_features,$features"
+    fi
+
     echo "  $label (russh $russh_kind=$russh_ref sftp=$sftp${features:+ features=$features})"
     (
         cd "$wt"
         cargo update --quiet >>"$logfile" 2>&1 || true
         unset NIX_ENFORCE_NO_NATIVE
         CARGO_TARGET_DIR="$tgt" RUSTFLAGS="-C target-cpu=native" RUSTC_WRAPPER=sccache \
-            cargo build --release --bin sftp-s3 ${features:+--features $features} -q >>"$logfile" 2>&1
+            cargo build --release --bin sftp-s3 --features "$combined_features" -q >>"$logfile" 2>&1
     )
     cp "$tgt/release/sftp-s3" "$bin"
     git -C "$SFTP_DIR" worktree remove --force "$wt" 2>/dev/null || true

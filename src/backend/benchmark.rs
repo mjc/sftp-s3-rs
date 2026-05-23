@@ -152,8 +152,11 @@ impl Backend for BenchmarkBackend {
 
     async fn delete(&self, path: &str) -> BackendResult<()> {
         let normalized = normalize_path(path);
-        self.files.write().remove(normalized.as_ref());
-        Ok(())
+        self.files
+            .write()
+            .remove(normalized.as_ref())
+            .map(|_| ())
+            .ok_or(BackendError::NotFound)
     }
 
     async fn rename(&self, src: &str, dst: &str) -> BackendResult<()> {
