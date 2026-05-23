@@ -64,9 +64,30 @@ Saved runs live under `benchmark_results/runs/<run-id>/`:
 
 Machine metadata now includes OS, arch, CPU model, and hostname.
 
+### macOS specifics
+
+- `profile` uses `xctrace` on macOS instead of Linux `perf`.
+- A macOS profile run writes both `*.xctrace.trace` and `*.xctrace.xml` into `benchmark_results/runs/<run-id>/artifacts/`.
+- `xctrace` must be available in `PATH`; if not, install Xcode or the Xcode command line tools.
+- `local-stack`, `matrix`, and `profile` still default `--russh-repo` / `--russh-sftp-repo` to `/home/mjc/...`, so on this machine pass explicit macOS paths:
+
+```bash
+nix develop -c ./perf.sh local-stack \
+  --russh-repo /Users/mjc/projects/russh \
+  --russh-sftp-repo /Users/mjc/projects/russh-sftp \
+  --russh-ref main \
+  --russh-sftp-ref master
+
+nix develop -c ./perf.sh profile \
+  --russh-repo /Users/mjc/projects/russh \
+  --russh-sftp-repo /Users/mjc/projects/russh-sftp \
+  --client bench \
+  --operation roundtrip \
+  --sizes 1024
+```
+
 If a run was noisy or incomplete, mark it invalid so later comparisons skip it:
 
 ```bash
 nix develop -c ./perf.sh mark-invalid <run-id> --reason "system busy"
 ```
-

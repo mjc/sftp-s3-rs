@@ -249,7 +249,7 @@ Benchmarking and profiling now go through the `sftp-perf` runner. It supports:
 - current-stack reruns
 - local `russh` / `russh-sftp` stack reruns
 - russh × russh-sftp matrices
-- `perf` recording
+- profiling traces (`perf` on Linux, `xctrace` on macOS)
 - `heaptrack` recording
 - both the repo benchmark client and stock OpenSSH
 - upload, download, and roundtrip workloads
@@ -310,7 +310,7 @@ Results are written under `benchmark_results/runs/<run-id>/` with:
 - `manifest.json` for refs, client, backend, sizes, operations, and machine metadata
 - `results.json` for structured timings and throughput
 - `summary.txt` for the human-readable summary, including host OS / arch / CPU / hostname
-- `artifacts/` for `perf.data`, heaptrack output, and bench-client JSON
+- `artifacts/` for profiler output (`perf.data` on Linux profile runs, `.xctrace.trace` plus exported XML on macOS profile runs), heaptrack output, and bench-client JSON
 - `server-*.log` for server logs
 
 The runner keeps stable cached build outputs under `.perf-cache/` and uses `sccache` automatically
