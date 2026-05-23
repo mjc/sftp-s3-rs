@@ -37,6 +37,14 @@ enum PerfCommand {
     Profile(ProfileArgs),
     /// Record a heaptrack profile for the selected workload
     Heaptrack(ProfileArgs),
+    /// List recent benchmark and profiling runs
+    List(ListArgs),
+    /// Show details for a specific run
+    Show(RunRefArgs),
+    /// Mark a run invalid for future comparisons
+    MarkInvalid(MarkInvalidArgs),
+    /// Mark a run valid for future comparisons
+    MarkValid(RunRefArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -72,6 +80,10 @@ struct CommonArgs {
     /// Optional label suffix for the run directory
     #[arg(long)]
     label: Option<String>,
+
+    /// Add a note to the stored run metadata
+    #[arg(long)]
+    note: Vec<String>,
 
     /// Chunk size passed to the Rust benchmark client
     #[arg(long, default_value = "64KiB")]
@@ -159,6 +171,33 @@ struct ProfileArgs {
 
     #[arg(long, default_value_t = 999)]
     perf_frequency: u32,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ListArgs {
+    /// Maximum number of runs to show
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+
+    /// Include runs already marked invalid
+    #[arg(long)]
+    all: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct RunRefArgs {
+    /// Run id under benchmark_results/runs/
+    run_id: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct MarkInvalidArgs {
+    /// Run id under benchmark_results/runs/
+    run_id: String,
+
+    /// Why this run should be ignored in comparisons
+    #[arg(long)]
+    reason: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,6 +316,12 @@ struct RunManifest {
     comparison_key: String,
     profile_mode: Option<ProfileKind>,
     matrix_baseline: Option<String>,
+    #[serde(default = "default_true")]
+    valid_for_comparison: bool,
+    #[serde(default)]
+    invalid_reason: Option<String>,
+    #[serde(default)]
+    notes: Vec<String>,
     machine: MachineMetadata,
     targets: Vec<TargetManifest>,
 }
@@ -327,6 +372,14 @@ struct PreviousRun {
     results: RunResults,
 }
 
+struct RunRecord {
+    manifest: RunManifest,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let ctx = AppContext::new()?;
@@ -369,6 +422,10 @@ fn main() -> Result<(), BoxError> {
         PerfCommand::Matrix(args) => run_matrix(&ctx, args),
         PerfCommand::Profile(args) => run_profile(&ctx, args, ProfileKind::Perf),
         PerfCommand::Heaptrack(args) => run_profile(&ctx, args, ProfileKind::Heaptrack),
+        PerfCommand::List(args) => list_runs(&ctx, args),
+        PerfCommand::Show(args) => show_run(&ctx, &args.run_id),
+        PerfCommand::MarkInvalid(args) => mark_run_invalid(&ctx, &args.run_id, &args.reason),
+        PerfCommand::MarkValid(args) => mark_run_valid(&ctx, &args.run_id),
     }
 }
 
@@ -515,6 +572,9 @@ fn run_mode(
         comparison_key: comparison_key.clone(),
         profile_mode,
         matrix_baseline,
+        valid_for_comparison: true,
+        invalid_reason: None,
+        notes: common.note.clone(),
         machine: machine_metadata(),
         targets: plans.iter().map(TargetManifest::from).collect(),
     };
@@ -1303,6 +1363,20 @@ fn render_summary(
         "Artifacts: benchmark_results/runs/{}/artifacts\n",
         manifest.run_id
     ));
+    output.push_str(&format!(
+        "Comparison status: {}\n",
+        if manifest.valid_for_comparison {
+            "valid"
+        } else {
+            "invalid"
+        }
+    ));
+    if let Some(reason) = &manifest.invalid_reason {
+        output.push_str(&format!("Invalid reason: {reason}\n"));
+    }
+    for note in &manifest.notes {
+        output.push_str(&format!("Note: {note}\n"));
+    }
     if let Some(ciphers) = &manifest.ciphers {
         output.push_str(&format!("Ciphers: {ciphers}\n"));
     }
@@ -1409,21 +1483,118 @@ fn find_previous_run(
             continue;
         }
         let manifest: RunManifest = read_json(&manifest_path)?;
-        if manifest.comparison_key == comparison_key {
+        if manifest.comparison_key == comparison_key && manifest.valid_for_comparison {
             candidates.push((
                 manifest.timestamp_unix,
                 manifest.run_id.clone(),
+                manifest,
                 results_path,
             ));
         }
     }
     candidates.sort_by_key(|candidate| candidate.0);
-    if let Some((_, run_id, results_path)) = candidates.pop() {
+    if let Some((_, run_id, manifest, results_path)) = candidates.pop() {
         let results = read_json(&results_path)?;
+        let _ = manifest;
         Ok(Some(PreviousRun { run_id, results }))
     } else {
         Ok(None)
     }
+}
+
+fn list_runs(ctx: &AppContext, args: ListArgs) -> Result<(), BoxError> {
+    let mut runs = load_runs(&ctx.results_root)?;
+    runs.sort_by_key(|run| run.manifest.timestamp_unix);
+    runs.reverse();
+
+    for run in runs
+        .into_iter()
+        .filter(|run| args.all || run.manifest.valid_for_comparison)
+        .take(args.limit)
+    {
+        let validity = if run.manifest.valid_for_comparison {
+            "valid"
+        } else {
+            "invalid"
+        };
+        let note = run
+            .manifest
+            .invalid_reason
+            .clone()
+            .or_else(|| run.manifest.notes.first().cloned())
+            .unwrap_or_default();
+        println!(
+            "{}  {:10}  {:9}  {:8}  {}",
+            run.manifest.run_id,
+            run.manifest.mode,
+            client_name(run.manifest.client),
+            validity,
+            note
+        );
+    }
+    Ok(())
+}
+
+fn show_run(ctx: &AppContext, run_id: &str) -> Result<(), BoxError> {
+    let run_dir = ctx.results_root.join(run_id);
+    let manifest: RunManifest = read_json(&run_dir.join("manifest.json"))?;
+    let results: RunResults = read_json(&run_dir.join("results.json"))?;
+    let summary = render_summary(&manifest, &results, None);
+    print!("{summary}");
+    Ok(())
+}
+
+fn mark_run_invalid(ctx: &AppContext, run_id: &str, reason: &str) -> Result<(), BoxError> {
+    update_run_validity(ctx, run_id, false, Some(reason.to_string()))
+}
+
+fn mark_run_valid(ctx: &AppContext, run_id: &str) -> Result<(), BoxError> {
+    update_run_validity(ctx, run_id, true, None)
+}
+
+fn update_run_validity(
+    ctx: &AppContext,
+    run_id: &str,
+    valid_for_comparison: bool,
+    invalid_reason: Option<String>,
+) -> Result<(), BoxError> {
+    let run_dir = ctx.results_root.join(run_id);
+    let manifest_path = run_dir.join("manifest.json");
+    let results_path = run_dir.join("results.json");
+    let summary_path = run_dir.join("summary.txt");
+    let mut manifest: RunManifest = read_json(&manifest_path)?;
+
+    manifest.valid_for_comparison = valid_for_comparison;
+    manifest.invalid_reason = invalid_reason;
+    write_json(manifest_path, &manifest)?;
+    if results_path.exists() {
+        let results: RunResults = read_json(&results_path)?;
+        fs::write(summary_path, render_summary(&manifest, &results, None))?;
+    }
+    println!(
+        "{} marked {}",
+        run_id,
+        if valid_for_comparison {
+            "valid"
+        } else {
+            "invalid"
+        }
+    );
+    Ok(())
+}
+
+fn load_runs(results_root: &Path) -> Result<Vec<RunRecord>, BoxError> {
+    let mut runs = Vec::new();
+    for entry in fs::read_dir(results_root)? {
+        let entry = entry?;
+        let manifest_path = entry.path().join("manifest.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let manifest: RunManifest = read_json(&manifest_path)?;
+        runs.push(RunRecord { manifest });
+    }
+    Ok(runs)
 }
 
 fn target_dir(ctx: &AppContext, build_id: &str) -> PathBuf {
