@@ -309,7 +309,7 @@ Results are written under `benchmark_results/runs/<run-id>/` with:
 
 - `manifest.json` for refs, client, backend, sizes, operations, and machine metadata
 - `results.json` for structured timings and throughput
-- `summary.txt` for the human-readable summary
+- `summary.txt` for the human-readable summary, including host OS / arch / CPU / hostname
 - `artifacts/` for `perf.data`, heaptrack output, and bench-client JSON
 - `server-*.log` for server logs
 

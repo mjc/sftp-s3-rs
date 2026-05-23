@@ -343,6 +343,8 @@ struct MachineMetadata {
     os: String,
     arch: String,
     hostname: String,
+    #[serde(default = "unknown_string")]
+    cpu: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -378,6 +380,10 @@ struct RunRecord {
 
 fn default_true() -> bool {
     true
+}
+
+fn unknown_string() -> String {
+    "unknown".to_string()
 }
 
 fn main() -> Result<(), BoxError> {
@@ -1364,6 +1370,10 @@ fn render_summary(
         manifest.run_id
     ));
     output.push_str(&format!(
+        "Machine: {} {} cpu={} host={}\n",
+        manifest.machine.os, manifest.machine.arch, manifest.machine.cpu, manifest.machine.hostname
+    ));
+    output.push_str(&format!(
         "Comparison status: {}\n",
         if manifest.valid_for_comparison {
             "valid"
@@ -1603,10 +1613,17 @@ fn target_dir(ctx: &AppContext, build_id: &str) -> PathBuf {
 
 fn machine_metadata() -> MachineMetadata {
     MachineMetadata {
-        os: std::env::consts::OS.to_string(),
+        os: os_name(),
         arch: std::env::consts::ARCH.to_string(),
         hostname: hostname().unwrap_or_else(|| "unknown".to_string()),
+        cpu: cpu_name(),
     }
+}
+
+fn os_name() -> String {
+    linux_pretty_name()
+        .or_else(uname_os_name)
+        .unwrap_or_else(|| std::env::consts::OS.to_string())
 }
 
 fn hostname() -> Option<String> {
@@ -1615,6 +1632,79 @@ fn hostname() -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn cpu_name() -> String {
+    linux_cpu_name()
+        .or_else(sysctl_cpu_name)
+        .or_else(lscpu_cpu_name)
+        .unwrap_or_else(unknown_string)
+}
+
+fn linux_pretty_name() -> Option<String> {
+    let contents = fs::read_to_string("/etc/os-release").ok()?;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
+            return Some(value.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+fn uname_os_name() -> Option<String> {
+    let output = Command::new("uname").args(["-sr"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn linux_cpu_name() -> Option<String> {
+    let contents = fs::read_to_string("/proc/cpuinfo").ok()?;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("model name") {
+            let (_, value) = value.split_once(':')?;
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+fn sysctl_cpu_name() -> Option<String> {
+    let output = Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn lscpu_cpu_name() -> Option<String> {
+    let output = Command::new("lscpu").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(value) = line.strip_prefix("Model name:") {
+            let name = value.trim().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), BoxError> {
