@@ -4,6 +4,7 @@ use crate::sftp_handler::SftpHandler;
 use russh::keys::PublicKey;
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId};
+#[cfg(not(feature = "benchmark-matrix-compat"))]
 use russh_sftp::protocol::SerializedPacket;
 use std::collections::HashMap;
 use std::future::Future;
@@ -184,18 +185,28 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
                             tokio::spawn(async move {
                                 let mut reader = read_half.make_reader();
                                 let mut handler = sftp_handler;
-                                let mut send_bytes = move |bytes| {
+                                let mut send_packet = move |packet: SerializedPacket| {
                                     let write_half = Arc::clone(&write_half);
-                                    async move { write_half.data_bytes(bytes).await }
+                                    async move {
+                                        match packet {
+                                            SerializedPacket::Contiguous(bytes) => {
+                                                write_half.data_bytes(bytes).await
+                                            }
+                                            SerializedPacket::Split { header, data } => {
+                                                write_half.data_bytes(header).await?;
+                                                write_half.data_bytes(data).await
+                                            }
+                                        }
+                                    }
                                 };
-                                russh_sftp::server::serve_with_sender(
+                                russh_sftp::server::serve_with_packet_sender(
                                     &mut reader,
-                                    &mut send_bytes,
+                                    &mut send_packet,
                                     &mut handler,
                                 )
                                 .await;
                             });
-                            }
+                        }
                     }
                 }
                 "scp" => {
