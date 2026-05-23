@@ -567,75 +567,193 @@ impl Backend for MemoryBackend {
 /// Write handle for memory backend using sparse chunk storage.
 struct MemoryWriteHandle {
     path: String,
-    chunks: BTreeMap<u64, Bytes>,
+    writes: PendingWrites,
     entries: Arc<RwLock<HashMap<String, EntryData>>>,
+}
+
+enum PendingWrites {
+    Empty,
+    Single {
+        offset: u64,
+        data: Bytes,
+    },
+    Sequential {
+        start_offset: u64,
+        len: usize,
+        chunks: Vec<Bytes>,
+    },
+    Sparse(BTreeMap<u64, Bytes>),
+}
+
+impl Default for PendingWrites {
+    fn default() -> Self {
+        Self::Empty
+    }
 }
 
 impl MemoryWriteHandle {
     fn new(path: String, entries: Arc<RwLock<HashMap<String, EntryData>>>) -> Self {
         Self {
             path,
-            chunks: BTreeMap::new(),
+            writes: PendingWrites::Empty,
             entries,
+        }
+    }
+
+    fn checked_end(offset: u64, len: usize) -> BackendResult<u64> {
+        offset
+            .checked_add(
+                u64::try_from(len)
+                    .map_err(|_| BackendError::Other("file chunk too large".into()))?,
+            )
+            .ok_or_else(|| BackendError::Other("file size too large for this platform".into()))
+    }
+
+    fn record_write(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
+        let writes = std::mem::take(&mut self.writes);
+        self.writes = match writes {
+            PendingWrites::Empty => PendingWrites::Single { offset, data },
+            PendingWrites::Single {
+                offset: existing_offset,
+                data: existing_data,
+            } => {
+                if offset == Self::checked_end(existing_offset, existing_data.len())? {
+                    PendingWrites::Sequential {
+                        start_offset: existing_offset,
+                        len: existing_data.len() + data.len(),
+                        chunks: vec![existing_data, data],
+                    }
+                } else {
+                    let mut chunks = BTreeMap::new();
+                    chunks.insert(existing_offset, existing_data);
+                    chunks.insert(offset, data);
+                    PendingWrites::Sparse(chunks)
+                }
+            }
+            PendingWrites::Sequential {
+                start_offset,
+                len,
+                mut chunks,
+            } => {
+                if offset == Self::checked_end(start_offset, len)? {
+                    let next_len = len.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Other("file size too large for this platform".into())
+                    })?;
+                    chunks.push(data);
+                    PendingWrites::Sequential {
+                        start_offset,
+                        len: next_len,
+                        chunks,
+                    }
+                } else {
+                    let mut sparse = BTreeMap::new();
+                    let mut chunk_offset = start_offset;
+                    for chunk in chunks {
+                        let current_offset = chunk_offset;
+                        chunk_offset = Self::checked_end(chunk_offset, chunk.len())?;
+                        sparse.insert(current_offset, chunk);
+                    }
+                    sparse.insert(offset, data);
+                    PendingWrites::Sparse(sparse)
+                }
+            }
+            PendingWrites::Sparse(mut chunks) => {
+                chunks.insert(offset, data);
+                PendingWrites::Sparse(chunks)
+            }
+        };
+        Ok(())
+    }
+
+    fn finish_content(writes: PendingWrites) -> BackendResult<Bytes> {
+        match writes {
+            PendingWrites::Empty => Ok(Bytes::new()),
+            PendingWrites::Single { offset, data } => {
+                if offset == 0 {
+                    Ok(data)
+                } else {
+                    let offset = usize::try_from(offset).map_err(|_| {
+                        BackendError::Other("file offset too large for this platform".into())
+                    })?;
+                    let mut merged =
+                        Vec::with_capacity(offset.checked_add(data.len()).ok_or_else(|| {
+                            BackendError::Other("file size too large for this platform".into())
+                        })?);
+                    merged.resize(offset, 0);
+                    merged.extend_from_slice(&data);
+                    Ok(Bytes::from(merged))
+                }
+            }
+            PendingWrites::Sequential {
+                start_offset,
+                len,
+                chunks,
+            } => {
+                let start_offset = usize::try_from(start_offset).map_err(|_| {
+                    BackendError::Other("file offset too large for this platform".into())
+                })?;
+                let total_size = start_offset.checked_add(len).ok_or_else(|| {
+                    BackendError::Other("file too large for this platform".into())
+                })?;
+                let mut merged = Vec::with_capacity(total_size);
+                if start_offset > 0 {
+                    merged.resize(start_offset, 0);
+                }
+                for chunk in chunks {
+                    merged.extend_from_slice(&chunk);
+                }
+                Ok(Bytes::from(merged))
+            }
+            PendingWrites::Sparse(chunks) => {
+                let total_size_u64 = chunks.iter().fold(0u64, |max, (offset, data)| {
+                    max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
+                });
+                let total_size = usize::try_from(total_size_u64)
+                    .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
+
+                let mut merged = Vec::with_capacity(total_size);
+                for (offset, data) in chunks {
+                    let offset = usize::try_from(offset).map_err(|_| {
+                        BackendError::Other("file offset too large for this platform".into())
+                    })?;
+                    if merged.len() < offset {
+                        merged.resize(offset, 0);
+                    }
+                    let end = offset.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Other("file size too large for this platform".into())
+                    })?;
+                    if merged.len() < end {
+                        merged.resize(end, 0);
+                    }
+                    merged[offset..end].copy_from_slice(&data);
+                }
+
+                Ok(Bytes::from(merged))
+            }
         }
     }
 }
 
 #[async_trait]
 impl WriteHandle for MemoryWriteHandle {
+    fn try_write_at(&mut self, offset: u64, data: &Bytes) -> Option<BackendResult<()>> {
+        Some(self.record_write(offset, data.clone()))
+    }
+
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        self.chunks.insert(offset, data);
-        Ok(())
+        self.record_write(offset, data)
     }
 
     async fn finish(self: Box<Self>) -> BackendResult<()> {
-        let content = if self.chunks.is_empty() {
-            Bytes::new()
-        } else if self.chunks.len() == 1 {
-            let (offset, data) = self.chunks.into_iter().next().expect("single chunk");
-            if offset == 0 {
-                data
-            } else {
-                let offset = usize::try_from(offset).map_err(|_| {
-                    BackendError::Other("file offset too large for this platform".into())
-                })?;
-                let mut merged =
-                    Vec::with_capacity(offset.checked_add(data.len()).ok_or_else(|| {
-                        BackendError::Other("file size too large for this platform".into())
-                    })?);
-                merged.resize(offset, 0);
-                merged.extend_from_slice(&data);
-                Bytes::from(merged)
-            }
-        } else {
-            let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
-                max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
-            });
-            let total_size = usize::try_from(total_size_u64)
-                .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
+        let MemoryWriteHandle {
+            path,
+            writes,
+            entries,
+        } = *self;
+        let content = Self::finish_content(writes)?;
 
-            let mut merged = Vec::with_capacity(total_size);
-            for (offset, data) in self.chunks {
-                let offset = usize::try_from(offset).map_err(|_| {
-                    BackendError::Other("file offset too large for this platform".into())
-                })?;
-                if merged.len() < offset {
-                    merged.resize(offset, 0);
-                }
-                let end = offset.checked_add(data.len()).ok_or_else(|| {
-                    BackendError::Other("file size too large for this platform".into())
-                })?;
-                if merged.len() < end {
-                    merged.resize(end, 0);
-                }
-                merged[offset..end].copy_from_slice(&data);
-            }
-
-            Bytes::from(merged)
-        };
-
-        self.entries.write().insert(
-            self.path,
+        entries.write().insert(
+            path,
             EntryData::File {
                 content,
                 meta: EntryMeta::file_default(),
@@ -1070,6 +1188,48 @@ mod tests {
         let read = backend.read_file("single.bin").await.unwrap();
         assert_eq!(read.len(), 1024);
         assert_eq!(read.as_ptr(), content_ptr);
+    }
+
+    #[tokio::test]
+    async fn test_sequential_multi_chunk_write_round_trips() {
+        let backend = MemoryBackend::new();
+        let mut handle = backend.open_write("multi.bin").await.unwrap();
+
+        assert!(matches!(
+            handle.try_write_at(0, &Bytes::from_static(b"abc")),
+            Some(Ok(()))
+        ));
+        assert!(matches!(
+            handle.try_write_at(3, &Bytes::from_static(b"def")),
+            Some(Ok(()))
+        ));
+        handle
+            .write_at(6, Bytes::from_static(b"ghi"))
+            .await
+            .unwrap();
+        handle.finish().await.unwrap();
+
+        let content = backend.read_file("multi.bin").await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"abcdefghi"));
+    }
+
+    #[tokio::test]
+    async fn test_sequential_write_with_initial_gap_preserves_prefix_zeros() {
+        let backend = MemoryBackend::new();
+        let mut handle = backend.open_write("offset.bin").await.unwrap();
+
+        handle
+            .write_at(3, Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        handle
+            .write_at(6, Bytes::from_static(b"def"))
+            .await
+            .unwrap();
+        handle.finish().await.unwrap();
+
+        let content = backend.read_file("offset.bin").await.unwrap();
+        assert_eq!(content.as_ref(), b"\0\0\0abcdef");
     }
 
     #[tokio::test]
