@@ -249,11 +249,58 @@ Run the russh/russh-sftp benchmark matrix from a Nix development shell:
 nix develop -c ./benchmark-all.sh --client rust --ciphers aes256-gcm
 ```
 
-The matrix builds isolated server binaries for each configured russh and russh-sftp ref, then runs
-roundtrip transfer benchmarks. For the Rust client matrix, the server uses the `benchmark` backend:
-it records file sizes and metadata, discards uploaded bytes, and synthesizes zero-filled reads so
-large 50-100GiB protocol runs do not exhaust RAM. The Rust benchmark client is built once from the
-current checkout and reused across the matrix.
+To run only selected sizes, pass `--sizes` with MiB values:
+
+```bash
+nix develop -c ./benchmark-all.sh --client rust --ciphers aes256-gcm --sizes 1024,10240
+```
+
+The matrix builds isolated server binaries for a 2x2 comparison: upstream/current `russh` + `russh-sftp`
+(`main` + `master`) versus the pinned MJC branches (`mjc/own-inbound-channel-payloads` +
+`deserialize-bytes-optimization`). It then runs roundtrip transfer benchmarks. For the Rust client
+matrix, the server uses the `benchmark` backend: it records file sizes and metadata, discards
+uploaded bytes, and synthesizes zero-filled reads so large 50-100GiB protocol runs do not exhaust
+RAM. The Rust benchmark client is built once from the current checkout and reused across the matrix.
+
+Results below were measured on a Darwin arm64 Apple Silicon machine with the Rust benchmark client,
+the `benchmark` backend, and the 2x2 matrix:
+
+- `current-current` = `russh main` + `russh-sftp master`
+- `current-mjc` = `russh main` + `russh-sftp deserialize-bytes-optimization`
+- `mjc-current` = `russh mjc/own-inbound-channel-payloads` + `russh-sftp master`
+- `mjc-mjc` = `russh mjc/own-inbound-channel-payloads` + `russh-sftp deserialize-bytes-optimization`
+
+### Darwin arm64 matrix results
+
+#### `aes256-gcm`
+
+| Config | 1024MB MB/s | 1024MB mean | 10240MB MB/s | 10240MB mean |
+| --- | ---: | ---: | ---: | ---: |
+| current-current | 345.9 | 5.921s | 332.3 | 61.626s |
+| current-mjc | 1040.1 | 1.969s | 998.5 | 20.511s |
+| mjc-current | 343.2 | 5.968s | 328.8 | 62.293s |
+| mjc-mjc | 936.9 | 2.186s | 909.0 | 22.530s |
+
+Under `aes256-gcm`, the `russh-sftp` MJC branch is carrying nearly all of the win on this machine:
+`current-mjc` is about 3x faster than `current-current`, while `mjc-current` stays essentially flat
+against upstream/current. Pairing both MJC branches together remains much faster than upstream, but
+slightly behind `current-mjc`, so the `russh` branch is not where the large gain is coming from in
+this cipher on Apple Silicon.
+
+#### `chacha20-poly1305`
+
+| Config | 1024MB MB/s | 1024MB mean | 10240MB MB/s | 10240MB mean |
+| --- | ---: | ---: | ---: | ---: |
+| current-current | 225.3 | 9.091s | 231.6 | 88.446s |
+| current-mjc | 412.1 | 4.970s | 394.5 | 51.910s |
+| mjc-current | 247.0 | 8.293s | 252.4 | 81.136s |
+| mjc-mjc | 491.4 | 4.168s | 491.7 | 41.653s |
+
+Under `chacha20-poly1305`, both MJC branches help and `mjc-mjc` is the best combination. The
+`russh-sftp` branch still contributes most of the improvement, but unlike the GCM run, the `russh`
+branch also moves the result in the right direction. On this M1 machine, `aes256-gcm` still
+outperforms `chacha20-poly1305` across all four configs, which matches the expectation that Apple
+Silicon's AES acceleration makes GCM especially strong here.
 
 Default transfer sizes are:
 
@@ -285,6 +332,7 @@ benchmark_patches/<component>/<matrix-label>/*.patch
 
 Use `SFTP_BENCH_CHUNK_SIZE` to override the Rust client's request size. The default is `64KiB`, which
 keeps the Rust client compatible with older server refs that reject larger SFTP packets.
+Use `SFTP_BENCH_SIZES` as an environment alternative to `--sizes`.
 ## Docker Deployment
 
 ### Quick Start

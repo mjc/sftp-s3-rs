@@ -69,6 +69,27 @@ pub struct SetAttrs {
     pub gid: Option<u32>,
 }
 
+impl SetAttrs {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.size.is_none()
+            && self.permissions.is_none()
+            && self.atime.is_none()
+            && self.mtime.is_none()
+            && self.uid.is_none()
+            && self.gid.is_none()
+    }
+
+    pub fn merge_from(&mut self, other: &Self) {
+        self.size = other.size.or(self.size);
+        self.permissions = other.permissions.or(self.permissions);
+        self.atime = other.atime.or(self.atime);
+        self.mtime = other.mtime.or(self.mtime);
+        self.uid = other.uid.or(self.uid);
+        self.gid = other.gid.or(self.gid);
+    }
+}
+
 /// Backend capability flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {

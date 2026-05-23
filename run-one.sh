@@ -11,10 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --client)
+            [[ $# -ge 2 ]] || { echo "missing value for --client" >&2; exit 2; }
             CLIENT=$2
             shift 2
             ;;
         --ciphers)
+            [[ $# -ge 2 ]] || { echo "missing value for --ciphers" >&2; exit 2; }
             CIPHERS=$2
             shift 2
             ;;
@@ -28,6 +30,11 @@ while [[ "${1:-}" == --* ]]; do
             ;;
     esac
 done
+
+[[ $# -ge 2 ]] || {
+    echo "usage: $0 [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
+    exit 2
+}
 
 PORT=$1
 TESTFILE=$2
