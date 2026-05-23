@@ -145,7 +145,7 @@ impl LocalBackend {
     }
 
     async fn lstat_path(&self, path: &str) -> BackendResult<FileInfo> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
         let metadata = fs::symlink_metadata(&full_path)
             .await
             .map_err(Self::map_io_error)?;
@@ -294,7 +294,7 @@ impl Backend for LocalBackend {
 
     async fn read_link(&self, path: &str) -> BackendResult<String> {
         let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(&normalized)?;
         let target = fs::read_link(&full_path)
             .await
             .map_err(Self::map_io_error)?;
@@ -302,10 +302,10 @@ impl Backend for LocalBackend {
     }
 
     async fn symlink(&self, linkpath: &str, targetpath: &str) -> BackendResult<()> {
-        let linkpath = self.full_path(&normalize_path(linkpath));
+        let linkpath = self.full_path(&normalize_path(linkpath))?;
         let targetpath_owned = targetpath.to_string();
         #[cfg(windows)]
-        let target_exists_path = self.full_path(&normalize_path(targetpath));
+        let target_exists_path = self.full_path(&normalize_path(targetpath))?;
 
         tokio::task::spawn_blocking(move || {
             #[cfg(unix)]
@@ -332,7 +332,7 @@ impl Backend for LocalBackend {
 
     async fn set_attrs(&self, path: &str, attrs: SetAttrs) -> BackendResult<()> {
         let normalized = normalize_path(path);
-        let full_path = self.full_path(&normalized);
+        let full_path = self.full_path(&normalized)?;
         let lstat = self.lstat_path(normalized.as_ref()).await?;
 
         if lstat.kind == FileKind::Symlink {

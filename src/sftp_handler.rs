@@ -121,7 +121,6 @@ impl From<BackendError> for StatusCode {
             BackendError::NotFound | BackendError::NotADirectory => StatusCode::NoSuchFile,
             BackendError::PermissionDenied => StatusCode::PermissionDenied,
             BackendError::AlreadyExists => StatusCode::Failure,
-            BackendError::NotADirectory => StatusCode::NoSuchFile,
             BackendError::IsADirectory => StatusCode::Failure,
             BackendError::DirectoryNotEmpty => StatusCode::Failure,
             BackendError::Unsupported => StatusCode::OpUnsupported,
@@ -194,7 +193,8 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let handle = self.handles.create_dir_handle(normalized.into_owned());
+        let handle_path = normalized.into_owned();
+        let handle = self.handles.create_dir_handle(&handle_path);
         Ok(Handle {
             id,
             handle: handle.into(),
