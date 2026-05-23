@@ -571,7 +571,9 @@ struct MemoryWriteHandle {
     entries: Arc<RwLock<HashMap<String, EntryData>>>,
 }
 
+#[derive(Default)]
 enum PendingWrites {
+    #[default]
     Empty,
     Single {
         offset: u64,
@@ -583,12 +585,6 @@ enum PendingWrites {
         chunks: Vec<Bytes>,
     },
     Sparse(BTreeMap<u64, Bytes>),
-}
-
-impl Default for PendingWrites {
-    fn default() -> Self {
-        Self::Empty
-    }
 }
 
 impl MemoryWriteHandle {

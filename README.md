@@ -244,32 +244,73 @@ measurement, then times repeated reads. By default benchmark files are removed a
 
 ## Benchmark Matrix
 
-Run the russh/russh-sftp benchmark matrix from a Nix development shell:
+Benchmarking and profiling now go through the `sftp-perf` runner. It supports:
+
+- current-stack reruns
+- local `russh` / `russh-sftp` stack reruns
+- russh × russh-sftp matrices
+- `perf` recording
+- `heaptrack` recording
+- both the repo benchmark client and stock OpenSSH
+- upload, download, and roundtrip workloads
+
+The generic entrypoint is:
 
 ```bash
-nix develop -c ./benchmark-all.sh --client rust --ciphers aes256-gcm
+nix develop -c ./perf.sh <subcommand> [options]
 ```
 
-To run only selected sizes, pass `--sizes` with MiB values:
+Available subcommands:
+
+- `current`
+- `local-stack`
+- `matrix`
+- `profile`
+- `heaptrack`
+
+Common options include:
+
+- `--client bench|openssh`
+- `--operation upload|download|roundtrip|all`
+- `--sizes 1024,10240`
+- `--ciphers aes256-gcm`
+
+Examples:
 
 ```bash
-nix develop -c ./benchmark-all.sh --client rust --ciphers aes256-gcm --sizes 1024,10240
+nix develop -c ./perf.sh current --client bench --sizes 1024,10240
+nix develop -c ./perf.sh current --client openssh --operation all --sizes 1024
+nix develop -c ./perf.sh local-stack --russh-ref main --russh-sftp-ref master
+nix develop -c ./perf.sh matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
+nix develop -c ./perf.sh profile --client bench --operation roundtrip --sizes 1024
+nix develop -c ./perf.sh heaptrack --client openssh --operation upload --sizes 1024
 ```
 
-The matrix builds isolated server binaries for a 2x2 comparison: upstream/current `russh` + `russh-sftp`
-(`main` + `master`) versus the pinned MJC branches (`mjc/own-inbound-channel-payloads` +
-`deserialize-bytes-optimization`). It then runs roundtrip transfer benchmarks. For the Rust client
-matrix, the server uses the `benchmark` backend: it records file sizes and metadata, discards
-uploaded bytes, and synthesizes zero-filled reads so large 50-100GiB protocol runs do not exhaust
-RAM. The Rust benchmark client is built once from the current checkout and reused across the matrix.
+Compatibility wrappers:
 
-Results below were measured on a Darwin arm64 Apple Silicon machine with the Rust benchmark client,
-the `benchmark` backend, and the 2x2 matrix:
+- `./benchmark-all.sh ...` delegates to `./perf.sh matrix ...`
+- `./scripts/benchmark-russh-sftp-local.sh ...` delegates to `./perf.sh local-stack ...`
+
+The matrix defaults to a 2x2 comparison:
 
 - `current-current` = `russh main` + `russh-sftp master`
 - `current-mjc` = `russh main` + `russh-sftp deserialize-bytes-optimization`
 - `mjc-current` = `russh mjc/own-inbound-channel-payloads` + `russh-sftp master`
 - `mjc-mjc` = `russh mjc/own-inbound-channel-payloads` + `russh-sftp deserialize-bytes-optimization`
+
+Results are written under `benchmark_results/runs/<run-id>/` with:
+
+- `manifest.json` for refs, client, backend, sizes, operations, and machine metadata
+- `results.json` for structured timings and throughput
+- `summary.txt` for the human-readable summary
+- `artifacts/` for `perf.data`, heaptrack output, and bench-client JSON
+- `server-*.log` for server logs
+
+The runner keeps stable cached build outputs under `.perf-cache/` and uses `sccache` automatically
+when available.
+
+Results below were measured on a Darwin arm64 Apple Silicon machine with the Rust benchmark client,
+the `benchmark` backend, and the 2x2 matrix:
 
 ### Darwin arm64 matrix results
 

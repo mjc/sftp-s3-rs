@@ -1,4 +1,5 @@
 perf*
+!perf.sh
 target
 .direnv/
 scripts/span-stats
@@ -16,6 +17,7 @@ span-stats
 strace.log
 server.log
 benchmark_results/
+.perf-cache/
 benchmark_data/
 testfile_*.bin
 *.downloaded

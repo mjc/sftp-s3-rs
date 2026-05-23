@@ -2,4 +2,5 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/perf.sh" matrix "$@"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+exec "$ROOT_DIR/perf.sh" local-stack "$@"
