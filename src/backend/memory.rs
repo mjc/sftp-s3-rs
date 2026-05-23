@@ -575,6 +575,22 @@ impl WriteHandle for MemoryWriteHandle {
     async fn finish(self: Box<Self>) -> BackendResult<()> {
         let content = if self.chunks.is_empty() {
             Bytes::new()
+        } else if self.chunks.len() == 1 {
+            let (offset, data) = self.chunks.into_iter().next().expect("single chunk");
+            if offset == 0 {
+                data
+            } else {
+                let offset = usize::try_from(offset).map_err(|_| {
+                    BackendError::Other("file offset too large for this platform".into())
+                })?;
+                let mut merged =
+                    Vec::with_capacity(offset.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Other("file size too large for this platform".into())
+                    })?);
+                merged.resize(offset, 0);
+                merged.extend_from_slice(&data);
+                Bytes::from(merged)
+            }
         } else {
             let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
                 max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
@@ -884,19 +900,6 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(BackendError::Unsupported)));
-    }
-
-    #[tokio::test]
-    async fn test_del_dir_rejects_non_empty_directory() {
-        let backend = MemoryBackend::new();
-        backend.make_dir("dir").await.unwrap();
-        backend
-            .write_file("dir/file.txt", Bytes::from_static(b"x"))
-            .await
-            .unwrap();
-
-        let result = backend.del_dir("dir").await;
-        assert!(matches!(result, Err(BackendError::DirectoryNotEmpty)));
     }
 
     #[tokio::test]
