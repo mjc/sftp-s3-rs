@@ -5,8 +5,11 @@ use super::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+const STATIC_ZERO_READ_CHUNK_SIZE: usize = 256 * 1024;
+static STATIC_ZERO_READ_CHUNK: [u8; STATIC_ZERO_READ_CHUNK_SIZE] = [0; STATIC_ZERO_READ_CHUNK_SIZE];
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -183,7 +186,7 @@ impl Backend for BenchmarkBackend {
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
         Ok(Box::new(BenchmarkWriteHandle {
             path: normalize_path(path).into_owned(),
-            chunks: BTreeMap::new(),
+            size: 0,
             files: Arc::clone(&self.files),
         }))
     }
@@ -210,7 +213,11 @@ impl ReadHandle for BenchmarkReadHandle {
             return Ok(Bytes::new());
         }
         let len = (self.size - offset).min(u64::from(len)) as usize;
-        Ok(Bytes::from(vec![0; len]))
+        if len <= STATIC_ZERO_READ_CHUNK.len() {
+            Ok(Bytes::from_static(&STATIC_ZERO_READ_CHUNK[..len]))
+        } else {
+            Ok(Bytes::from(vec![0; len]))
+        }
     }
 
     fn size(&self) -> u64 {
@@ -220,25 +227,22 @@ impl ReadHandle for BenchmarkReadHandle {
 
 struct BenchmarkWriteHandle {
     path: String,
-    chunks: BTreeMap<u64, usize>,
+    size: u64,
     files: Arc<RwLock<HashMap<String, Entry>>>,
 }
 
 #[async_trait]
 impl WriteHandle for BenchmarkWriteHandle {
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        self.chunks.insert(offset, data.len());
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| BackendError::Other("benchmark write length overflow".to_owned()))?;
+        self.size = self.size.max(end);
         Ok(())
     }
 
     async fn finish(self: Box<Self>) -> BackendResult<()> {
-        let size = self
-            .chunks
-            .iter()
-            .map(|(offset, len)| offset + *len as u64)
-            .max()
-            .unwrap_or(0);
-        self.files.write().insert(self.path, Entry::file(size));
+        self.files.write().insert(self.path, Entry::file(self.size));
         Ok(())
     }
 
@@ -268,5 +272,23 @@ mod tests {
         let data = reader.read_at(1024 * 1024, 8).await.unwrap();
         assert_eq!(data.len(), 1);
         assert_eq!(&data[..], &[0]);
+    }
+
+    #[tokio::test]
+    async fn benchmark_backend_tracks_largest_written_end_offset() {
+        let backend = BenchmarkBackend::new();
+        let mut writer = backend.open_write("sparse.bin").await.unwrap();
+        writer
+            .write_at(0, Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        writer
+            .write_at(4096, Bytes::from_static(b"z"))
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
+
+        let info = backend.file_info("sparse.bin").await.unwrap();
+        assert_eq!(info.size, 4097);
     }
 }
