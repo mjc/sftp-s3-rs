@@ -3,11 +3,11 @@ use super::{
     DirEntry, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
 use async_trait::async_trait;
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
+use parking_lot::Mutex;
+use std::fs::File as StdFile;
 use std::path::{Component, Path, PathBuf};
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Mutex;
 use tracing::debug;
 
 /// Local filesystem storage backend
@@ -198,6 +198,60 @@ impl LocalBackend {
     }
 }
 
+fn read_file_at(file: &StdFile, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(buf, offset)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let mut cloned = file.try_clone()?;
+        std::io::Seek::seek(&mut cloned, std::io::SeekFrom::Start(offset))?;
+        std::io::Read::read(&mut cloned, buf)
+    }
+}
+
+fn write_all_file_at(file: &StdFile, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !data.is_empty() {
+        let written = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                file.write_at(data, offset)?
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileExt;
+                file.seek_write(data, offset)?
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let mut cloned = file.try_clone()?;
+                std::io::Seek::seek(&mut cloned, std::io::SeekFrom::Start(offset))?;
+                std::io::Write::write(&mut cloned, data)?
+            }
+        };
+
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write whole buffer",
+            ));
+        }
+
+        data = &data[written..];
+        offset += written as u64;
+    }
+
+    Ok(())
+}
+
 #[async_trait]
 impl Backend for LocalBackend {
     fn capabilities(&self) -> BackendCapabilities {
@@ -271,17 +325,23 @@ impl Backend for LocalBackend {
 
     async fn delete(&self, path: &str) -> BackendResult<()> {
         let normalized = normalize_path(path);
-        if self.lstat_path(normalized.as_ref()).await?.kind == FileKind::Directory {
-            return Err(BackendError::IsADirectory);
-        }
-
         let full_path = self.full_path(path)?;
 
         debug!(path = %full_path.display(), "Deleting file");
 
-        fs::remove_file(&full_path)
-            .await
-            .map_err(Self::map_io_error)
+        match fs::remove_file(&full_path).await {
+            Ok(()) => Ok(()),
+            Err(err) => match err.kind() {
+                std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied => {
+                    if self.lstat_path(normalized.as_ref()).await?.kind == FileKind::Directory {
+                        Err(BackendError::IsADirectory)
+                    } else {
+                        Err(Self::map_io_error(err))
+                    }
+                }
+                _ => Err(Self::map_io_error(err)),
+            },
+        }
     }
 
     async fn rename(&self, src: &str, dst: &str) -> BackendResult<()> {
@@ -319,15 +379,17 @@ impl Backend for LocalBackend {
 
         debug!(path = %full_path.display(), "Opening file for read");
 
-        let file = File::open(&full_path).await.map_err(Self::map_io_error)?;
-        let metadata = file.metadata().await.map_err(Self::map_io_error)?;
-        let size = metadata.len();
+        let (file, size) = tokio::task::spawn_blocking(move || -> BackendResult<(StdFile, u64)> {
+            let file = StdFile::open(&full_path).map_err(Self::map_io_error)?;
+            let size = file.metadata().map_err(Self::map_io_error)?.len();
+            Ok((file, size))
+        })
+        .await
+        .map_err(|err| BackendError::Other(err.to_string()))??;
 
         Ok(Box::new(LocalReadHandle {
-            inner: Mutex::new(LocalReadHandleInner {
-                file,
-                buf: bytes::BytesMut::with_capacity(64 * 1024), // Pre-allocate typical read size
-            }),
+            file,
+            buf: Mutex::new(bytes::BytesMut::with_capacity(64 * 1024)),
             size,
         }))
     }
@@ -337,7 +399,11 @@ impl Backend for LocalBackend {
 
         debug!(path = %full_path.display(), "Opening file for write");
 
-        let file = File::create(&full_path).await.map_err(Self::map_io_error)?;
+        let file = tokio::task::spawn_blocking(move || -> BackendResult<StdFile> {
+            StdFile::create(&full_path).map_err(Self::map_io_error)
+        })
+        .await
+        .map_err(|err| BackendError::Other(err.to_string()))??;
 
         Ok(Box::new(LocalWriteHandle { file }))
     }
@@ -463,37 +529,31 @@ impl Backend for LocalBackend {
 /// Read handle for local filesystem - uses seek + read for random access.
 /// Includes a reusable buffer to avoid repeated allocations and page faults.
 struct LocalReadHandle {
-    /// File and buffer are combined in the mutex to ensure synchronized access.
-    inner: Mutex<LocalReadHandleInner>,
+    file: StdFile,
+    /// Reusable read buffer retained across reads to avoid repeated allocations.
+    buf: Mutex<bytes::BytesMut>,
     size: u64,
-}
-
-struct LocalReadHandleInner {
-    file: File,
-    /// Reusable read buffer - cleared between reads but capacity is retained.
-    buf: bytes::BytesMut,
 }
 
 #[async_trait]
 impl ReadHandle for LocalReadHandle {
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
-        let mut inner = self.inner.lock().await;
-        let LocalReadHandleInner { file, buf } = &mut *inner;
-
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(LocalBackend::map_io_error)?;
-
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+        let mut buf = self.buf.lock();
         buf.clear();
         let len = usize::try_from(len).unwrap_or(usize::MAX);
-        buf.reserve(len);
+        buf.resize(len, 0);
 
-        let bytes_read = file
-            .read_buf(&mut buf.limit(len))
-            .await
-            .map_err(LocalBackend::map_io_error)?;
+        let bytes_read = match read_file_at(&self.file, &mut buf[..], offset) {
+            Ok(bytes_read) => bytes_read,
+            Err(err) => return Some(Err(LocalBackend::map_io_error(err))),
+        };
 
-        Ok(buf.split_to(bytes_read).freeze())
+        buf.truncate(bytes_read);
+        Some(Ok(buf.split().freeze()))
+    }
+
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+        self.try_read_at(offset, len).unwrap()
     }
 
     fn size(&self) -> u64 {
@@ -503,28 +563,20 @@ impl ReadHandle for LocalReadHandle {
 
 /// Write handle for local filesystem - writes directly to file
 struct LocalWriteHandle {
-    file: File,
+    file: StdFile,
 }
 
 #[async_trait]
 impl WriteHandle for LocalWriteHandle {
-    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        self.file
-            .seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(LocalBackend::map_io_error)?;
-        self.file
-            .write_all(&data)
-            .await
-            .map_err(LocalBackend::map_io_error)?;
-        Ok(())
+    fn try_write_at(&mut self, offset: u64, data: &Bytes) -> Option<BackendResult<()>> {
+        Some(write_all_file_at(&self.file, data, offset).map_err(LocalBackend::map_io_error))
     }
 
-    async fn finish(mut self: Box<Self>) -> BackendResult<()> {
-        self.file
-            .flush()
-            .await
-            .map_err(LocalBackend::map_io_error)?;
+    async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
+        self.try_write_at(offset, &data).unwrap()
+    }
+
+    async fn finish(self: Box<Self>) -> BackendResult<()> {
         Ok(())
     }
 
@@ -571,6 +623,26 @@ mod tests {
 
         assert_eq!(read.len(), 32_768);
         assert_eq!(read.as_ref(), &content[..32_768]);
+    }
+
+    #[tokio::test]
+    async fn test_open_write_supports_random_access_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        let mut handle = backend.open_write("test.bin").await.unwrap();
+        handle
+            .write_at(4, Bytes::from_static(b"tail"))
+            .await
+            .unwrap();
+        handle
+            .write_at(0, Bytes::from_static(b"head"))
+            .await
+            .unwrap();
+        handle.finish().await.unwrap();
+
+        let read = backend.read_file("test.bin").await.unwrap();
+        assert_eq!(read.as_ref(), b"headtail");
     }
 
     #[tokio::test]
