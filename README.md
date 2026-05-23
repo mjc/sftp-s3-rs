@@ -267,6 +267,10 @@ Available subcommands:
 - `matrix`
 - `profile`
 - `heaptrack`
+- `list`
+- `show`
+- `mark-invalid`
+- `mark-valid`
 
 Common options include:
 
@@ -284,6 +288,9 @@ nix develop -c ./perf.sh local-stack --russh-ref main --russh-sftp-ref master
 nix develop -c ./perf.sh matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
 nix develop -c ./perf.sh profile --client bench --operation roundtrip --sizes 1024
 nix develop -c ./perf.sh heaptrack --client openssh --operation upload --sizes 1024
+nix develop -c ./perf.sh list --all
+nix develop -c ./perf.sh mark-invalid 1779548493-profile --reason "system busy"
+nix develop -c ./perf.sh show 1779548808-matrix
 ```
 
 Compatibility wrappers:
@@ -308,6 +315,9 @@ Results are written under `benchmark_results/runs/<run-id>/` with:
 
 The runner keeps stable cached build outputs under `.perf-cache/` and uses `sccache` automatically
 when available.
+Runs can be annotated with `--note` at creation time, marked invalid later with `mark-invalid`, and
+restored to comparison eligibility with `mark-valid`. Invalid runs are skipped automatically when the
+runner looks for the previous comparable result.
 
 Results below were measured on a Darwin arm64 Apple Silicon machine with the Rust benchmark client,
 the `benchmark` backend, and the 2x2 matrix:
@@ -350,31 +360,8 @@ Default transfer sizes are:
 1MiB, 32MiB, 256MiB, 1GiB, 10GiB, 50GiB, 100GiB
 ```
 
-Existing valid result JSON files are skipped, so interrupted runs can be resumed by running the same
-command again. Empty or malformed result files are treated as missing and rerun.
-
-Results are written under `benchmark_results/`:
-
-- `run-*.log` captures the full matrix output
-- `<size>mb-<scenario>-<config>.json` stores hyperfine JSON for each completed case
-- `server-<config>.log` captures server output for the most recent run of a config
-
-Large disk fixtures are created sparsely with `truncate`; the Rust benchmark client generates its
-payload in memory from the requested size. Transfer commands are not wrapped in a timeout, so large
-cases run until the client finishes or fails on its own.
-
-Benchmark dependency patches live in `benchmark_patches/`. The matrix applies matching patches to
-temporary dependency checkouts before building:
-
-```text
-benchmark_patches/<component>/all/*.patch
-benchmark_patches/<component>/<ref-name>/*.patch
-benchmark_patches/<component>/<matrix-label>/*.patch
-```
-
-Use `SFTP_BENCH_CHUNK_SIZE` to override the Rust client's request size. The default is `64KiB`, which
-keeps the Rust client compatible with older server refs that reject larger SFTP packets.
-Use `SFTP_BENCH_SIZES` as an environment alternative to `--sizes`.
+Use `--note` to annotate a run at creation time. Use `list`, `show`, `mark-invalid`, and
+`mark-valid` to manage historical runs under `benchmark_results/runs/`.
 ## Docker Deployment
 
 ### Quick Start
