@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -119,6 +120,7 @@ impl ServerConfig {
 
     /// Limit the maximum number of concurrent SSH connections.
     pub fn with_max_connections(mut self, max: usize) -> Self {
+        assert!(max > 0, "max_connections must be greater than zero");
         self.max_connections = Some(max);
         self
     }
@@ -211,12 +213,11 @@ impl ServerConfig {
         let key_str = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
             .unwrap();
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(CWD_KEY_PATH)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(CWD_KEY_PATH) {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(key_str.as_bytes()) {
                     warn!(

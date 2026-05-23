@@ -142,7 +142,6 @@ impl<B: Backend> ScpHandler<B> {
     ) -> Result<(), ScpError> {
         self.send_status(stream, SCP_OK, "").await?;
         let target_is_dir = target_path.ends_with('/')
-            || recursive
             || matches!(
                 self.backend.file_info(target_path).await,
                 Ok(info) if info.is_dir
@@ -174,12 +173,13 @@ impl<B: Backend> ScpHandler<B> {
             match buf[0] {
                 b'C' => {
                     let line = Self::read_line(stream).await?;
-                    let ScpMessage::File { size, name, .. } = Self::parse_file_message(&line)?
+                    let ScpMessage::File { mode, size, name } = Self::parse_file_message(&line)?
                     else {
                         unreachable!();
                     };
                     let file_path =
                         Self::receive_path(&base_dir, &dir_stack, &mut explicit_target, &name);
+                    let mode = Self::parse_mode_bits(&mode)?;
 
                     let mut handle = self
                         .backend
@@ -211,25 +211,24 @@ impl<B: Backend> ScpHandler<B> {
                         .await
                         .map_err(|e| ScpError::Backend(e.to_string()))?;
 
-                    Self::read_ack(stream).await?;
-
+                    let mut attrs = crate::backend::SetAttrs {
+                        permissions: Some(mode),
+                        ..Default::default()
+                    };
                     if preserve_times {
                         if let Some(times) = pending_times.take() {
-                            self.backend
-                                .set_attrs(
-                                    &file_path,
-                                    crate::backend::SetAttrs {
-                                        atime: Some(times.atime),
-                                        mtime: Some(times.mtime),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await
-                                .map_err(|e| ScpError::Backend(e.to_string()))?;
+                            attrs.atime = Some(times.atime);
+                            attrs.mtime = Some(times.mtime);
                         }
                     } else {
                         pending_times = None;
                     }
+                    self.backend
+                        .set_attrs(&file_path, attrs)
+                        .await
+                        .map_err(|e| ScpError::Backend(e.to_string()))?;
+
+                    Self::read_ack(stream).await?;
 
                     self.send_status(stream, SCP_OK, "").await?;
                 }
@@ -241,14 +240,25 @@ impl<B: Backend> ScpHandler<B> {
                     }
 
                     let line = Self::read_line(stream).await?;
-                    let ScpMessage::Dir { name, .. } = Self::parse_dir_message(&line)? else {
+                    let ScpMessage::Dir { mode, name } = Self::parse_dir_message(&line)? else {
                         unreachable!();
                     };
                     let dir_path =
                         Self::receive_path(&base_dir, &dir_stack, &mut explicit_target, &name);
+                    let mode = Self::parse_mode_bits(&mode)?;
 
                     self.backend
                         .make_dir(&dir_path)
+                        .await
+                        .map_err(|e| ScpError::Backend(e.to_string()))?;
+                    self.backend
+                        .set_attrs(
+                            &dir_path,
+                            crate::backend::SetAttrs {
+                                permissions: Some(mode),
+                                ..Default::default()
+                            },
+                        )
                         .await
                         .map_err(|e| ScpError::Backend(e.to_string()))?;
 
@@ -503,6 +513,11 @@ impl<B: Backend> ScpHandler<B> {
         } else {
             "/".to_string()
         }
+    }
+
+    fn parse_mode_bits(mode: &str) -> Result<u32, ScpError> {
+        u32::from_str_radix(mode, 8)
+            .map_err(|_| ScpError::Protocol(format!("invalid mode: {mode}")))
     }
 
     fn display_name(path: &str) -> Result<String, ScpError> {
@@ -1104,6 +1119,65 @@ mod tests {
         assert_eq!(
             backend.read_file("dst/nested/file.txt").await.unwrap(),
             bytes::Bytes::from_static(b"data")
+        );
+        assert_eq!(
+            backend.file_info("dst/nested").await.unwrap().permissions,
+            0o755
+        );
+        assert_eq!(
+            backend
+                .file_info("dst/nested/file.txt")
+                .await
+                .unwrap()
+                .permissions,
+            0o644
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_recursive_directory_uses_explicit_target_path() {
+        let (backend, mut handler) = make_backend_and_handler();
+        let (mut client, server) = duplex(8192);
+
+        let task = tokio::spawn(async move { handler.run(server, "scp -r -t /renamed").await });
+
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+
+        client.write_all(b"D0750 0 nested\n").await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+
+        client.write_all(b"C0600 4 file.txt\n").await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+        client.write_all(b"data").await.unwrap();
+        client.write_all(&[SCP_OK]).await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+
+        client.write_all(b"E\n").await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+        drop(client);
+
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            backend.read_file("renamed/file.txt").await.unwrap(),
+            bytes::Bytes::from_static(b"data")
+        );
+        assert_eq!(
+            backend.file_info("renamed").await.unwrap().permissions,
+            0o750
+        );
+        assert_eq!(
+            backend
+                .file_info("renamed/file.txt")
+                .await
+                .unwrap()
+                .permissions,
+            0o600
         );
     }
 

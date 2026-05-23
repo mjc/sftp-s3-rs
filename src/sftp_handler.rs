@@ -1,29 +1,16 @@
 use bytes::{Buf, Bytes};
 use std::fmt;
 
-#[cfg(not(feature = "sftp-master"))]
 type SftpHandle = Bytes;
-#[cfg(feature = "sftp-master")]
-type SftpHandle = String;
 
-#[cfg(not(feature = "sftp-master"))]
 type SftpWriteData = Bytes;
-#[cfg(feature = "sftp-master")]
-type SftpWriteData = Vec<u8>;
 
-#[cfg(not(feature = "sftp-master"))]
 fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
     h.as_ref()
 }
 
-#[cfg(feature = "sftp-master")]
-fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
-    h.as_bytes()
-}
-
 struct HandleForLog<'a>(&'a SftpHandle);
 
-#[cfg(not(feature = "sftp-master"))]
 impl fmt::Display for HandleForLog<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in handle_as_bytes(self.0) {
@@ -33,34 +20,12 @@ impl fmt::Display for HandleForLog<'_> {
     }
 }
 
-#[cfg(feature = "sftp-master")]
-impl fmt::Display for HandleForLog<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-#[cfg(not(feature = "sftp-master"))]
 fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
     data
 }
 
-#[cfg(feature = "sftp-master")]
-fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
-    Bytes::from(data)
-}
-
-#[cfg(not(feature = "sftp-master"))]
 fn sftp_data(id: u32, data: Bytes) -> Data {
     Data { id, data }
-}
-
-#[cfg(feature = "sftp-master")]
-fn sftp_data(id: u32, data: Bytes) -> Data {
-    Data {
-        id,
-        data: data.into(),
-    }
 }
 
 use crate::backend::{normalize_path, Backend, BackendError, FileInfo, FileKind, SetAttrs};
@@ -681,24 +646,12 @@ mod tests {
         SftpHandler::new(Arc::new(MemoryBackend::new()))
     }
 
-    #[cfg(not(feature = "sftp-master"))]
     fn to_sftp_handle(s: impl Into<Bytes>) -> SftpHandle {
         s.into()
     }
 
-    #[cfg(feature = "sftp-master")]
-    fn to_sftp_handle(s: impl Into<String>) -> SftpHandle {
-        s.into()
-    }
-
-    #[cfg(not(feature = "sftp-master"))]
     fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
         Bytes::from(v.into())
-    }
-
-    #[cfg(feature = "sftp-master")]
-    fn to_sftp_data(v: impl Into<Vec<u8>>) -> SftpWriteData {
-        v.into()
     }
 
     // Helper: init the SFTP session

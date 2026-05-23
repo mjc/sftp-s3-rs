@@ -5,6 +5,7 @@ use sftp_s3::{
     parse_cipher, BenchmarkBackend, LocalBackend, MemoryBackend, Server, ServerConfig,
     AVAILABLE_CIPHERS,
 };
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -106,7 +107,7 @@ struct Cli {
 
     /// Maximum concurrent SSH connections
     #[arg(long, env = "MAX_CONNECTIONS")]
-    max_connections: Option<usize>,
+    max_connections: Option<NonZeroUsize>,
 }
 
 /// Parse an OpenSSH public key line
@@ -225,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     if let Some(limit) = cli.max_connections {
-        config = config.with_max_connections(limit);
+        config = config.with_max_connections(limit.get());
         eprintln!("Max connections: {}", limit);
     }
 
