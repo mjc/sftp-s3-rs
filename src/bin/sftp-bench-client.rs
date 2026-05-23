@@ -6,10 +6,11 @@ use futures::FutureExt;
 use russh::{client, ChannelId, Preferred};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
+use serde::Serialize;
 use sftp_s3::{parse_cipher, AVAILABLE_CIPHERS};
 use std::borrow::Cow;
 use std::{
-    io,
+    fs, io,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -30,7 +31,8 @@ const MIB: u64 = 1024 * KIB;
 const DEFAULT_READ_DEPTH: usize = 64;
 const DEFAULT_WRITE_DEPTH: usize = 64;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum Operation {
     Upload,
     Download,
@@ -134,6 +136,10 @@ struct Cli {
     /// Path to a file containing the expected SSH host public key
     #[arg(long, env = "SFTP_BENCH_HOST_KEY_FILE")]
     host_key_file: Option<PathBuf>,
+
+    /// Write structured benchmark results to a JSON file
+    #[arg(long)]
+    json_output: Option<PathBuf>,
 }
 
 enum HostKeyVerifier {
@@ -176,6 +182,32 @@ impl IterationResult {
     }
 }
 
+#[derive(Serialize)]
+struct JsonIterationResult {
+    upload_seconds: Option<f64>,
+    download_seconds: Option<f64>,
+    total_seconds: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct JsonSummaryEntry {
+    label: &'static str,
+    bytes: u64,
+    average_seconds: f64,
+    average_mib_per_second: f64,
+    runs: usize,
+}
+
+#[derive(Serialize)]
+struct JsonOutput<'a> {
+    operation: Operation,
+    bytes: u64,
+    iterations: u64,
+    run_id: &'a str,
+    results: Vec<JsonIterationResult>,
+    summary: Vec<JsonSummaryEntry>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
@@ -211,7 +243,19 @@ async fn main() -> Result<(), BoxError> {
         Operation::Roundtrip => run_roundtrip_benchmark(&sftp, &cli, &payload, &run_id).await?,
     };
 
-    print_summary(&results, cli.size, cli.operation);
+    let summary = build_summary(&results, cli.size, cli.operation);
+    print_summary(&summary);
+    if let Some(path) = cli.json_output.as_ref() {
+        write_json_output(
+            path,
+            &results,
+            &summary,
+            cli.size,
+            cli.operation,
+            cli.iterations,
+            &run_id,
+        )?;
+    }
     sftp.close_session()
         .map_err(|error| boxed(format!("failed to close SFTP session: {error}")))?;
     Ok(())
@@ -593,46 +637,128 @@ fn print_iteration(
     println!();
 }
 
-fn print_summary(results: &[IterationResult], bytes: u64, operation: Operation) {
-    println!();
-    println!("summary:");
+fn build_summary(
+    results: &[IterationResult],
+    bytes: u64,
+    operation: Operation,
+) -> Vec<JsonSummaryEntry> {
+    let mut summary = Vec::new();
+    let mut push_average = |label: &'static str, bytes: u64, durations: Vec<Duration>| {
+        if let Some(entry) = average_entry(label, bytes, &durations) {
+            summary.push(entry);
+        }
+    };
 
     match operation {
         Operation::Upload => {
-            let durations = results.iter().filter_map(|result| result.upload);
-            print_average("upload", bytes, durations);
+            push_average(
+                "upload",
+                bytes,
+                results.iter().filter_map(|result| result.upload).collect(),
+            );
         }
         Operation::Download => {
-            let durations = results.iter().filter_map(|result| result.download);
-            print_average("download", bytes, durations);
+            push_average(
+                "download",
+                bytes,
+                results
+                    .iter()
+                    .filter_map(|result| result.download)
+                    .collect(),
+            );
         }
         Operation::Roundtrip => {
-            let uploads = results.iter().filter_map(|result| result.upload);
-            let downloads = results.iter().filter_map(|result| result.download);
-            let totals = results.iter().map(IterationResult::total);
-
-            print_average("upload", bytes, uploads);
-            print_average("download", bytes, downloads);
-            print_average("roundtrip", bytes * 2, totals);
+            push_average(
+                "upload",
+                bytes,
+                results.iter().filter_map(|result| result.upload).collect(),
+            );
+            push_average(
+                "download",
+                bytes,
+                results
+                    .iter()
+                    .filter_map(|result| result.download)
+                    .collect(),
+            );
+            push_average(
+                "roundtrip",
+                bytes * 2,
+                results.iter().map(IterationResult::total).collect(),
+            );
         }
+    }
+
+    summary
+}
+
+fn print_summary(summary: &[JsonSummaryEntry]) {
+    println!();
+    println!("summary:");
+    for entry in summary {
+        println!(
+            "{label:>9}: {:>10} avg over {} run(s), avg time {:.3}s",
+            format_rate(entry.bytes, Duration::from_secs_f64(entry.average_seconds)),
+            entry.runs,
+            entry.average_seconds,
+            label = entry.label,
+        );
     }
 }
 
-fn print_average(label: &str, bytes: u64, durations: impl Iterator<Item = Duration>) {
-    let durations = durations.collect::<Vec<_>>();
+fn average_entry(
+    label: &'static str,
+    bytes: u64,
+    durations: &[Duration],
+) -> Option<JsonSummaryEntry> {
     if durations.is_empty() {
-        return;
+        return None;
     }
 
     let total_secs = durations.iter().map(Duration::as_secs_f64).sum::<f64>();
     let average = Duration::from_secs_f64(total_secs / durations.len() as f64);
+    let mib = bytes as f64 / MIB as f64;
+    Some(JsonSummaryEntry {
+        label,
+        bytes,
+        average_seconds: average.as_secs_f64(),
+        average_mib_per_second: mib / average.as_secs_f64(),
+        runs: durations.len(),
+    })
+}
 
-    println!(
-        "{label:>9}: {:>10} avg over {} run(s), avg time {:.3}s",
-        format_rate(bytes, average),
-        durations.len(),
-        average.as_secs_f64()
-    );
+fn write_json_output(
+    path: &PathBuf,
+    results: &[IterationResult],
+    summary: &[JsonSummaryEntry],
+    bytes: u64,
+    operation: Operation,
+    iterations: u64,
+    run_id: &str,
+) -> Result<(), BoxError> {
+    let output = JsonOutput {
+        operation,
+        bytes,
+        iterations,
+        run_id,
+        results: results
+            .iter()
+            .map(|result| JsonIterationResult {
+                upload_seconds: result.upload.map(|elapsed| elapsed.as_secs_f64()),
+                download_seconds: result.download.map(|elapsed| elapsed.as_secs_f64()),
+                total_seconds: result.total().as_secs_f64(),
+            })
+            .collect(),
+        summary: summary.to_vec(),
+    };
+    let json = serde_json::to_vec_pretty(&output)
+        .map_err(|error| boxed(format!("failed to encode benchmark JSON: {error}")))?;
+    fs::write(path, json).map_err(|error| {
+        boxed(format!(
+            "failed to write benchmark JSON to {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn format_rate(bytes: u64, elapsed: Duration) -> String {

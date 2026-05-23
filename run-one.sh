@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single upload+download against an already-running server.
 # Hyperfine measures the wall time; no timing output here.
-# Usage: run-one.sh [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]
+# Usage: run-one.sh [--client openssh|bench] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]
 # client_source_dir: where client reads file from (default: dirname of testfile_path)
 
 CLIENT="openssh"
@@ -13,7 +13,7 @@ while [[ "${1:-}" == --* ]]; do
         --client)
             if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
                 echo "missing value for --client" >&2
-                echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
+                echo "Usage: $0 [--client openssh|bench] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
                 exit 2
             fi
             CLIENT=$2
@@ -22,7 +22,7 @@ while [[ "${1:-}" == --* ]]; do
         --ciphers)
             if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
                 echo "missing value for --ciphers" >&2
-                echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
+                echo "Usage: $0 [--client openssh|bench] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
                 exit 2
             fi
             CIPHERS=$2
@@ -40,7 +40,7 @@ while [[ "${1:-}" == --* ]]; do
 done
 
 [[ $# -ge 2 ]] || {
-    echo "usage: $0 [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
+    echo "usage: $0 [--client openssh|bench] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
     exit 2
 }
 
@@ -54,9 +54,12 @@ SFTPOPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Compres
 size_bytes=$(wc -c < "$TESTFILE" | tr -d '[:space:]')
 
 case "$CLIENT" in
-    openssh|rust) ;;
+    rust)
+        CLIENT="bench"
+        ;;
+    openssh|bench) ;;
     *)
-        echo "unknown benchmark client '$CLIENT' (expected openssh or rust)" >&2
+        echo "unknown benchmark client '$CLIENT' (expected openssh, bench, or rust)" >&2
         exit 2
         ;;
 esac
@@ -77,7 +80,7 @@ openssh_ciphers() {
     echo "${out[*]}"
 }
 
-if [[ "$CLIENT" == "rust" ]]; then
+if [[ "$CLIENT" == "bench" ]]; then
     RUST_CLIENT=${SFTP_BENCH_CLIENT_BIN:-"$SCRIPT_DIR/target/release/sftp-bench-client"}
     [[ -x "$RUST_CLIENT" ]] || {
         echo "Rust benchmark client not found at $RUST_CLIENT; set SFTP_BENCH_CLIENT_BIN or build it first" >&2

@@ -311,7 +311,7 @@ mod tests {
                             attrs: FileInfo::directory(),
                         },
                     ])),
-                    BackendRequest::Lstat { path } | BackendRequest::FileInfo { path } => {
+                    BackendRequest::FileInfo { path } => {
                         let files = files.lock().await;
                         let bytes = files.get(&path).ok_or(BackendError::NotFound)?;
                         Ok(BackendResponse::FileInfo(
