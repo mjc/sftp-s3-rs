@@ -141,6 +141,7 @@ impl<B: Backend> ScpHandler<B> {
         target_path: &str,
     ) -> Result<(), ScpError> {
         self.send_status(stream, SCP_OK, "").await?;
+        let can_set_attrs = self.backend.capabilities().set_attrs;
         let target_is_dir = target_path.ends_with('/')
             || matches!(
                 self.backend.file_info(target_path).await,
@@ -158,7 +159,7 @@ impl<B: Backend> ScpHandler<B> {
         };
         let mut pending_times: Option<PendingTimes> = None;
         let mut dir_stack: Vec<DirState> = Vec::new();
-        let preserve_times = preserve_times && self.backend.capabilities().set_attrs;
+        let preserve_times = preserve_times && can_set_attrs;
 
         loop {
             let mut buf = [0u8; 1];
@@ -223,10 +224,12 @@ impl<B: Backend> ScpHandler<B> {
                     } else {
                         pending_times = None;
                     }
-                    self.backend
-                        .set_attrs(&file_path, attrs)
-                        .await
-                        .map_err(|e| ScpError::Backend(e.to_string()))?;
+                    if can_set_attrs {
+                        self.backend
+                            .set_attrs(&file_path, attrs)
+                            .await
+                            .map_err(|e| ScpError::Backend(e.to_string()))?;
+                    }
 
                     Self::read_ack(stream).await?;
 
@@ -251,16 +254,18 @@ impl<B: Backend> ScpHandler<B> {
                         .make_dir(&dir_path)
                         .await
                         .map_err(|e| ScpError::Backend(e.to_string()))?;
-                    self.backend
-                        .set_attrs(
-                            &dir_path,
-                            crate::backend::SetAttrs {
-                                permissions: Some(mode),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(|e| ScpError::Backend(e.to_string()))?;
+                    if can_set_attrs {
+                        self.backend
+                            .set_attrs(
+                                &dir_path,
+                                crate::backend::SetAttrs {
+                                    permissions: Some(mode),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(|e| ScpError::Backend(e.to_string()))?;
+                    }
 
                     dir_stack.push(DirState {
                         path: dir_path,
@@ -748,9 +753,14 @@ pub enum ScpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Backend, MemoryBackend};
+    use crate::backend::{
+        Backend, BackendCapabilities, BackendRequest, BackendResponse, DelegatedBackend,
+        DelegatedBackendFn, MemoryBackend,
+    };
     use bytes::Bytes;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     fn make_handler() -> ScpHandler<MemoryBackend> {
@@ -765,6 +775,58 @@ mod tests {
 
     fn make_backend_and_handler() -> (Arc<MemoryBackend>, ScpHandler<MemoryBackend>) {
         make_handler_with_backend()
+    }
+
+    fn make_no_attrs_backend_and_handler() -> (DelegatedBackend, ScpHandler<DelegatedBackend>) {
+        let files = Arc::new(Mutex::new(HashMap::<String, Bytes>::new()));
+        let dirs = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let handler: DelegatedBackendFn = Arc::new({
+            let files = Arc::clone(&files);
+            let dirs = Arc::clone(&dirs);
+            move |request| {
+                let files = Arc::clone(&files);
+                let dirs = Arc::clone(&dirs);
+                Box::pin(async move {
+                    match request {
+                        BackendRequest::ReadFile { path } => files
+                            .lock()
+                            .unwrap()
+                            .get(&path)
+                            .cloned()
+                            .map(BackendResponse::Bytes)
+                            .ok_or(crate::backend::BackendError::NotFound),
+                        BackendRequest::WriteFile { path, content } => {
+                            files.lock().unwrap().insert(path, content);
+                            Ok(BackendResponse::Unit)
+                        }
+                        BackendRequest::MakeDir { path } => {
+                            dirs.lock().unwrap().insert(path);
+                            Ok(BackendResponse::Unit)
+                        }
+                        BackendRequest::ListDir { .. }
+                        | BackendRequest::FileInfo { .. }
+                        | BackendRequest::Lstat { .. }
+                        | BackendRequest::SetAttrs { .. } => {
+                            Err(crate::backend::BackendError::Unsupported)
+                        }
+                        other => Err(crate::backend::BackendError::Other(format!(
+                            "unexpected request: {other:?}"
+                        ))),
+                    }
+                })
+            }
+        });
+
+        let backend = DelegatedBackend::with_capabilities(
+            handler,
+            BackendCapabilities {
+                symlinks: false,
+                set_attrs: false,
+                delegated_safe_streaming_fallback: true,
+            },
+        );
+        let scp = ScpHandler::new(Arc::new(backend.clone()));
+        (backend, scp)
     }
 
     async fn read_line(stream: &mut DuplexStream) -> String {
@@ -1131,6 +1193,41 @@ mod tests {
                 .unwrap()
                 .permissions,
             0o644
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_recursive_directory_upload_skips_set_attrs_when_unsupported() {
+        let (backend, mut handler) = make_no_attrs_backend_and_handler();
+        let (mut client, server) = duplex(8192);
+
+        let task = tokio::spawn(async move { handler.run(server, "scp -r -t /dst/").await });
+
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+
+        client.write_all(b"D0755 0 nested\n").await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+
+        client.write_all(b"C0644 4 file.txt\n").await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+        client.write_all(b"data").await.unwrap();
+        client.write_all(&[SCP_OK]).await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+
+        client.write_all(b"E\n").await.unwrap();
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], SCP_OK);
+        drop(client);
+
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            backend.read_file("/dst/nested/file.txt").await.unwrap(),
+            bytes::Bytes::from_static(b"data")
         );
     }
 
