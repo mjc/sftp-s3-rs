@@ -1,4 +1,5 @@
 use bytes::{Buf, Bytes};
+use std::fmt;
 
 #[cfg(not(feature = "sftp-master"))]
 type SftpHandle = Bytes;
@@ -20,14 +21,23 @@ fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
     h.as_bytes()
 }
 
+struct HandleForLog<'a>(&'a SftpHandle);
+
 #[cfg(not(feature = "sftp-master"))]
-fn handle_for_log(h: &SftpHandle) -> String {
-    String::from_utf8_lossy(h).into_owned()
+impl fmt::Display for HandleForLog<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in handle_as_bytes(self.0) {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "sftp-master")]
-fn handle_for_log(h: &SftpHandle) -> &str {
-    h
+impl fmt::Display for HandleForLog<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
 }
 
 #[cfg(not(feature = "sftp-master"))]
@@ -163,7 +173,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(v)
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %handle_for_log(&handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
     async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
         let hb = handle_as_bytes(&handle);
         // If it's a write handle, finish it
@@ -201,7 +211,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %handle_for_log(&handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
     async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, Self::Error> {
         let hb = handle_as_bytes(&handle);
         let (path, read_done) = self.handles.get_dir_handle(hb).ok_or(StatusCode::Failure)?;
@@ -282,7 +292,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %handle_for_log(&handle)))]
+    #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
     async fn read(
         &mut self,
         id: u32,
@@ -300,7 +310,11 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         }
 
         let guard = read_handle.lock().await;
-        let data = guard.read_at(offset, len).await.map_err(StatusCode::from)?;
+        let data = if let Some(result) = guard.try_read_at(offset, len) {
+            result.map_err(StatusCode::from)?
+        } else {
+            guard.read_at(offset, len).await.map_err(StatusCode::from)?
+        };
 
         if data.is_empty() {
             return Err(StatusCode::Eof);
@@ -309,7 +323,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(sftp_data(id, data))
     }
 
-    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %handle_for_log(&handle), len = data.len()))]
+    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %HandleForLog(&handle), len = data.len()))]
     async fn write(
         &mut self,
         id: u32,
@@ -324,10 +338,15 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
 
         let mut guard = write_handle_arc.lock().await;
         if let Some(ref mut write_handle) = *guard {
-            write_handle
-                .write_at(offset, write_data_into_bytes(data))
-                .await
-                .map_err(StatusCode::from)?;
+            let data = write_data_into_bytes(data);
+            if let Some(result) = write_handle.try_write_at(offset, &data) {
+                result.map_err(StatusCode::from)?;
+            } else {
+                write_handle
+                    .write_at(offset, data)
+                    .await
+                    .map_err(StatusCode::from)?;
+            }
         } else {
             return Err(StatusCode::Failure);
         }
