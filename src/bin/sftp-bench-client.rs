@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use futures::future::try_join_all;
+use futures::future::{try_join_all, BoxFuture};
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
 use russh::{client, ChannelId, Preferred};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
@@ -9,11 +10,20 @@ use sftp_s3::{parse_cipher, AVAILABLE_CIPHERS};
 use std::borrow::Cow;
 use std::{
     io,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type PendingRead = BoxFuture<
+    'static,
+    (
+        u64,
+        u32,
+        Result<russh_sftp::protocol::Data, russh_sftp::client::error::Error>,
+    ),
+>;
 
 const KIB: u64 = 1024;
 const MIB: u64 = 1024 * KIB;
@@ -112,18 +122,36 @@ struct Cli {
     /// Available: aes256-gcm, aes128-ctr, aes256-ctr, chacha20-poly1305
     #[arg(long, env = "SFTP_BENCH_CIPHERS", value_delimiter = ',')]
     ciphers: Option<Vec<String>>,
+
+    /// Accept any SSH host key without verification
+    #[arg(long, env = "SFTP_BENCH_INSECURE")]
+    insecure: bool,
+
+    /// Expected SSH host public key (OpenSSH public-key line or base64 body)
+    #[arg(long, env = "SFTP_BENCH_HOST_KEY")]
+    host_key: Option<String>,
+
+    /// Path to a file containing the expected SSH host public key
+    #[arg(long, env = "SFTP_BENCH_HOST_KEY_FILE")]
+    host_key_file: Option<PathBuf>,
 }
 
-struct AcceptAnyServerKey;
+enum HostKeyVerifier {
+    Insecure,
+    Pinned(russh::keys::PublicKey),
+}
 
-impl client::Handler for AcceptAnyServerKey {
+impl client::Handler for HostKeyVerifier {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        Ok(match self {
+            Self::Insecure => true,
+            Self::Pinned(expected) => server_public_key == expected,
+        })
     }
 
     async fn data(
@@ -201,7 +229,7 @@ async fn connect_sftp(addr: &str, cli: &Cli) -> Result<RawSftpSession, BoxError>
         config.preferred = preferred;
     }
 
-    let mut session = client::connect(Arc::new(config), addr, AcceptAnyServerKey)
+    let mut session = client::connect(Arc::new(config), addr, build_host_key_verifier(cli)?)
         .await
         .map_err(|error| boxed(format!("failed to connect to {addr}: {error}")))?;
 
@@ -436,24 +464,59 @@ async fn download_path(
         .map_err(|error| boxed(format!("failed to open {path}: {error}")))?
         .handle;
     let mut next_offset = 0_u64;
-    let mut reads = FuturesUnordered::new();
+    let mut reads: FuturesUnordered<PendingRead> = FuturesUnordered::new();
     let read_depth = read_depth.max(1);
     let chunk_size = chunk_size.min(u32::MAX as usize);
+    let mut bytes_received = 0_u64;
 
     while next_offset < file_size || !reads.is_empty() {
         while next_offset < file_size && reads.len() < read_depth {
+            let request_offset = next_offset;
             let len = (file_size - next_offset).min(chunk_size as u64) as u32;
-            reads.push(sftp.read_bytes(handle.clone(), next_offset, len));
+            let handle = handle.clone();
+            let sftp = Arc::clone(sftp);
+            reads.push(
+                async move {
+                    let data = sftp.read_bytes(handle, request_offset, len).await;
+                    (request_offset, len, data)
+                }
+                .boxed(),
+            );
             next_offset += u64::from(len);
         }
 
-        if let Some(result) = reads.next().await {
+        if let Some((offset, requested_len, result)) = reads.next().await {
             let data =
                 result.map_err(|error| boxed(format!("failed to read remote file: {error}")))?;
-            if data.data.is_empty() {
-                break;
+            let actual_len =
+                u32::try_from(data.data.len()).map_err(|_| boxed("read chunk length overflow"))?;
+            if actual_len == 0 {
+                return Err(boxed(format!(
+                    "unexpected EOF while reading {path} at offset {offset}"
+                )));
+            }
+
+            bytes_received += u64::from(actual_len);
+            if actual_len < requested_len {
+                let retry_offset = offset + u64::from(actual_len);
+                let retry_len = requested_len - actual_len;
+                let handle = handle.clone();
+                let sftp = Arc::clone(sftp);
+                reads.push(
+                    async move {
+                        let data = sftp.read_bytes(handle, retry_offset, retry_len).await;
+                        (retry_offset, retry_len, data)
+                    }
+                    .boxed(),
+                );
             }
         }
+    }
+
+    if bytes_received != file_size {
+        return Err(boxed(format!(
+            "short read for {path}: expected {file_size} bytes, got {bytes_received}"
+        )));
     }
 
     sftp.close_bytes(handle)
@@ -628,8 +691,53 @@ fn validate_cli(cli: &Cli) -> Result<(), BoxError> {
     if cli.size > usize::MAX as u64 {
         return Err(boxed("--size is too large for this platform"));
     }
+    if cli.insecure && (cli.host_key.is_some() || cli.host_key_file.is_some()) {
+        return Err(boxed(
+            "--insecure cannot be combined with --host-key or --host-key-file",
+        ));
+    }
+    if !cli.insecure && cli.host_key.is_none() && cli.host_key_file.is_none() {
+        return Err(boxed(
+            "provide --host-key/--host-key-file or pass --insecure for local benchmarking",
+        ));
+    }
 
     Ok(())
+}
+
+fn build_host_key_verifier(cli: &Cli) -> Result<HostKeyVerifier, BoxError> {
+    if cli.insecure {
+        return Ok(HostKeyVerifier::Insecure);
+    }
+
+    let raw = if let Some(host_key) = cli.host_key.as_deref() {
+        host_key.to_owned()
+    } else if let Some(path) = cli.host_key_file.as_ref() {
+        std::fs::read_to_string(path).map_err(|error| {
+            boxed(format!(
+                "failed to read host key file {}: {error}",
+                path.display()
+            ))
+        })?
+    } else {
+        return Err(boxed("missing host key configuration"));
+    };
+
+    let key = parse_public_key(&raw).ok_or_else(|| boxed("failed to parse SSH host public key"))?;
+    Ok(HostKeyVerifier::Pinned(key))
+}
+
+fn parse_public_key(raw: &str) -> Option<russh::keys::PublicKey> {
+    raw.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let encoded = if parts.len() >= 2 { parts[1] } else { parts[0] };
+        russh::keys::parse_public_key_base64(encoded).ok()
+    })
 }
 
 fn parse_ciphers(cipher_names: &[String]) -> Result<Vec<russh::cipher::Name>, BoxError> {

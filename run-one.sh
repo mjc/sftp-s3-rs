@@ -11,12 +11,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --client)
-            [[ $# -ge 2 ]] || { echo "missing value for --client" >&2; exit 2; }
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                echo "missing value for --client" >&2
+                echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
+                exit 2
+            fi
             CLIENT=$2
             shift 2
             ;;
         --ciphers)
-            [[ $# -ge 2 ]] || { echo "missing value for --ciphers" >&2; exit 2; }
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                echo "missing value for --ciphers" >&2
+                echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] <port> <testfile_path> [client_source_dir]" >&2
+                exit 2
+            fi
             CIPHERS=$2
             shift 2
             ;;
@@ -85,6 +93,7 @@ if [[ "$CLIENT" == "rust" ]]; then
         --size "${size_bytes}B" \
         --iterations 1 \
         --chunk-size "$RUST_CHUNK_SIZE" \
+        --insecure \
     )
     if [[ -n "$CIPHERS" ]]; then
         RUST_ARGS+=(--ciphers "$CIPHERS")

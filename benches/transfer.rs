@@ -35,10 +35,7 @@ fn bench_streaming_write(c: &mut Criterion) {
                 while offset < size as u64 {
                     let write_size = std::cmp::min(CHUNK_SIZE as u64, size as u64 - offset);
                     handle
-                        .write_at(
-                            offset,
-                            Bytes::copy_from_slice(&chunk[..write_size as usize]),
-                        )
+                        .write_at(offset, chunk.slice(..write_size as usize))
                         .await
                         .unwrap();
                     offset += write_size;
@@ -120,10 +117,7 @@ fn bench_roundtrip(c: &mut Criterion) {
                 while offset < size as u64 {
                     let write_size = std::cmp::min(CHUNK_SIZE as u64, size as u64 - offset);
                     write_handle
-                        .write_at(
-                            offset,
-                            Bytes::copy_from_slice(&chunk[..write_size as usize]),
-                        )
+                        .write_at(offset, chunk.slice(..write_size as usize))
                         .await
                         .unwrap();
                     offset += write_size;
