@@ -35,7 +35,11 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --client)
-            [[ $# -ge 2 ]] || { echo "missing value for --client" >&2; exit 2; }
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                echo "missing value for --client" >&2
+                echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] [--sizes mb1,mb2,...]" >&2
+                exit 2
+            fi
             BENCH_CLIENT=$2
             shift 2
             ;;
@@ -44,7 +48,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --ciphers)
-            [[ $# -ge 2 ]] || { echo "missing value for --ciphers" >&2; exit 2; }
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                echo "missing value for --ciphers" >&2
+                echo "Usage: $0 [--client openssh|rust] [--ciphers c1,c2] [--sizes mb1,mb2,...]" >&2
+                exit 2
+            fi
             BENCH_CIPHERS=$2
             shift 2
             ;;
@@ -435,13 +443,31 @@ start_server() {
     case "$backend" in
         local)
             local root="/tmp/sftp-bench-root-$label"
+            local cmd=(
+                "$BINS_DIR/sftp-s3-$label"
+                --port "$port"
+                --authorized-keys-file "$BENCH_AUTHORIZED_KEYS"
+                --user benchmark:benchmark
+            )
+            if [[ -n "$BENCH_CIPHERS" ]]; then
+                cmd+=(--ciphers "$BENCH_CIPHERS")
+            fi
+            cmd+=(--backend local --root "$root")
             mkdir -p "$root"
-            "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend local --root "$root" \
-                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+            "${cmd[@]}" >"$RESULTS_DIR/server-$label.log" 2>&1 &
             ;;
         memory|benchmark)
-            "$BINS_DIR/sftp-s3-$label" --port "$port" --authorized-keys-file "$BENCH_AUTHORIZED_KEYS" --user benchmark:benchmark ${BENCH_CIPHERS:+--ciphers "$BENCH_CIPHERS"} --backend "$backend" \
-                >"$RESULTS_DIR/server-$label.log" 2>&1 &
+            local cmd=(
+                "$BINS_DIR/sftp-s3-$label"
+                --port "$port"
+                --authorized-keys-file "$BENCH_AUTHORIZED_KEYS"
+                --user benchmark:benchmark
+            )
+            if [[ -n "$BENCH_CIPHERS" ]]; then
+                cmd+=(--ciphers "$BENCH_CIPHERS")
+            fi
+            cmd+=(--backend "$backend")
+            "${cmd[@]}" >"$RESULTS_DIR/server-$label.log" 2>&1 &
             ;;
         *)
             echo "ERROR: unknown benchmark backend '$backend' for $label" >&2

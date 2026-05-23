@@ -555,7 +555,7 @@ fn print_timeline(report: &Report, buckets: usize) {
             .get(tid)
             .map(|comm| report.symbol(*comm))
             .unwrap_or("?");
-        let label = if name.len() > 10 { &name[..10] } else { name };
+        let label = name.chars().take(10).collect::<String>();
         print!("  {:>10}", label);
     }
     println!("  Top function");
@@ -816,10 +816,10 @@ fn categorize(name: &str) -> &'static str {
     "Other"
 }
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
     } else {
-        s.get(..max).unwrap_or(s)
+        s.chars().take(max).collect()
     }
 }

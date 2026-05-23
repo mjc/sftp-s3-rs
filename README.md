@@ -221,6 +221,7 @@ overhead without relying on SFTP glob expansion.
 |----------|-------|---------|--------|-----------------|---------------|-----------|--------------------|------------------|--------------|--------|
 | varied small files | 10,251 | 1GiB upload + 1GiB download | default OpenSSH | 224.0 MB/s | 2,242.7 files/s | 9.142s +/- 0.189s | 269.0 MB/s | 2,692.8 files/s | 7.614s +/- 0.126s | +20.1% |
 | varied small files | 10,251 | 1GiB upload + 1GiB download | aes256-gcm | 256.1 MB/s | 2,563.4 files/s | 7.998s +/- 0.131s | 334.6 MB/s | 3,349.8 files/s | 6.120s +/- 0.077s | +30.7% |
+
 ## Benchmark Client
 
 The `sftp-bench-client` binary is a Rust SFTP client for measuring this server without relying on
