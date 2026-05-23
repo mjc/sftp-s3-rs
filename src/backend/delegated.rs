@@ -13,6 +13,9 @@ pub enum BackendRequest {
     ListDir {
         path: String,
     },
+    Lstat {
+        path: String,
+    },
     FileInfo {
         path: String,
     },
@@ -70,11 +73,29 @@ pub type DelegatedBackendFn = Arc<
 #[derive(Clone)]
 pub struct DelegatedBackend {
     handler: DelegatedBackendFn,
+    capabilities: super::BackendCapabilities,
 }
 
 impl DelegatedBackend {
     pub fn new(handler: DelegatedBackendFn) -> Self {
-        Self { handler }
+        Self {
+            handler,
+            capabilities: super::BackendCapabilities {
+                symlinks: true,
+                set_attrs: true,
+                delegated_safe_streaming_fallback: true,
+            },
+        }
+    }
+
+    pub fn with_capabilities(
+        handler: DelegatedBackendFn,
+        capabilities: super::BackendCapabilities,
+    ) -> Self {
+        Self {
+            handler,
+            capabilities,
+        }
     }
 
     async fn call(&self, request: BackendRequest) -> BackendResult<BackendResponse> {
@@ -84,6 +105,10 @@ impl DelegatedBackend {
 
 #[async_trait]
 impl Backend for DelegatedBackend {
+    fn capabilities(&self) -> super::BackendCapabilities {
+        self.capabilities
+    }
+
     async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
         match self
             .call(BackendRequest::ListDir {
@@ -94,6 +119,20 @@ impl Backend for DelegatedBackend {
             BackendResponse::DirEntries(entries) => Ok(entries),
             other => Err(super::BackendError::Other(format!(
                 "delegated backend returned unexpected response for list_dir: {other:?}"
+            ))),
+        }
+    }
+
+    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
+        match self
+            .call(BackendRequest::Lstat {
+                path: path.to_string(),
+            })
+            .await?
+        {
+            BackendResponse::FileInfo(info) => Ok(info),
+            other => Err(super::BackendError::Other(format!(
+                "delegated backend returned unexpected response for lstat: {other:?}"
             ))),
         }
     }
@@ -289,7 +328,7 @@ mod tests {
                             attrs: FileInfo::directory(),
                         },
                     ])),
-                    BackendRequest::FileInfo { path } => {
+                    BackendRequest::Lstat { path } | BackendRequest::FileInfo { path } => {
                         let files = files.lock().await;
                         let bytes = files.get(&path).ok_or(BackendError::NotFound)?;
                         Ok(BackendResponse::FileInfo(
@@ -373,6 +412,9 @@ mod tests {
                 Box::pin(async move {
                     requests.lock().await.push(request.clone());
                     match request {
+                        BackendRequest::Lstat { .. } => {
+                            Ok(BackendResponse::FileInfo(FileInfo::symlink(10)))
+                        }
                         BackendRequest::ReadLink { .. } => {
                             Ok(BackendResponse::Path("target.txt".into()))
                         }
@@ -395,6 +437,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let lstat = backend.lstat("link.txt").await.unwrap();
 
         let requests = requests.lock().await;
         assert!(requests.iter().any(|request| matches!(
@@ -407,6 +450,9 @@ mod tests {
             BackendRequest::SetAttrs { path, attrs }
             if path == "link.txt" && attrs.permissions == Some(0o777)
         )));
+        assert!(backend.capabilities().symlinks);
+        assert!(backend.capabilities().set_attrs);
+        assert_eq!(lstat.kind, FileKind::Symlink);
     }
 
     #[tokio::test]
@@ -434,6 +480,9 @@ mod tests {
                             attrs: FileInfo::file(4),
                         },
                     ])),
+                    BackendRequest::Lstat { .. } => {
+                        Ok(BackendResponse::FileInfo(FileInfo::symlink(4)))
+                    }
                     BackendRequest::ReadFile { .. } => {
                         Ok(BackendResponse::Bytes(Bytes::from_static(b"data")))
                     }

@@ -82,18 +82,21 @@ impl LocalBackend {
         Ok(())
     }
 
-    fn validate_symlink_target(&self, linkpath: &Path, targetpath: &str) -> BackendResult<()> {
+    fn resolve_symlink_target_path(
+        &self,
+        linkpath: &Path,
+        targetpath: &str,
+    ) -> BackendResult<PathBuf> {
         let target = Path::new(targetpath);
         let mut resolved = if target.is_absolute() {
             if !target.starts_with(&self.root) {
                 return Err(BackendError::PermissionDenied);
             }
-            target.to_path_buf()
+            self.root.clone()
         } else {
             linkpath
                 .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| self.root.clone())
+                .map_or_else(|| self.root.clone(), Path::to_path_buf)
         };
 
         for component in target.components() {
@@ -101,7 +104,7 @@ impl LocalBackend {
                 Component::Normal(part) => resolved.push(part),
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    if !resolved.pop() || !resolved.starts_with(&self.root) {
+                    if resolved == self.root || !resolved.pop() {
                         return Err(BackendError::PermissionDenied);
                     }
                 }
@@ -116,7 +119,7 @@ impl LocalBackend {
             return Err(BackendError::PermissionDenied);
         }
 
-        Ok(())
+        Ok(resolved)
     }
 
     /// Convert `std::io::Error` to `BackendError`.
@@ -347,8 +350,9 @@ impl Backend for LocalBackend {
         let linkpath = self.full_path(&normalize_path(linkpath))?;
         self.validate_symlink_target(&linkpath, targetpath)?;
         let targetpath_owned = targetpath.to_string();
+        let _ = self.resolve_symlink_target_path(&linkpath, &targetpath_owned)?;
         #[cfg(windows)]
-        let target_exists_path = self.full_path(&normalize_path(targetpath))?;
+        let target_exists_path = self.resolve_symlink_target_path(&linkpath, &targetpath_owned)?;
 
         tokio::task::spawn_blocking(move || {
             #[cfg(unix)]
@@ -377,6 +381,11 @@ impl Backend for LocalBackend {
         let normalized = normalize_path(path);
         let full_path = self.full_path(&normalized)?;
         let lstat = self.lstat_path(normalized.as_ref()).await?;
+
+        #[cfg(not(unix))]
+        if attrs.uid.is_some() || attrs.gid.is_some() {
+            return Err(BackendError::Unsupported);
+        }
 
         if lstat.kind == FileKind::Symlink {
             return Err(BackendError::Unsupported);
@@ -814,22 +823,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_symlink_rejects_absolute_target_outside_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let backend = LocalBackend::new(temp.path());
+    async fn test_symlink_rejects_targets_that_escape_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
 
-        let result = backend.symlink("link.txt", "/etc/passwd").await;
-        assert!(matches!(result, Err(BackendError::PermissionDenied)));
-    }
+        let absolute = backend.symlink("abs-link", "/etc/passwd").await;
+        let traversal = backend.symlink("rel-link", "../../etc/passwd").await;
 
-    #[tokio::test]
-    async fn test_symlink_rejects_relative_target_outside_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let backend = LocalBackend::new(temp.path());
-        backend.make_dir("dir").await.unwrap();
-
-        let result = backend.symlink("dir/link.txt", "../../escape").await;
-        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+        assert!(matches!(absolute, Err(BackendError::PermissionDenied)));
+        assert!(matches!(traversal, Err(BackendError::PermissionDenied)));
     }
 
     #[tokio::test]

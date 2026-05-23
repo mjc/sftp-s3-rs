@@ -418,6 +418,11 @@ impl Backend for MemoryBackend {
         }
 
         let src_prefix = format!("{src}/");
+        if dst != src && dst.starts_with(&src_prefix) {
+            return Err(BackendError::Other(
+                "cannot rename a directory into its own subtree".into(),
+            ));
+        }
         let mut moved = Vec::new();
         for key in entries.keys() {
             if key == &src || key.starts_with(&src_prefix) {
@@ -493,8 +498,15 @@ impl Backend for MemoryBackend {
         let linkpath = normalize_path(linkpath).into_owned();
         let mut entries = self.entries.write();
 
-        if Self::dir_exists(&entries, &linkpath) {
+        if matches!(
+            entries.get(linkpath.as_str()),
+            Some(EntryData::DirMarker { .. })
+        ) || Self::has_descendants(&entries, &linkpath)
+        {
             return Err(BackendError::IsADirectory);
+        }
+        if entries.contains_key(linkpath.as_str()) {
+            return Err(BackendError::AlreadyExists);
         }
 
         entries.insert(
