@@ -110,7 +110,15 @@ impl Backend for BenchmarkBackend {
         }
 
         let files = self.files.read();
-        let mut entries = Vec::with_capacity(files.len());
+        let mut entries = Vec::with_capacity(files.len() + 2);
+        entries.push(DirEntry {
+            name: ".".to_string(),
+            attrs: FileInfo::directory(),
+        });
+        entries.push(DirEntry {
+            name: "..".to_string(),
+            attrs: FileInfo::directory(),
+        });
         for (path, entry) in files.iter() {
             if !path.contains('/') {
                 entries.push(DirEntry {
@@ -318,5 +326,26 @@ mod tests {
 
         let info = backend.file_info("sparse.bin").await.unwrap();
         assert_eq!(info.size, 4097);
+    }
+
+    #[tokio::test]
+    async fn benchmark_backend_list_dir_includes_dot_entries() {
+        let backend = BenchmarkBackend::new();
+        backend
+            .write_file("file.bin", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+
+        let entries = backend.list_dir("").await.unwrap();
+        assert_eq!(entries[0].name, ".");
+        assert_eq!(entries[1].name, "..");
+        assert!(entries.iter().any(|entry| entry.name == "file.bin"));
+    }
+
+    #[tokio::test]
+    async fn benchmark_backend_delete_missing_file_returns_not_found() {
+        let backend = BenchmarkBackend::new();
+        let result = backend.delete("missing.bin").await;
+        assert!(matches!(result, Err(BackendError::NotFound)));
     }
 }
