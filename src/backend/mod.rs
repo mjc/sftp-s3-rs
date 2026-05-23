@@ -145,6 +145,12 @@ impl FileInfo {
 /// Handle for reading file data in chunks
 #[async_trait]
 pub trait ReadHandle: Send + Sync {
+    /// Fast path for handles that can satisfy the read synchronously without
+    /// constructing the boxed `async_trait` future.
+    fn try_read_at(&self, _offset: u64, _len: u32) -> Option<BackendResult<Bytes>> {
+        None
+    }
+
     /// Read data at the given offset
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes>;
 
@@ -155,6 +161,12 @@ pub trait ReadHandle: Send + Sync {
 /// Handle for writing file data in chunks (supports streaming uploads)
 #[async_trait]
 pub trait WriteHandle: Send {
+    /// Fast path for handles that can accept a write synchronously without
+    /// constructing the boxed `async_trait` future.
+    fn try_write_at(&mut self, _offset: u64, _data: &Bytes) -> Option<BackendResult<()>> {
+        None
+    }
+
     /// Write data at the given offset. Takes Bytes to support zero-copy passing
     /// from the SFTP protocol layer, avoiding unnecessary copies in the hot path.
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()>;
@@ -179,6 +191,23 @@ impl BufferedReadHandle {
 
 #[async_trait]
 impl ReadHandle for BufferedReadHandle {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+        let start = match usize::try_from(offset) {
+            Ok(start) => start,
+            Err(_) => {
+                return Some(Err(BackendError::Other(
+                    "read offset too large for this platform".into(),
+                )));
+            }
+        };
+        if start >= self.content.len() {
+            return Some(Ok(Bytes::new()));
+        }
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        let end = std::cmp::min(start.saturating_add(len), self.content.len());
+        Some(Ok(self.content.slice(start..end)))
+    }
+
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
         let start = usize::try_from(offset)
             .map_err(|_| BackendError::Other("read offset too large for this platform".into()))?;

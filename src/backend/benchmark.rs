@@ -208,6 +208,18 @@ struct BenchmarkReadHandle {
 
 #[async_trait]
 impl ReadHandle for BenchmarkReadHandle {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+        if offset >= self.size {
+            return Some(Ok(Bytes::new()));
+        }
+        let len = (self.size - offset).min(u64::from(len)) as usize;
+        if len <= STATIC_ZERO_READ_CHUNK.len() {
+            Some(Ok(Bytes::from_static(&STATIC_ZERO_READ_CHUNK[..len])))
+        } else {
+            Some(Ok(Bytes::from(vec![0; len])))
+        }
+    }
+
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
         if offset >= self.size {
             return Ok(Bytes::new());
@@ -233,6 +245,19 @@ struct BenchmarkWriteHandle {
 
 #[async_trait]
 impl WriteHandle for BenchmarkWriteHandle {
+    fn try_write_at(&mut self, offset: u64, data: &Bytes) -> Option<BackendResult<()>> {
+        let end = match offset.checked_add(data.len() as u64) {
+            Some(end) => end,
+            None => {
+                return Some(Err(BackendError::Other(
+                    "benchmark write length overflow".to_owned(),
+                )));
+            }
+        };
+        self.size = self.size.max(end);
+        Some(Ok(()))
+    }
+
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
         let end = offset
             .checked_add(data.len() as u64)
