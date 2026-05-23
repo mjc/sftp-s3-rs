@@ -13,9 +13,6 @@ pub enum BackendRequest {
     ListDir {
         path: String,
     },
-    Lstat {
-        path: String,
-    },
     FileInfo {
         path: String,
     },
@@ -119,20 +116,6 @@ impl Backend for DelegatedBackend {
             BackendResponse::DirEntries(entries) => Ok(entries),
             other => Err(super::BackendError::Other(format!(
                 "delegated backend returned unexpected response for list_dir: {other:?}"
-            ))),
-        }
-    }
-
-    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
-        match self
-            .call(BackendRequest::Lstat {
-                path: path.to_string(),
-            })
-            .await?
-        {
-            BackendResponse::FileInfo(info) => Ok(info),
-            other => Err(super::BackendError::Other(format!(
-                "delegated backend returned unexpected response for lstat: {other:?}"
             ))),
         }
     }

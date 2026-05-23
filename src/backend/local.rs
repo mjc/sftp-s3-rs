@@ -122,6 +122,11 @@ impl LocalBackend {
         Ok(resolved)
     }
 
+    fn validate_symlink_target(&self, linkpath: &Path, targetpath: &str) -> BackendResult<()> {
+        let _ = self.resolve_symlink_target_path(linkpath, targetpath)?;
+        Ok(())
+    }
+
     /// Convert `std::io::Error` to `BackendError`.
     fn map_io_error(err: std::io::Error) -> BackendError {
         match err.kind() {
