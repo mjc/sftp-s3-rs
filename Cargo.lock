@@ -1468,7 +1468,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2020,7 +2020,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2602,7 +2602,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#427b17e5b670d4ae36a564546449a9d66dcfaeda"
+source = "git+https://github.com/mjc/russh.git?rev=2d200e5154c27691172905f6fa80e0af28b3b075#2d200e5154c27691172905f6fa80e0af28b3b075"
 dependencies = [
  "base16ct 1.0.0",
  "byteorder",
@@ -3102,7 +3102,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#427b17e5b670d4ae36a564546449a9d66dcfaeda"
+source = "git+https://github.com/mjc/russh.git?rev=2d200e5154c27691172905f6fa80e0af28b3b075#2d200e5154c27691172905f6fa80e0af28b3b075"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3172,7 +3172,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#427b17e5b670d4ae36a564546449a9d66dcfaeda"
+source = "git+https://github.com/mjc/russh.git?rev=2d200e5154c27691172905f6fa80e0af28b3b075#2d200e5154c27691172905f6fa80e0af28b3b075"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -3200,7 +3200,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#427b17e5b670d4ae36a564546449a9d66dcfaeda"
+source = "git+https://github.com/mjc/russh.git?rev=2d200e5154c27691172905f6fa80e0af28b3b075#2d200e5154c27691172905f6fa80e0af28b3b075"
 dependencies = [
  "chrono",
  "tokio",
@@ -3248,7 +3248,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3812,7 +3812,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4342,7 +4342,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
