@@ -120,9 +120,13 @@ struct SmallFilesArgs {
     #[arg(long)]
     warmup: Option<u32>,
 
-    /// Preferred OpenSSH cipher list
+    /// Preferred cipher list
     #[arg(long, default_value = "aes256-gcm")]
     ciphers: Option<String>,
+
+    /// Client implementation to drive the benchmark
+    #[arg(long, value_enum, default_value_t = ClientKind::Bench)]
+    client: ClientKind,
 
     /// Benchmark backend to use
     #[arg(long, value_enum, default_value_t = BackendKind::Benchmark)]
@@ -147,6 +151,14 @@ struct SmallFilesArgs {
     /// OpenSSH sftp transfer buffer size in bytes (-B)
     #[arg(long)]
     sftp_buffer_size: Option<usize>,
+
+    /// Chunk size passed to the Rust benchmark client
+    #[arg(long, default_value = "64KiB")]
+    chunk_size: String,
+
+    /// Number of files the Rust benchmark client processes concurrently
+    #[arg(long, default_value_t = 1)]
+    file_depth: usize,
 
     /// Disable sccache even if present
     #[arg(long)]
@@ -897,12 +909,16 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
     };
     let plan = make_build_plan(ctx, &target)?;
     let total_bytes = mib_to_bytes(args.total_size_mb)?;
-    let file_paths = ensure_small_files_fixture(&ctx.cache_root, args.total_size_mb, args.files)?;
+    let file_paths = if args.client == ClientKind::Openssh {
+        ensure_small_files_fixture(&ctx.cache_root, args.total_size_mb, args.files)?
+    } else {
+        Vec::new()
+    };
     let comparison_key = format!(
         "{};files={}",
         make_comparison_key(
             "small-files",
-            ClientKind::Openssh,
+            args.client,
             args.backend,
             args.ciphers.as_deref(),
             &[args.total_size_mb],
@@ -918,7 +934,7 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
         run_id: run_id.clone(),
         timestamp_unix: unix_now()?,
         mode: mode.to_string(),
-        client: ClientKind::Openssh,
+        client: args.client,
         backend: args.backend,
         ciphers: args.ciphers.clone(),
         sizes_mb: vec![args.total_size_mb],
@@ -935,6 +951,11 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
     };
     write_json(run_dir.join("manifest.json"), &manifest)?;
 
+    let bench_client_bin = if args.client == ClientKind::Bench {
+        Some(build_bench_client(ctx, args.no_sccache)?)
+    } else {
+        None
+    };
     let server_binary = build_server(ctx, &plan, args.no_sccache, profile_mode)?;
     let server_log = run_dir.join("server-current-small-files.log");
     let port = pick_free_port()?;
@@ -947,38 +968,53 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
         profile_mode,
         999,
         &artifact_dir,
-        "current-small-files-openssh",
+        &format!("current-small-files-{}", client_name(args.client)),
     )?;
     wait_for_server(port, &ctx.keys.private_key, &args.ciphers)?;
 
     let warmup = args.warmup.unwrap_or(if args.profile { 0 } else { 2 });
     let runs = args.runs.unwrap_or(if args.profile { 1 } else { 10 });
-    for iteration in 0..warmup {
-        let _ = run_small_files_iteration(
-            port,
-            &ctx.keys,
-            args.ciphers.as_deref(),
-            args.sftp_requests,
-            args.sftp_buffer_size,
-            &file_paths,
-            &artifact_dir,
-            &format!("warmup-{iteration}"),
-        )?;
-    }
+    let iterations = match args.client {
+        ClientKind::Openssh => {
+            for iteration in 0..warmup {
+                let _ = run_small_files_iteration(
+                    port,
+                    &ctx.keys,
+                    args.ciphers.as_deref(),
+                    args.sftp_requests,
+                    args.sftp_buffer_size,
+                    &file_paths,
+                    &artifact_dir,
+                    &format!("warmup-{iteration}"),
+                )?;
+            }
 
-    let mut iterations = Vec::new();
-    for iteration in 0..runs {
-        iterations.push(run_small_files_iteration(
+            let mut iterations = Vec::new();
+            for iteration in 0..runs {
+                iterations.push(run_small_files_iteration(
+                    port,
+                    &ctx.keys,
+                    args.ciphers.as_deref(),
+                    args.sftp_requests,
+                    args.sftp_buffer_size,
+                    &file_paths,
+                    &artifact_dir,
+                    &format!("run-{iteration}"),
+                )?);
+            }
+            iterations
+        }
+        ClientKind::Bench => run_small_files_bench_client(
+            bench_client_bin
+                .as_deref()
+                .expect("bench client binary should exist"),
+            &args,
+            warmup,
+            runs,
             port,
-            &ctx.keys,
-            args.ciphers.as_deref(),
-            args.sftp_requests,
-            args.sftp_buffer_size,
-            &file_paths,
             &artifact_dir,
-            &format!("run-{iteration}"),
-        )?);
-    }
+        )?,
+    };
     stop_server(&mut server)?;
 
     let results = RunResults {
@@ -1394,6 +1430,67 @@ fn invoke_bench_client(
         command.arg("--ciphers").arg(ciphers);
     }
     run_status(&mut command, "run sftp-bench-client")?;
+    read_json(output_path)
+}
+
+fn run_small_files_bench_client(
+    binary: &Path,
+    args: &SmallFilesArgs,
+    warmup: u32,
+    runs: u32,
+    port: u16,
+    artifact_dir: &Path,
+) -> Result<Vec<f64>, BoxError> {
+    if warmup > 0 {
+        let warmup_path = artifact_dir.join("current-small-files-bench-warmup.json");
+        invoke_small_files_bench_client(binary, args, warmup, port, &warmup_path)?;
+    }
+
+    let output_path = artifact_dir.join("current-small-files-bench.json");
+    let output = invoke_small_files_bench_client(binary, args, runs, port, &output_path)?;
+    Ok(output
+        .results
+        .iter()
+        .map(|result| result.total_seconds)
+        .collect())
+}
+
+fn invoke_small_files_bench_client(
+    binary: &Path,
+    args: &SmallFilesArgs,
+    iterations: u32,
+    port: u16,
+    output_path: &Path,
+) -> Result<BenchClientJson, BoxError> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--user")
+        .arg("benchmark")
+        .arg("--password")
+        .arg("benchmark")
+        .arg("--operation")
+        .arg("roundtrip")
+        .arg("--size")
+        .arg(format!("{}MiB", args.total_size_mb))
+        .arg("--files")
+        .arg(args.files.to_string())
+        .arg("--iterations")
+        .arg(iterations.to_string())
+        .arg("--chunk-size")
+        .arg(&args.chunk_size)
+        .arg("--file-depth")
+        .arg(args.file_depth.to_string())
+        .arg("--insecure")
+        .arg("--json-output")
+        .arg(output_path);
+    if let Some(ciphers) = &args.ciphers {
+        command.arg("--ciphers").arg(ciphers);
+    }
+    run_status(&mut command, "run sftp-bench-client small-files")?;
     read_json(output_path)
 }
 
@@ -2325,6 +2422,17 @@ fn ensure_small_files_args(args: &SmallFilesArgs) -> Result<(), BoxError> {
     let total_bytes = mib_to_bytes(args.total_size_mb)?;
     if total_bytes < args.files as u64 {
         return Err("--total-size-mb must allow at least one byte per file".into());
+    }
+    if args.file_depth == 0 {
+        return Err("--file-depth must be greater than zero".into());
+    }
+    if args.client != ClientKind::Openssh {
+        if args.sftp_requests.is_some() {
+            return Err("--sftp-requests only applies to --client openssh".into());
+        }
+        if args.sftp_buffer_size.is_some() {
+            return Err("--sftp-buffer-size only applies to --client openssh".into());
+        }
     }
     Ok(())
 }
