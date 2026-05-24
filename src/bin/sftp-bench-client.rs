@@ -9,6 +9,7 @@ use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
 use sftp_s3::{parse_cipher, AVAILABLE_CIPHERS};
 use std::borrow::Cow;
+use std::rc::Rc;
 use std::{
     fs, io,
     path::PathBuf,
@@ -484,7 +485,7 @@ async fn upload_path(
         )
         .await
         .map_err(|error| boxed(format!("failed to create {path}: {error}")))?;
-    let file = Arc::new(file);
+    let file = Rc::new(file);
     let mut next_offset = 0_u64;
     let mut writes = FuturesUnordered::new();
     let write_depth = write_depth.max(1);
@@ -493,7 +494,7 @@ async fn upload_path(
         while next_offset < file_size && writes.len() < write_depth {
             let remaining = (file_size - next_offset) as usize;
             let chunk_len = remaining.min(payload.len());
-            let file = Arc::clone(&file);
+            let file = Rc::clone(&file);
             let data = Bytes::copy_from_slice(&payload[..chunk_len]);
             writes.push(async move { file.write_at(next_offset, data).await });
             next_offset += chunk_len as u64;
@@ -504,7 +505,7 @@ async fn upload_path(
         }
     }
 
-    Arc::try_unwrap(file)
+    Rc::try_unwrap(file)
         .map_err(|_| boxed("write file still has outstanding references"))?
         .close()
         .await
@@ -550,7 +551,7 @@ async fn download_path(
         .open(path.clone())
         .await
         .map_err(|error| boxed(format!("failed to open {path}: {error}")))?;
-    let file = Arc::new(file);
+    let file = Rc::new(file);
     let mut next_offset = 0_u64;
     let mut reads: FuturesUnordered<PendingRead> = FuturesUnordered::new();
     let read_depth = read_depth.max(1);
@@ -561,7 +562,7 @@ async fn download_path(
         while next_offset < file_size && reads.len() < read_depth {
             let request_offset = next_offset;
             let len = (file_size - next_offset).min(chunk_size as u64) as u32;
-            let file = Arc::clone(&file);
+            let file = Rc::clone(&file);
             reads.push(
                 async move {
                     let data = file.read_at(request_offset, len).await;
@@ -587,7 +588,7 @@ async fn download_path(
             if actual_len < requested_len {
                 let retry_offset = offset + u64::from(actual_len);
                 let retry_len = requested_len - actual_len;
-                let file = Arc::clone(&file);
+                let file = Rc::clone(&file);
                 reads.push(
                     async move {
                         let data = file.read_at(retry_offset, retry_len).await;
@@ -605,7 +606,7 @@ async fn download_path(
         )));
     }
 
-    Arc::try_unwrap(file)
+    Rc::try_unwrap(file)
         .map_err(|_| boxed("read file still has outstanding references"))?
         .close()
         .await

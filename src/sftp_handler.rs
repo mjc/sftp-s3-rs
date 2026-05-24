@@ -370,7 +370,7 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
             SftpOpenFile::Read { path, size, .. } => {
                 let mut file_info = self
                     .backend
-                    .file_info(&path)
+                    .file_info(path)
                     .await
                     .unwrap_or_else(|_| FileInfo::file(*size));
                 file_info.size = *size;
@@ -378,7 +378,7 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
             }
             SftpOpenFile::Write { path, .. } => {
                 // For write handles, we don't know the final size yet
-                self.backend.file_info(&path).await.map_or_else(
+                self.backend.file_info(path).await.map_or_else(
                     |_| to_file_attributes(&FileInfo::file(0)),
                     |i| to_file_attributes(&i),
                 )
@@ -527,7 +527,7 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
             }
             SftpOpenFile::Read { path, .. } => {
                 self.backend
-                    .set_attrs(&path, attrs)
+                    .set_attrs(path, attrs)
                     .await
                     .map_err(StatusCode::from)?;
             }
