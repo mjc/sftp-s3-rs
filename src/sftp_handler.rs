@@ -182,10 +182,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
 
         let handle_path = normalized.into_owned();
         let handle = self.handles.create_dir_handle(&handle_path);
-        Ok(Handle {
-            id,
-            handle: handle.into(),
-        })
+        Ok(Handle { id, handle })
     }
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
@@ -238,7 +235,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                     let h = self
                         .handles
                         .create_write_handle(normalized.as_ref(), write_handle);
-                    debug!(id, path = %path, handle = %h, "Opened file for write");
+                    debug!(id, path = %path, handle = %HandleForLog(&h), "Opened file for write");
                     h
                 }
                 Err(e) => {
@@ -253,7 +250,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
                     let h = self
                         .handles
                         .create_read_handle(normalized.as_ref(), read_handle);
-                    debug!(id, path = %path, handle = %h, "Opened file for read");
+                    debug!(id, path = %path, handle = %HandleForLog(&h), "Opened file for read");
                     h
                 }
                 Err(e) => {
@@ -263,10 +260,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
         };
 
-        Ok(Handle {
-            id,
-            handle: handle.into(),
-        })
+        Ok(Handle { id, handle })
     }
 
     #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
