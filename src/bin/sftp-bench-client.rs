@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use futures::future::{try_join_all, BoxFuture};
+use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use russh::{client, ChannelId, Preferred};
@@ -99,6 +99,10 @@ struct Cli {
     /// Number of concurrent SFTP write requests per file
     #[arg(long, default_value_t = DEFAULT_WRITE_DEPTH)]
     write_depth: usize,
+
+    /// Number of files to process concurrently
+    #[arg(long, default_value_t = 1)]
+    file_depth: usize,
 
     /// Per-request SFTP timeout in seconds; 0 disables request timeouts
     #[arg(long, default_value_t = 0)]
@@ -317,7 +321,15 @@ async fn run_upload_benchmark(
 
     for iteration in 0..cli.iterations {
         let paths = iteration_paths(cli, run_id, iteration);
-        let upload = upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+        let upload = upload_paths(
+            sftp,
+            &paths,
+            cli.size,
+            payload,
+            cli.write_depth,
+            cli.file_depth,
+        )
+        .await?;
 
         if !cli.keep_files {
             cleanup_paths(sftp, &paths).await;
@@ -341,13 +353,28 @@ async fn run_download_benchmark(
 ) -> Result<Vec<IterationResult>, BoxError> {
     let paths = iteration_paths(cli, run_id, 0);
     if !cli.skip_download_setup {
-        upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+        upload_paths(
+            sftp,
+            &paths,
+            cli.size,
+            payload,
+            cli.write_depth,
+            cli.file_depth,
+        )
+        .await?;
     }
 
     let mut results = Vec::with_capacity(cli.iterations as usize);
     for iteration in 0..cli.iterations {
-        let download =
-            download_paths(sftp, &paths, cli.chunk_size, cli.size, cli.read_depth).await?;
+        let download = download_paths(
+            sftp,
+            &paths,
+            cli.chunk_size,
+            cli.size,
+            cli.read_depth,
+            cli.file_depth,
+        )
+        .await?;
         print_iteration(iteration, cli.size, None, Some(download));
         results.push(IterationResult {
             upload: None,
@@ -369,7 +396,15 @@ async fn prepare_download_fixture(
     run_id: &str,
 ) -> Result<(), BoxError> {
     let paths = iteration_paths(cli, run_id, 0);
-    upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
+    upload_paths(
+        sftp,
+        &paths,
+        cli.size,
+        payload,
+        cli.write_depth,
+        cli.file_depth,
+    )
+    .await?;
     Ok(())
 }
 
@@ -383,9 +418,24 @@ async fn run_roundtrip_benchmark(
 
     for iteration in 0..cli.iterations {
         let paths = iteration_paths(cli, run_id, iteration);
-        let upload = upload_paths(sftp, &paths, cli.size, payload, cli.write_depth).await?;
-        let download =
-            download_paths(sftp, &paths, cli.chunk_size, cli.size, cli.read_depth).await?;
+        let upload = upload_paths(
+            sftp,
+            &paths,
+            cli.size,
+            payload,
+            cli.write_depth,
+            cli.file_depth,
+        )
+        .await?;
+        let download = download_paths(
+            sftp,
+            &paths,
+            cli.chunk_size,
+            cli.size,
+            cli.read_depth,
+            cli.file_depth,
+        )
+        .await?;
 
         if !cli.keep_files {
             cleanup_paths(sftp, &paths).await;
@@ -407,21 +457,22 @@ async fn upload_paths(
     total_size: u64,
     payload: &Arc<Vec<u8>>,
     write_depth: usize,
+    file_depth: usize,
 ) -> Result<Duration, BoxError> {
     let per_file_sizes = split_sizes(total_size, paths.len());
     let start = Instant::now();
-    try_join_all(
-        paths
-            .iter()
-            .cloned()
-            .zip(per_file_sizes)
-            .map(|(path, file_size)| {
-                let sftp = Arc::clone(sftp);
-                let payload = Arc::clone(payload);
-                async move { upload_path(&sftp, path, file_size, &payload, write_depth).await }
-            }),
-    )
-    .await?;
+    let mut uploads = futures::stream::iter(paths.iter().cloned().zip(per_file_sizes).map(
+        |(path, file_size)| {
+            let sftp = Arc::clone(sftp);
+            let payload = Arc::clone(payload);
+            async move { upload_path(&sftp, path, file_size, &payload, write_depth).await }
+        },
+    ))
+    .buffer_unordered(file_depth.max(1));
+
+    while let Some(result) = uploads.next().await {
+        result?;
+    }
 
     Ok(start.elapsed())
 }
@@ -476,21 +527,22 @@ async fn download_paths(
     chunk_size: usize,
     total_size: u64,
     read_depth: usize,
+    file_depth: usize,
 ) -> Result<Duration, BoxError> {
     let per_file_sizes = split_sizes(total_size, paths.len());
 
     let start = Instant::now();
-    try_join_all(
-        paths
-            .iter()
-            .cloned()
-            .zip(per_file_sizes)
-            .map(|(path, file_size)| {
-                let sftp = Arc::clone(sftp);
-                async move { download_path(&sftp, path, file_size, chunk_size, read_depth).await }
-            }),
-    )
-    .await?;
+    let mut downloads = futures::stream::iter(paths.iter().cloned().zip(per_file_sizes).map(
+        |(path, file_size)| {
+            let sftp = Arc::clone(sftp);
+            async move { download_path(&sftp, path, file_size, chunk_size, read_depth).await }
+        },
+    ))
+    .buffer_unordered(file_depth.max(1));
+
+    while let Some(result) = downloads.next().await {
+        result?;
+    }
 
     Ok(start.elapsed())
 }
@@ -791,6 +843,9 @@ fn validate_cli(cli: &Cli) -> Result<(), BoxError> {
     }
     if cli.write_depth == 0 {
         return Err(boxed("--write-depth must be greater than zero"));
+    }
+    if cli.file_depth == 0 {
+        return Err(boxed("--file-depth must be greater than zero"));
     }
     if cli.iterations == 0 {
         return Err(boxed("--iterations must be greater than zero"));
