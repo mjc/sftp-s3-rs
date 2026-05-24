@@ -1600,14 +1600,15 @@ fn wait_for_server(
             .arg("-b")
             .arg("-")
             .arg("-P")
-            .arg(port.to_string())
+            .arg(port.to_string());
+        if let Some(cipher_list) = ciphers {
+            command.arg("-c").arg(openssh_ciphers(cipher_list));
+        }
+        command
             .arg("benchmark@127.0.0.1")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(cipher_list) = ciphers {
-            command.arg("-c").arg(openssh_ciphers(cipher_list));
-        }
         let mut child = command.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(b"bye\n")?;
@@ -1678,14 +1679,15 @@ fn run_sftp_batch(
         .arg("-b")
         .arg("-")
         .arg("-P")
-        .arg(port.to_string())
+        .arg(port.to_string());
+    if let Some(cipher_list) = ciphers {
+        command.arg("-c").arg(openssh_ciphers(cipher_list));
+    }
+    command
         .arg("benchmark@127.0.0.1")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(cipher_list) = ciphers {
-        command.arg("-c").arg(openssh_ciphers(cipher_list));
-    }
     let mut child = command.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         for line in commands {
