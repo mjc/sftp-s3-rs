@@ -121,7 +121,7 @@ struct SmallFilesArgs {
     warmup: Option<u32>,
 
     /// Preferred OpenSSH cipher list
-    #[arg(long)]
+    #[arg(long, default_value = "aes256-gcm")]
     ciphers: Option<String>,
 
     /// Benchmark backend to use
