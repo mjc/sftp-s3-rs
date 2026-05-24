@@ -20,6 +20,9 @@
       overlays = [(import rust-overlay)];
       pkgs = import nixpkgs {
         inherit system overlays;
+        config.permittedInsecurePackages = [
+          "minio-2025-10-15T17-29-55Z"
+        ];
       };
 
       rustToolchain = pkgs.rust-bin.stable.latest.default.override {
