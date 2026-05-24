@@ -136,6 +136,10 @@ struct SmallFilesArgs {
     #[arg(long)]
     note: Vec<String>,
 
+    /// Record a server-side profiling trace while the workload runs
+    #[arg(long)]
+    profile: bool,
+
     /// Disable sccache even if present
     #[arg(long)]
     no_sccache: bool,
@@ -531,7 +535,12 @@ fn stop_profiler(profiler: &mut ProfilerHandle) -> Result<(), BoxError> {
             {
                 return Err(format!("xctrace exited unsuccessfully: {status}").into());
             }
-            export_xctrace(trace_path, export_path)?;
+            if let Err(error) = export_xctrace(trace_path, export_path) {
+                eprintln!(
+                    "warning: failed to export xctrace XML for {}: {error}",
+                    trace_path.display()
+                );
+            }
             Ok(())
         }
     }
@@ -860,7 +869,13 @@ fn run_mode(
 
 fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxError> {
     ensure_small_files_args(&args)?;
-    let run_id = build_run_id("small-files", args.label.as_deref());
+    let profile_mode = args.profile.then_some(ProfileKind::Perf);
+    let mode = if args.profile {
+        "small-files-profile"
+    } else {
+        "small-files"
+    };
+    let run_id = build_run_id(mode, args.label.as_deref());
     let run_dir = ctx.results_root.join(&run_id);
     let artifact_dir = run_dir.join("artifacts");
     fs::create_dir_all(&artifact_dir)?;
@@ -885,7 +900,7 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
             &[args.total_size_mb],
             &[OperationKind::Roundtrip],
             std::slice::from_ref(&plan),
-            None,
+            profile_mode,
         ),
         args.files
     );
@@ -894,15 +909,15 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
     let manifest = RunManifest {
         run_id: run_id.clone(),
         timestamp_unix: unix_now()?,
-        mode: "small-files".to_string(),
+        mode: mode.to_string(),
         client: ClientKind::Openssh,
         backend: args.backend,
         ciphers: args.ciphers.clone(),
         sizes_mb: vec![args.total_size_mb],
         operations: vec![OperationKind::Roundtrip],
         comparison_key: comparison_key.clone(),
-        profile_mode: None,
-        profile_tool: None,
+        profile_mode,
+        profile_tool: profile_mode.map(profile_tool_name),
         matrix_baseline: None,
         valid_for_comparison: true,
         invalid_reason: None,
@@ -912,7 +927,7 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
     };
     write_json(run_dir.join("manifest.json"), &manifest)?;
 
-    let server_binary = build_server(ctx, &plan, args.no_sccache, None)?;
+    let server_binary = build_server(ctx, &plan, args.no_sccache, profile_mode)?;
     let server_log = run_dir.join("server-current-small-files.log");
     let port = pick_free_port()?;
     let mut server = start_server(
@@ -921,15 +936,15 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
         &ctx.keys,
         port,
         args.backend,
-        None,
+        profile_mode,
         999,
         &artifact_dir,
         "current-small-files-openssh",
     )?;
     wait_for_server(port, &ctx.keys.private_key, &args.ciphers)?;
 
-    let warmup = args.warmup.unwrap_or(2);
-    let runs = args.runs.unwrap_or(10);
+    let warmup = args.warmup.unwrap_or(if args.profile { 0 } else { 2 });
+    let runs = args.runs.unwrap_or(if args.profile { 1 } else { 10 });
     for iteration in 0..warmup {
         let _ = run_small_files_iteration(
             port,
