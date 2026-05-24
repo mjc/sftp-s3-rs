@@ -1082,11 +1082,7 @@ fn make_build_plan(ctx: &AppContext, target: &TargetSpec) -> Result<BuildPlan, B
         SourceSpec::Current { snapshot } => Ok(BuildPlan {
             label: target.label.clone(),
             manifest_source: ctx.repo_root.clone(),
-            build_id: format!(
-                "current-{}-{}",
-                sanitize_for_path(snapshot),
-                sanitize_for_path(&target.label)
-            ),
+            build_id: current_build_id(&target.label, &target.features),
             features: target.features.clone(),
             snapshot: snapshot.clone(),
             russh_ref: None,
@@ -1135,6 +1131,22 @@ fn make_build_plan(ctx: &AppContext, target: &TargetSpec) -> Result<BuildPlan, B
                 source_mode: "local-stack".to_string(),
             })
         }
+    }
+}
+
+fn current_build_id(label: &str, features: &[String]) -> String {
+    format!(
+        "current-{}-{}",
+        sanitize_for_path(label),
+        feature_build_suffix(features)
+    )
+}
+
+fn feature_build_suffix(features: &[String]) -> String {
+    if features.is_empty() {
+        "default-features".to_string()
+    } else {
+        sanitize_for_path(&features.join(","))
     }
 }
 
