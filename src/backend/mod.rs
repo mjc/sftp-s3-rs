@@ -420,6 +420,13 @@ pub trait Backend: Send + Sync + 'static {
 /// Returns `Cow::Borrowed` when input is already normalized, avoiding allocation.
 #[must_use]
 pub fn normalize_path(path: &str) -> Cow<'_, str> {
+    if !path.as_bytes().contains(&b'/') {
+        return match path {
+            "" | "." | ".." => Cow::Borrowed(""),
+            _ => Cow::Borrowed(path),
+        };
+    }
+
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
         return Cow::Borrowed("");
@@ -473,6 +480,14 @@ mod tests {
         assert!(matches!(
             normalize_path("/normal/file.txt/"),
             Cow::Borrowed("normal/file.txt")
+        ));
+    }
+
+    #[test]
+    fn test_normalize_plain_filename_borrows() {
+        assert!(matches!(
+            normalize_path("plain-file.txt"),
+            Cow::Borrowed("plain-file.txt")
         ));
     }
 
