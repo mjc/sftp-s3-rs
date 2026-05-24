@@ -193,8 +193,7 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
                                                 write_half.data_bytes(bytes).await
                                             }
                                             SerializedPacket::Split { header, data } => {
-                                                write_half.data_bytes(header).await?;
-                                                write_half.data_bytes(data).await
+                                                write_half.data_pair_bytes(header, data).await
                                             }
                                         }
                                     }
@@ -299,12 +298,8 @@ mod tests {
             "SFTP subsystem must preserve split DATA packets on the channel writer path"
         );
         assert!(
-            production_source.contains("write_half.data_bytes(header).await?"),
-            "SFTP response headers must be sent through russh ChannelWriteHalf::data_bytes"
-        );
-        assert!(
-            production_source.contains("write_half.data_bytes(data).await"),
-            "SFTP response payloads must be sent through russh ChannelWriteHalf::data_bytes"
+            production_source.contains("write_half.data_pair_bytes(header, data).await"),
+            "split SFTP response packets must be coalesced through russh ChannelWriteHalf::data_pair_bytes"
         );
         assert!(
             production_source.contains("#[cfg(feature = \"benchmark-matrix-compat\")]"),
