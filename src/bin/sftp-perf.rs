@@ -29,6 +29,8 @@ struct Cli {
 enum PerfCommand {
     /// Benchmark the current checkout with its configured dependencies
     Current(CurrentArgs),
+    /// Benchmark a flat directory containing many small files
+    SmallFiles(SmallFilesArgs),
     /// Benchmark a local stack using specific russh/russh-sftp refs
     LocalStack(LocalStackArgs),
     /// Benchmark a russh × russh-sftp version matrix
@@ -98,6 +100,45 @@ struct CommonArgs {
 struct CurrentArgs {
     #[command(flatten)]
     common: CommonArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct SmallFilesArgs {
+    /// Total payload size, in MiB, across all files
+    #[arg(long, default_value_t = 1024)]
+    total_size_mb: u64,
+
+    /// Number of files in the flat benchmark directory
+    #[arg(long, default_value_t = 10_251)]
+    files: usize,
+
+    /// Number of measured runs
+    #[arg(long)]
+    runs: Option<u32>,
+
+    /// Number of warmup runs
+    #[arg(long)]
+    warmup: Option<u32>,
+
+    /// Preferred OpenSSH cipher list
+    #[arg(long)]
+    ciphers: Option<String>,
+
+    /// Benchmark backend to use
+    #[arg(long, value_enum, default_value_t = BackendKind::Benchmark)]
+    backend: BackendKind,
+
+    /// Optional label suffix for the run directory
+    #[arg(long)]
+    label: Option<String>,
+
+    /// Add a note to the stored run metadata
+    #[arg(long)]
+    note: Vec<String>,
+
+    /// Disable sccache even if present
+    #[arg(long)]
+    no_sccache: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -363,12 +404,16 @@ struct MeasurementRecord {
     operation: OperationKind,
     size_mb: u64,
     bytes_per_iteration: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_count_per_iteration: Option<u64>,
     iterations_seconds: Vec<f64>,
     mean_seconds: f64,
     stddev_seconds: f64,
     min_seconds: f64,
     max_seconds: f64,
     throughput_mib_per_second: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_ops_per_second: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +454,7 @@ fn main() -> Result<(), BoxError> {
             None,
             None,
         ),
+        PerfCommand::SmallFiles(args) => run_small_files(&ctx, args),
         PerfCommand::LocalStack(args) => run_mode(
             &ctx,
             "local-stack",
@@ -812,6 +858,125 @@ fn run_mode(
     Ok(())
 }
 
+fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxError> {
+    ensure_small_files_args(&args)?;
+    let run_id = build_run_id("small-files", args.label.as_deref());
+    let run_dir = ctx.results_root.join(&run_id);
+    let artifact_dir = run_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)?;
+
+    let target = TargetSpec {
+        label: "current".to_string(),
+        source: SourceSpec::Current {
+            snapshot: snapshot_id(&ctx.repo_root)?,
+        },
+        features: Vec::new(),
+    };
+    let plan = make_build_plan(ctx, &target)?;
+    let total_bytes = mib_to_bytes(args.total_size_mb)?;
+    let file_paths = ensure_small_files_fixture(&ctx.cache_root, args.total_size_mb, args.files)?;
+    let comparison_key = format!(
+        "{};files={}",
+        make_comparison_key(
+            "small-files",
+            ClientKind::Openssh,
+            args.backend,
+            args.ciphers.as_deref(),
+            &[args.total_size_mb],
+            &[OperationKind::Roundtrip],
+            std::slice::from_ref(&plan),
+            None,
+        ),
+        args.files
+    );
+    let previous = find_previous_run(&ctx.results_root, &comparison_key)?;
+
+    let manifest = RunManifest {
+        run_id: run_id.clone(),
+        timestamp_unix: unix_now()?,
+        mode: "small-files".to_string(),
+        client: ClientKind::Openssh,
+        backend: args.backend,
+        ciphers: args.ciphers.clone(),
+        sizes_mb: vec![args.total_size_mb],
+        operations: vec![OperationKind::Roundtrip],
+        comparison_key: comparison_key.clone(),
+        profile_mode: None,
+        profile_tool: None,
+        matrix_baseline: None,
+        valid_for_comparison: true,
+        invalid_reason: None,
+        notes: args.note.clone(),
+        machine: machine_metadata(),
+        targets: vec![TargetManifest::from(&plan)],
+    };
+    write_json(run_dir.join("manifest.json"), &manifest)?;
+
+    let server_binary = build_server(ctx, &plan, args.no_sccache, None)?;
+    let server_log = run_dir.join("server-current-small-files.log");
+    let port = pick_free_port()?;
+    let mut server = start_server(
+        &server_binary,
+        &server_log,
+        &ctx.keys,
+        port,
+        args.backend,
+        None,
+        999,
+        &artifact_dir,
+        "current-small-files-openssh",
+    )?;
+    wait_for_server(port, &ctx.keys.private_key, &args.ciphers)?;
+
+    let warmup = args.warmup.unwrap_or(2);
+    let runs = args.runs.unwrap_or(10);
+    for iteration in 0..warmup {
+        let _ = run_small_files_iteration(
+            port,
+            &ctx.keys,
+            args.ciphers.as_deref(),
+            &file_paths,
+            &artifact_dir,
+            &format!("warmup-{iteration}"),
+        )?;
+    }
+
+    let mut iterations = Vec::new();
+    for iteration in 0..runs {
+        iterations.push(run_small_files_iteration(
+            port,
+            &ctx.keys,
+            args.ciphers.as_deref(),
+            &file_paths,
+            &artifact_dir,
+            &format!("run-{iteration}"),
+        )?);
+    }
+    stop_server(&mut server)?;
+
+    let results = RunResults {
+        run_id: run_id.clone(),
+        comparison_key,
+        records: vec![MeasurementRecord::new_small_files(
+            "current".to_string(),
+            args.total_size_mb,
+            total_bytes
+                .checked_mul(2)
+                .ok_or("roundtrip byte count overflow")?,
+            (args.files as u64) * 2,
+            iterations,
+        )],
+    };
+    write_json(run_dir.join("results.json"), &results)?;
+    let summary = render_summary(&manifest, &results, previous.as_ref());
+    fs::write(run_dir.join("summary.txt"), &summary)?;
+    print!("{summary}");
+    if let Some(previous) = previous {
+        println!("Previous comparable run: {}", previous.run_id);
+    }
+    Ok(())
+}
+
 fn profile_label(args: &ProfileArgs) -> String {
     if args.russh_ref.is_some() || args.russh_sftp_ref.is_some() {
         "local-stack".to_string()
@@ -866,13 +1031,34 @@ impl MeasurementRecord {
             operation,
             size_mb,
             bytes_per_iteration,
+            file_count_per_iteration: None,
             iterations_seconds,
             mean_seconds,
             stddev_seconds,
             min_seconds,
             max_seconds,
             throughput_mib_per_second,
+            file_ops_per_second: None,
         }
+    }
+
+    fn new_small_files(
+        target_label: String,
+        size_mb: u64,
+        bytes_per_iteration: u64,
+        files_per_iteration: u64,
+        iterations_seconds: Vec<f64>,
+    ) -> Self {
+        let mut record = Self::new(
+            target_label,
+            OperationKind::Roundtrip,
+            size_mb,
+            bytes_per_iteration,
+            iterations_seconds,
+        );
+        record.file_count_per_iteration = Some(files_per_iteration);
+        record.file_ops_per_second = Some(files_per_iteration as f64 / record.mean_seconds);
+        record
     }
 }
 
@@ -1515,6 +1701,61 @@ fn run_sftp_batch(
     }
 }
 
+fn run_small_files_iteration(
+    port: u16,
+    keys: &KeyMaterial,
+    ciphers: Option<&str>,
+    file_paths: &[PathBuf],
+    artifact_dir: &Path,
+    iteration_label: &str,
+) -> Result<f64, BoxError> {
+    let remote_prefix = format!("small-files-{iteration_label}");
+    let download_dir = artifact_dir.join(format!("download-{iteration_label}"));
+    if download_dir.exists() {
+        fs::remove_dir_all(&download_dir)?;
+    }
+    fs::create_dir_all(&download_dir)?;
+
+    let mut commands = Vec::with_capacity(file_paths.len() * 3 + 1);
+    for path in file_paths {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid small-files fixture path {}", path.display()))?;
+        commands.push(format!(
+            "put {} {remote_prefix}-{file_name}",
+            path.display()
+        ));
+    }
+    for path in file_paths {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid small-files fixture path {}", path.display()))?;
+        commands.push(format!(
+            "get {remote_prefix}-{file_name} {}",
+            download_dir.join(file_name).display()
+        ));
+    }
+    for path in file_paths {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid small-files fixture path {}", path.display()))?;
+        commands.push(format!("rm {remote_prefix}-{file_name}"));
+    }
+    commands.push("quit".to_string());
+
+    let batch_path = artifact_dir.join(format!("small-files-{iteration_label}.sftp"));
+    fs::write(&batch_path, commands.join("\n"))?;
+    let start = Instant::now();
+    let result = run_sftp_batch(port, keys, ciphers, &commands);
+    let elapsed = start.elapsed().as_secs_f64();
+    let _ = fs::remove_dir_all(&download_dir);
+    result?;
+    Ok(elapsed)
+}
+
 fn render_summary(
     manifest: &RunManifest,
     results: &RunResults,
@@ -1581,6 +1822,13 @@ fn render_summary(
                     record.mean_seconds,
                     record.stddev_seconds
                 ));
+                if let Some(file_ops) = record.file_ops_per_second {
+                    output.push_str(&format!(
+                        "             files {:8.1}/s  count {}\n",
+                        file_ops,
+                        record.file_count_per_iteration.unwrap_or_default()
+                    ));
+                }
                 if let Some(previous_run) = previous {
                     if let Some(previous_record) =
                         previous_run.results.records.iter().find(|candidate| {
@@ -1917,6 +2165,88 @@ fn ensure_test_file(cache_root: &Path, size_mb: u64) -> Result<PathBuf, BoxError
         file.set_len(size_mb * 1024 * 1024)?;
     }
     Ok(path)
+}
+
+fn ensure_small_files_fixture(
+    cache_root: &Path,
+    total_size_mb: u64,
+    files: usize,
+) -> Result<Vec<PathBuf>, BoxError> {
+    let total_bytes = mib_to_bytes(total_size_mb)?;
+    let dir = cache_root
+        .join("small-files")
+        .join(format!("{files}-files-{total_size_mb}mib"));
+    let sizes = varied_file_sizes(total_bytes, files)?;
+    let paths = (0..files)
+        .map(|index| dir.join(format!("file-{index:05}.bin")))
+        .collect::<Vec<_>>();
+    let marker = dir.join(".fixture");
+    if marker.exists() && paths.iter().all(|path| path.exists()) {
+        return Ok(paths);
+    }
+
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    fs::create_dir_all(&dir)?;
+    for (path, size) in paths.iter().zip(sizes) {
+        let file = fs::File::create(path)?;
+        file.set_len(size)?;
+    }
+    fs::write(
+        marker,
+        format!("files={files}\ntotal_size_mb={total_size_mb}\n"),
+    )?;
+    Ok(paths)
+}
+
+fn varied_file_sizes(total_bytes: u64, files: usize) -> Result<Vec<u64>, BoxError> {
+    if files == 0 {
+        return Err("--files must be greater than zero".into());
+    }
+    if total_bytes < files as u64 {
+        return Err("total payload must be at least one byte per file".into());
+    }
+
+    let mut weights = Vec::with_capacity(files);
+    for index in 0..files {
+        let weight = 1 + (((index as u64) * 1_103_515_245 + 12_345) % 65_536);
+        weights.push(weight);
+    }
+    let weight_sum = weights.iter().sum::<u64>();
+    let remaining = total_bytes - files as u64;
+    let mut sizes = weights
+        .iter()
+        .map(|weight| 1 + (remaining * *weight / weight_sum))
+        .collect::<Vec<_>>();
+    let mut allocated = sizes.iter().sum::<u64>();
+    let mut index = 0;
+    while allocated < total_bytes {
+        sizes[index] += 1;
+        allocated += 1;
+        index = (index + 1) % sizes.len();
+    }
+    Ok(sizes)
+}
+
+fn ensure_small_files_args(args: &SmallFilesArgs) -> Result<(), BoxError> {
+    if args.total_size_mb == 0 {
+        return Err("--total-size-mb must be greater than zero".into());
+    }
+    if args.files == 0 {
+        return Err("--files must be greater than zero".into());
+    }
+    let total_bytes = mib_to_bytes(args.total_size_mb)?;
+    if total_bytes < args.files as u64 {
+        return Err("--total-size-mb must allow at least one byte per file".into());
+    }
+    Ok(())
+}
+
+fn mib_to_bytes(size_mb: u64) -> Result<u64, BoxError> {
+    size_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "size is too large".into())
 }
 
 fn ensure_sizes(sizes: &[u64]) -> Result<(), BoxError> {

@@ -263,6 +263,7 @@ nix develop -c ./perf.sh <subcommand> [options]
 Available subcommands:
 
 - `current`
+- `small-files`
 - `local-stack`
 - `matrix`
 - `profile`
@@ -284,6 +285,7 @@ Examples:
 ```bash
 nix develop -c ./perf.sh current --client bench --sizes 1024,10240
 nix develop -c ./perf.sh current --client openssh --operation all --sizes 1024
+nix develop -c ./perf.sh small-files --ciphers aes256-gcm
 nix develop -c ./perf.sh local-stack --russh-ref main --russh-sftp-ref master
 nix develop -c ./perf.sh matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
 nix develop -c ./perf.sh profile --client bench --operation roundtrip --sizes 1024
@@ -318,6 +320,11 @@ when available.
 Runs can be annotated with `--note` at creation time, marked invalid later with `mark-invalid`, and
 restored to comparison eligibility with `mark-valid`. Invalid runs are skipped automatically when the
 runner looks for the previous comparable result.
+
+`small-files` is the repo-native version of the varied small files workload. By default it transfers
+1GiB as 10,251 deterministic varied-size files using explicit OpenSSH `sftp` batch entries, then
+downloads the same files in the same batch and reports both throughput and file operations per
+second. Use `--total-size-mb`, `--files`, `--runs`, and `--warmup` to tune the workload.
 
 Results below were measured on a Darwin arm64 Apple Silicon machine with the Rust benchmark client,
 the `benchmark` backend, and the 2x2 matrix:
