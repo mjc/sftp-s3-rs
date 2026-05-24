@@ -140,6 +140,14 @@ struct SmallFilesArgs {
     #[arg(long)]
     profile: bool,
 
+    /// OpenSSH sftp outstanding request count (-R)
+    #[arg(long)]
+    sftp_requests: Option<u32>,
+
+    /// OpenSSH sftp transfer buffer size in bytes (-B)
+    #[arg(long)]
+    sftp_buffer_size: Option<usize>,
+
     /// Disable sccache even if present
     #[arg(long)]
     no_sccache: bool,
@@ -950,6 +958,8 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
             port,
             &ctx.keys,
             args.ciphers.as_deref(),
+            args.sftp_requests,
+            args.sftp_buffer_size,
             &file_paths,
             &artifact_dir,
             &format!("warmup-{iteration}"),
@@ -962,6 +972,8 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
             port,
             &ctx.keys,
             args.ciphers.as_deref(),
+            args.sftp_requests,
+            args.sftp_buffer_size,
             &file_paths,
             &artifact_dir,
             &format!("run-{iteration}"),
@@ -1451,6 +1463,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[
                     format!("put {} {}", test_file.display(), remote_file),
                     "quit".to_string(),
@@ -1461,6 +1475,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
             Ok(elapsed)
@@ -1470,6 +1486,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[
                     format!("put {} {}", test_file.display(), remote_file),
                     "quit".to_string(),
@@ -1480,6 +1498,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[
                     format!("get {} {}", remote_file, download_file.display()),
                     "quit".to_string(),
@@ -1490,6 +1510,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
             let _ = fs::remove_file(download_file);
@@ -1501,6 +1523,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[
                     format!("put {} {}", test_file.display(), remote_file),
                     "quit".to_string(),
@@ -1510,6 +1534,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[
                     format!("get {} {}", remote_file, download_file.display()),
                     "quit".to_string(),
@@ -1520,6 +1546,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
+                None,
+                None,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
             let _ = fs::remove_file(download_file);
@@ -1688,6 +1716,8 @@ fn run_sftp_batch(
     port: u16,
     keys: &KeyMaterial,
     ciphers: Option<&str>,
+    sftp_requests: Option<u32>,
+    sftp_buffer_size: Option<usize>,
     commands: &[String],
 ) -> Result<(), BoxError> {
     let mut command = Command::new("sftp");
@@ -1710,6 +1740,12 @@ fn run_sftp_batch(
     if let Some(cipher_list) = ciphers {
         command.arg("-c").arg(openssh_ciphers(cipher_list));
     }
+    if let Some(requests) = sftp_requests {
+        command.arg("-R").arg(requests.to_string());
+    }
+    if let Some(buffer_size) = sftp_buffer_size {
+        command.arg("-B").arg(buffer_size.to_string());
+    }
     command
         .arg("benchmark@127.0.0.1")
         .stdin(Stdio::piped())
@@ -1718,8 +1754,20 @@ fn run_sftp_batch(
     let mut child = command.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         for line in commands {
-            stdin.write_all(line.as_bytes())?;
-            stdin.write_all(b"\n")?;
+            if let Err(error) = stdin.write_all(line.as_bytes()) {
+                let status = child.wait()?;
+                return Err(format!(
+                    "sftp batch stdin failed after child exited with {status}: {error}"
+                )
+                .into());
+            }
+            if let Err(error) = stdin.write_all(b"\n") {
+                let status = child.wait()?;
+                return Err(format!(
+                    "sftp batch stdin failed after child exited with {status}: {error}"
+                )
+                .into());
+            }
         }
     }
     let status = child.wait()?;
@@ -1734,6 +1782,8 @@ fn run_small_files_iteration(
     port: u16,
     keys: &KeyMaterial,
     ciphers: Option<&str>,
+    sftp_requests: Option<u32>,
+    sftp_buffer_size: Option<usize>,
     file_paths: &[PathBuf],
     artifact_dir: &Path,
     iteration_label: &str,
@@ -1778,7 +1828,14 @@ fn run_small_files_iteration(
     let batch_path = artifact_dir.join(format!("small-files-{iteration_label}.sftp"));
     fs::write(&batch_path, commands.join("\n"))?;
     let start = Instant::now();
-    let result = run_sftp_batch(port, keys, ciphers, &commands);
+    let result = run_sftp_batch(
+        port,
+        keys,
+        ciphers,
+        sftp_requests,
+        sftp_buffer_size,
+        &commands,
+    );
     let elapsed = start.elapsed().as_secs_f64();
     let _ = fs::remove_dir_all(&download_dir);
     result?;
