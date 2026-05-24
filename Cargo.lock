@@ -2602,7 +2602,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "git+https://github.com/mjc/russh.git?rev=5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf#5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#1f54fb27e86c8edf231cf568bf53121344ebfce0"
 dependencies = [
  "base16ct 1.0.0",
  "byteorder",
@@ -3102,7 +3102,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?rev=5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf#5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#1f54fb27e86c8edf231cf568bf53121344ebfce0"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3172,7 +3172,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?rev=5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf#5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#1f54fb27e86c8edf231cf568bf53121344ebfce0"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -3183,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "russh-sftp"
 version = "3.0.0"
-source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#e9e51eda105c5dff3277fd97b52d1006e660b3f6"
+source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#73c6272640de144a7daabe4bce9570a4a532ca08"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3191,6 +3191,7 @@ dependencies = [
  "dashmap",
  "futures",
  "log",
+ "rand 0.10.1",
  "serde",
  "thiserror",
  "tokio",
@@ -3200,7 +3201,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?rev=5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf#5c8a3fcfccf5cdb2535f55c1af29c58b2d32bdcf"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#1f54fb27e86c8edf231cf568bf53121344ebfce0"
 dependencies = [
  "chrono",
  "tokio",

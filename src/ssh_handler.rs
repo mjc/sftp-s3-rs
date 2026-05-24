@@ -173,7 +173,8 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
             match name.as_str() {
                 "sftp" => {
                     if let Some(channel) = channels.lock().await.remove(&channel_id) {
-                        let sftp_handler = SftpHandler::new(backend);
+                        let sftp_handler =
+                            russh_sftp::server::ManagedSession::new(SftpHandler::new(backend));
                         #[cfg(feature = "benchmark-matrix-compat")]
                         {
                             russh_sftp::server::run(channel.into_stream(), sftp_handler).await;

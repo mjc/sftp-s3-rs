@@ -1,24 +1,6 @@
 use bytes::{Buf, Bytes};
-use std::fmt;
-
-type SftpHandle = Bytes;
 
 type SftpWriteData = Bytes;
-
-fn handle_as_bytes(h: &SftpHandle) -> &[u8] {
-    h.as_ref()
-}
-
-struct HandleForLog<'a>(&'a SftpHandle);
-
-impl fmt::Display for HandleForLog<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in handle_as_bytes(self.0) {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
 
 fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
     data
@@ -28,13 +10,16 @@ fn sftp_data(id: u32, data: Bytes) -> Data {
     Data { id, data }
 }
 
-use crate::backend::{normalize_path, Backend, BackendError, FileInfo, FileKind, SetAttrs};
-use crate::handle::{HandleInfo, HandleManager};
-use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+use crate::backend::{
+    normalize_path, Backend, BackendError, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
+use russh_sftp::protocol::{
+    Attrs, Data, File, FileAttributes, Name, OpenFlags, Status, StatusCode, Version,
+};
+use russh_sftp::server::SessionHandler;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
 // Unix file type bits for SFTP
@@ -77,16 +62,33 @@ fn attrs_to_set_attrs(attrs: &FileAttributes) -> SetAttrs {
 /// SFTP session handler that delegates to a backend
 pub struct SftpHandler<B: Backend> {
     backend: Arc<B>,
-    handles: HandleManager,
 }
 
 impl<B: Backend> SftpHandler<B> {
     pub fn new(backend: Arc<B>) -> Self {
-        Self {
-            backend,
-            handles: HandleManager::new(),
-        }
+        Self { backend }
     }
+}
+
+type SharedReadHandle = Arc<Mutex<Box<dyn ReadHandle>>>;
+type SharedWriteHandle = Arc<Mutex<Option<Box<dyn WriteHandle>>>>;
+
+pub enum SftpOpenFile {
+    Read {
+        path: Arc<str>,
+        handle: SharedReadHandle,
+        size: u64,
+    },
+    Write {
+        path: Arc<str>,
+        handle: SharedWriteHandle,
+        pending_attrs: SetAttrs,
+    },
+}
+
+pub struct SftpOpenDir {
+    path: Arc<str>,
+    read_done: bool,
 }
 
 /// Convert `BackendError` to SFTP `StatusCode`.
@@ -114,8 +116,10 @@ fn ok_status(id: u32) -> Status {
     }
 }
 
-impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
+impl<B: Backend> SessionHandler for SftpHandler<B> {
     type Error = StatusCode;
+    type File = SftpOpenFile;
+    type Dir = SftpOpenDir;
 
     fn unimplemented(&self) -> Self::Error {
         StatusCode::OpUnsupported
@@ -138,11 +142,13 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(v)
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
-    async fn close(&mut self, id: u32, handle: SftpHandle) -> Result<Status, Self::Error> {
-        let hb = handle_as_bytes(&handle);
-        // If it's a write handle, finish it
-        if let Some((path, write_handle_arc, pending_attrs)) = self.handles.take_write_handle(hb) {
+    async fn close_file(&mut self, id: u32, file: Self::File) -> Result<Status, Self::Error> {
+        if let SftpOpenFile::Write {
+            path,
+            handle: write_handle_arc,
+            pending_attrs,
+        } = file
+        {
             let write_handle = match Arc::try_unwrap(write_handle_arc) {
                 Ok(mutex) => mutex.into_inner(),
                 Err(write_handle_arc) => {
@@ -161,12 +167,15 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
         }
 
-        self.handles.remove(hb);
+        Ok(ok_status(id))
+    }
+
+    async fn close_dir(&mut self, id: u32, _dir: Self::Dir) -> Result<Status, Self::Error> {
         Ok(ok_status(id))
     }
 
     #[instrument(level = "debug", skip(self))]
-    async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+    async fn opendir(&mut self, _id: u32, path: String) -> Result<Self::Dir, Self::Error> {
         let normalized = normalize_path(&path);
 
         // Verify it's a directory
@@ -180,28 +189,24 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let handle_path = normalized.into_owned();
-        let handle = self.handles.create_dir_handle(&handle_path);
-        Ok(Handle { id, handle })
+        Ok(SftpOpenDir {
+            path: Arc::from(normalized.into_owned()),
+            read_done: false,
+        })
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
-    async fn readdir(&mut self, id: u32, handle: SftpHandle) -> Result<Name, Self::Error> {
-        let hb = handle_as_bytes(&handle);
-        let (path, read_done) = self.handles.get_dir_handle(hb).ok_or(StatusCode::Failure)?;
-
-        if read_done {
+    async fn readdir(&mut self, id: u32, dir: &mut Self::Dir) -> Result<Name, Self::Error> {
+        if dir.read_done {
             return Err(StatusCode::Eof);
         }
 
         let entries = self
             .backend
-            .list_dir(&path)
+            .list_dir(&dir.path)
             .await
             .map_err(StatusCode::from)?;
 
-        // Mark as read
-        self.handles.mark_dir_read(hb);
+        dir.read_done = true;
 
         let files: Vec<File> = entries
             .into_iter()
@@ -222,7 +227,7 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         path: String,
         pflags: OpenFlags,
         _attrs: FileAttributes,
-    ) -> Result<Handle, Self::Error> {
+    ) -> Result<Self::File, Self::Error> {
         let normalized = normalize_path(&path);
 
         // Treat CREATE as implying write mode (some clients send CREATE without WRITE)
@@ -232,11 +237,12 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             // Write mode: open streaming write handle
             match self.backend.open_write(&normalized).await {
                 Ok(write_handle) => {
-                    let h = self
-                        .handles
-                        .create_write_handle(normalized.as_ref(), write_handle);
-                    debug!(id, path = %path, handle = %HandleForLog(&h), "Opened file for write");
-                    h
+                    debug!(id, path = %path, "Opened file for write");
+                    SftpOpenFile::Write {
+                        path: Arc::from(normalized.as_ref()),
+                        handle: Arc::new(Mutex::new(Some(write_handle))),
+                        pending_attrs: SetAttrs::default(),
+                    }
                 }
                 Err(e) => {
                     warn!(id, path = %path, error = %e, "Failed to open file for write");
@@ -247,11 +253,13 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             // Read mode: open streaming read handle
             match self.backend.open_read(&normalized).await {
                 Ok(read_handle) => {
-                    let h = self
-                        .handles
-                        .create_read_handle(normalized.as_ref(), read_handle);
-                    debug!(id, path = %path, handle = %HandleForLog(&h), "Opened file for read");
-                    h
+                    let size = read_handle.size();
+                    debug!(id, path = %path, "Opened file for read");
+                    SftpOpenFile::Read {
+                        path: Arc::from(normalized.as_ref()),
+                        handle: Arc::new(Mutex::new(read_handle)),
+                        size,
+                    }
                 }
                 Err(e) => {
                     warn!(id, path = %path, error = %e, "Failed to open file for read");
@@ -260,23 +268,26 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
             }
         };
 
-        Ok(Handle { id, handle })
+        Ok(handle)
     }
 
-    #[instrument(level = "debug", skip(self, handle), fields(handle = %HandleForLog(&handle)))]
     async fn read(
         &mut self,
         id: u32,
-        handle: SftpHandle,
+        file: &mut Self::File,
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
-        let (_path, read_handle, size) = self
-            .handles
-            .get_read_handle(handle_as_bytes(&handle))
-            .ok_or(StatusCode::Failure)?;
+        let SftpOpenFile::Read {
+            handle: read_handle,
+            size,
+            ..
+        } = file
+        else {
+            return Err(StatusCode::Failure);
+        };
 
-        if offset >= size {
+        if offset >= *size {
             return Err(StatusCode::Eof);
         }
 
@@ -294,18 +305,20 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(sftp_data(id, data))
     }
 
-    #[instrument(level = "debug", skip(self, handle, data), fields(handle = %HandleForLog(&handle), len = data.len()))]
     async fn write(
         &mut self,
         id: u32,
-        handle: SftpHandle,
+        file: &mut Self::File,
         offset: u64,
         data: SftpWriteData,
     ) -> Result<Status, Self::Error> {
-        let (_path, write_handle_arc) = self
-            .handles
-            .get_write_handle(handle_as_bytes(&handle))
-            .ok_or(StatusCode::Failure)?;
+        let SftpOpenFile::Write {
+            handle: write_handle_arc,
+            ..
+        } = file
+        else {
+            return Err(StatusCode::Failure);
+        };
 
         let mut guard = write_handle_arc.lock().await;
         if let Some(ref mut write_handle) = *guard {
@@ -352,24 +365,18 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         })
     }
 
-    async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, Self::Error> {
-        let info = self
-            .handles
-            .get_handle_info(handle_as_bytes(&handle))
-            .ok_or(StatusCode::Failure)?;
-
-        let attrs = match info {
-            HandleInfo::Dir { .. } => to_file_attributes(&FileInfo::directory()),
-            HandleInfo::Read { path, size } => {
+    async fn fstat_file(&mut self, id: u32, file: &mut Self::File) -> Result<Attrs, Self::Error> {
+        let attrs = match file {
+            SftpOpenFile::Read { path, size, .. } => {
                 let mut file_info = self
                     .backend
                     .file_info(&path)
                     .await
-                    .unwrap_or_else(|_| FileInfo::file(size));
-                file_info.size = size;
+                    .unwrap_or_else(|_| FileInfo::file(*size));
+                file_info.size = *size;
                 to_file_attributes(&file_info)
             }
-            HandleInfo::Write { path } => {
+            SftpOpenFile::Write { path, .. } => {
                 // For write handles, we don't know the final size yet
                 self.backend.file_info(&path).await.map_or_else(
                     |_| to_file_attributes(&FileInfo::file(0)),
@@ -379,6 +386,13 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         };
 
         Ok(Attrs { id, attrs })
+    }
+
+    async fn fstat_dir(&mut self, id: u32, _dir: &mut Self::Dir) -> Result<Attrs, Self::Error> {
+        Ok(Attrs {
+            id,
+            attrs: to_file_attributes(&FileInfo::directory()),
+        })
     }
 
     async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
@@ -496,41 +510,47 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         Ok(ok_status(id))
     }
 
-    async fn fsetstat(
+    async fn fsetstat_file(
         &mut self,
         id: u32,
-        handle: SftpHandle,
+        file: &mut Self::File,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         let attrs = attrs_to_set_attrs(&attrs);
         if attrs.is_empty() {
             return Ok(ok_status(id));
         }
-        let info = self
-            .handles
-            .get_handle_info(handle_as_bytes(&handle))
-            .ok_or(StatusCode::Failure)?;
-        let is_write = matches!(&info, HandleInfo::Write { .. });
 
-        let path = match info {
-            HandleInfo::Dir { path }
-            | HandleInfo::Read { path, .. }
-            | HandleInfo::Write { path } => path,
-        };
-
-        if is_write {
-            if !self
-                .handles
-                .queue_write_attrs(handle_as_bytes(&handle), &attrs)
-            {
-                return Err(StatusCode::Failure);
+        match file {
+            SftpOpenFile::Write { pending_attrs, .. } => {
+                pending_attrs.merge_from(&attrs);
             }
-        } else {
-            self.backend
-                .set_attrs(&path, attrs)
-                .await
-                .map_err(StatusCode::from)?;
+            SftpOpenFile::Read { path, .. } => {
+                self.backend
+                    .set_attrs(&path, attrs)
+                    .await
+                    .map_err(StatusCode::from)?;
+            }
         }
+
+        Ok(ok_status(id))
+    }
+
+    async fn fsetstat_dir(
+        &mut self,
+        id: u32,
+        dir: &mut Self::Dir,
+        attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        let attrs = attrs_to_set_attrs(&attrs);
+        if attrs.is_empty() {
+            return Ok(ok_status(id));
+        }
+
+        self.backend
+            .set_attrs(&dir.path, attrs)
+            .await
+            .map_err(StatusCode::from)?;
 
         Ok(ok_status(id))
     }
@@ -638,15 +658,15 @@ mod tests {
     use crate::backend::MemoryBackend;
     use proptest::prelude::*;
     use russh_sftp::protocol::{FileAttributes, OpenFlags};
-    use russh_sftp::server::Handler as SftpHandlerTrait;
+    use russh_sftp::server::{Handler as SftpHandlerTrait, ManagedSession};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn make_handler() -> SftpHandler<MemoryBackend> {
-        SftpHandler::new(Arc::new(MemoryBackend::new()))
+    fn make_handler() -> ManagedSession<SftpHandler<MemoryBackend>> {
+        ManagedSession::new(SftpHandler::new(Arc::new(MemoryBackend::new())))
     }
 
-    fn to_sftp_handle(s: impl Into<Bytes>) -> SftpHandle {
+    fn to_sftp_handle(s: impl Into<Bytes>) -> Bytes {
         s.into()
     }
 
@@ -655,7 +675,7 @@ mod tests {
     }
 
     // Helper: init the SFTP session
-    async fn init_handler(handler: &mut SftpHandler<MemoryBackend>) {
+    async fn init_handler(handler: &mut ManagedSession<SftpHandler<MemoryBackend>>) {
         handler.init(3, HashMap::new()).await.expect("init failed");
     }
 
