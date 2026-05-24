@@ -11,6 +11,7 @@ nix develop -c ./perf.sh <subcommand> [options]
 Supported subcommands:
 
 - `current`
+- `small-files`
 - `local-stack`
 - `matrix`
 - `profile`
@@ -33,6 +34,7 @@ Useful examples:
 ```bash
 nix develop -c ./perf.sh current --client bench --sizes 1024,10240
 nix develop -c ./perf.sh current --client openssh --operation all --sizes 1024
+nix develop -c ./perf.sh small-files --ciphers aes256-gcm
 nix develop -c ./perf.sh local-stack --russh-ref main --russh-sftp-ref master
 nix develop -c ./perf.sh matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
 nix develop -c ./perf.sh profile --client bench --operation roundtrip --sizes 1024
@@ -63,6 +65,15 @@ Saved runs live under `benchmark_results/runs/<run-id>/`:
 - `server-*.log` contains server logs
 
 Machine metadata now includes OS, arch, CPU model, and hostname.
+
+The `small-files` mode is the repo-native version of the historical varied
+small files benchmark. By default it transfers 1GiB as 10,251 varied-size files
+with OpenSSH `sftp`, then downloads the same files back in the same batch:
+
+```bash
+nix develop -c ./perf.sh small-files
+nix develop -c ./perf.sh small-files --ciphers aes256-gcm --runs 10 --warmup 2
+```
 
 ### macOS specifics
 
