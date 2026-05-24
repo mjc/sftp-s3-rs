@@ -508,78 +508,18 @@ fn main() -> Result<(), BoxError> {
     }
 }
 
-fn start_xctrace_profiler(
-    server: &Child,
-    artifact_dir: &Path,
-    artifact_prefix: &str,
-) -> Result<ProfilerHandle, BoxError> {
-    let xctrace = command_path("xctrace")
-        .ok_or("xctrace not found in PATH; install Xcode command line tools or Xcode")?;
-    let trace_path = artifact_dir.join(format!("{artifact_prefix}.xctrace.trace"));
-    let export_path = artifact_dir.join(format!("{artifact_prefix}.xctrace.xml"));
-    let child = Command::new(xctrace)
-        .arg("record")
-        .arg("--quiet")
-        .arg("--template")
-        .arg("Time Profiler")
-        .arg("--attach")
-        .arg(server.id().to_string())
-        .arg("--output")
-        .arg(&trace_path)
-        .arg("--no-prompt")
-        .spawn()?;
-    Ok(ProfilerHandle::Xctrace {
-        child,
-        trace_path,
-        export_path,
-    })
-}
-
-fn stop_profiler(profiler: &mut ProfilerHandle) -> Result<(), BoxError> {
-    match profiler {
-        ProfilerHandle::Xctrace {
-            child,
-            trace_path,
-            export_path,
-        } => {
-            interrupt_child(child)?;
-            let status = wait_for_exit(child, Duration::from_secs(20))?;
-            #[cfg(unix)]
-            let interrupted = status.signal() == Some(2);
-            #[cfg(not(unix))]
-            let interrupted = false;
-            if !status.success()
-                && !interrupted
-                && status.code() != Some(130)
-                && status.code() != Some(143)
-            {
-                return Err(format!("xctrace exited unsuccessfully: {status}").into());
-            }
-            if let Err(error) = export_xctrace(trace_path, export_path) {
-                eprintln!(
-                    "warning: failed to export xctrace XML for {}: {error}",
-                    trace_path.display()
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
-fn interrupt_child(child: &mut Child) -> Result<(), BoxError> {
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
+fn kill_pid(pid: u32) -> Result<(), BoxError> {
     #[cfg(unix)]
     {
         run_status(
-            Command::new("kill").arg("-INT").arg(child.id().to_string()),
-            &format!("interrupt process {}", child.id()),
+            Command::new("kill").arg("-KILL").arg(pid.to_string()),
+            &format!("kill process {pid}"),
         )?;
     }
     #[cfg(not(unix))]
     {
-        child.kill()?;
+        let _ = pid;
+        return Err("killing launched profile targets is only supported on Unix".into());
     }
     Ok(())
 }
@@ -611,7 +551,7 @@ fn export_xctrace(trace_path: &Path, export_path: &Path) -> Result<(), BoxError>
                 .arg("--input")
                 .arg(trace_path)
                 .arg("--xpath")
-                .arg("//trace-toc/run[1]/data/table[@schema=\"time-profile\"]")
+                .arg("//trace-toc/run[1]/data/table[@schema=\"cpu-profile\"]")
                 .arg("--output")
                 .arg(export_path),
             &format!("export xctrace {}", trace_path.display()),
@@ -635,6 +575,11 @@ fn wait_for_path(path: &Path, timeout: Duration) -> Result<(), BoxError> {
         thread::sleep(Duration::from_millis(100));
     }
     Err(format!("path did not appear in time: {}", path.display()).into())
+}
+
+fn read_pid(path: &Path) -> Result<u32, BoxError> {
+    let raw = fs::read_to_string(path)?;
+    Ok(raw.trim().parse()?)
 }
 
 impl AppContext {
@@ -1683,8 +1628,32 @@ fn start_server(
     ];
     let mut command = match profile_mode {
         Some(ProfileKind::Perf) if cfg!(target_os = "macos") => {
-            let mut command = Command::new(binary);
+            let trace_path = artifact_dir.join(format!("{artifact_prefix}.xctrace.trace"));
+            let target_pid_path =
+                artifact_dir.join(format!("{artifact_prefix}.xctrace-target.pid"));
+            let mut command = Command::new("xctrace");
+            command
+                .arg("record")
+                .arg("--quiet")
+                .arg("--template")
+                .arg("CPU Profiler")
+                .arg("--output")
+                .arg(&trace_path)
+                .arg("--no-prompt")
+                .arg("--launch")
+                .arg("--")
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(
+                    r#"
+printf '%s\n' "$$" > "$SFTP_PERF_XCTRACE_TARGET_PID"
+exec "$@"
+"#,
+                )
+                .arg("sftp-perf-xctrace-launch")
+                .arg(binary);
             command.args(&args);
+            command.env("SFTP_PERF_XCTRACE_TARGET_PID", &target_pid_path);
             command
         }
         Some(ProfileKind::Perf) => {
@@ -1718,16 +1687,16 @@ fn start_server(
     command.stdout(Stdio::from(log));
     command.stderr(Stdio::from(log_err));
     let child = command.spawn()?;
-    let profiler = if matches!(profile_mode, Some(ProfileKind::Perf)) && cfg!(target_os = "macos") {
-        Some(start_xctrace_profiler(
-            &child,
-            artifact_dir,
-            artifact_prefix,
-        )?)
+    let kind = if matches!(profile_mode, Some(ProfileKind::Perf)) && cfg!(target_os = "macos") {
+        RunningServerKind::XctraceLaunch {
+            trace_path: artifact_dir.join(format!("{artifact_prefix}.xctrace.trace")),
+            export_path: artifact_dir.join(format!("{artifact_prefix}.xctrace.xml")),
+            target_pid_path: artifact_dir.join(format!("{artifact_prefix}.xctrace-target.pid")),
+        }
     } else {
-        None
+        RunningServerKind::ServerProcess
     };
-    Ok(RunningServer { child, profiler })
+    Ok(RunningServer { child, kind })
 }
 
 fn wait_for_server(
@@ -1775,22 +1744,52 @@ fn wait_for_server(
 
 struct RunningServer {
     child: Child,
-    profiler: Option<ProfilerHandle>,
+    kind: RunningServerKind,
 }
 
-enum ProfilerHandle {
-    Xctrace {
-        child: Child,
+enum RunningServerKind {
+    ServerProcess,
+    XctraceLaunch {
         trace_path: PathBuf,
         export_path: PathBuf,
+        target_pid_path: PathBuf,
     },
 }
 
 fn stop_server(server: &mut RunningServer) -> Result<(), BoxError> {
-    if let Some(profiler) = &mut server.profiler {
-        stop_profiler(profiler)?;
+    match &server.kind {
+        RunningServerKind::ServerProcess => stop_child(&mut server.child),
+        RunningServerKind::XctraceLaunch {
+            trace_path,
+            export_path,
+            target_pid_path,
+        } => {
+            wait_for_path(target_pid_path, Duration::from_secs(10))?;
+            kill_pid(read_pid(target_pid_path)?)?;
+            let status = wait_for_exit(&mut server.child, Duration::from_secs(60))?;
+            #[cfg(unix)]
+            let interrupted = status.signal() == Some(2);
+            #[cfg(not(unix))]
+            let interrupted = false;
+            // xctrace returns 54 when the launched target is killed, but still
+            // writes a complete trace bundle after finalizing the recording.
+            if !status.success()
+                && !interrupted
+                && status.code() != Some(130)
+                && status.code() != Some(143)
+                && status.code() != Some(54)
+            {
+                return Err(format!("xctrace exited unsuccessfully: {status}").into());
+            }
+            if let Err(error) = export_xctrace(trace_path, export_path) {
+                eprintln!(
+                    "warning: failed to export xctrace XML for {}: {error}",
+                    trace_path.display()
+                );
+            }
+            Ok(())
+        }
     }
-    stop_child(&mut server.child)
 }
 
 fn stop_child(child: &mut Child) -> Result<(), BoxError> {
