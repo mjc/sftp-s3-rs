@@ -19,6 +19,40 @@ AUTHORIZED_KEYS_FILE="${AUTHORIZED_KEYS_FILE:-$HOME/.ssh/authorized_keys}"
 RESULTS_DIR="${RESULTS_DIR:-"$PROJECT_DIR/benchmark_results/profile-cpu-$(date +%Y%m%d-%H%M%S)"}"
 FREQUENCY="${PERF_FREQUENCY:-997}"
 EXTRA_ARGS=()
+GENERATED_FLAMEGRAPH=0
+PERF_STATUS=0
+
+generate_flamegraph() {
+    if [[ "$GENERATED_FLAMEGRAPH" -eq 1 ]]; then
+        return
+    fi
+    GENERATED_FLAMEGRAPH=1
+
+    if [[ ! -s "$RESULTS_DIR/perf.data" ]]; then
+        return
+    fi
+
+    echo ""
+    echo "Generating flamegraph..."
+    if perf script -i "$RESULTS_DIR/perf.data" 2>"$RESULTS_DIR/perf-script.err" |
+        inferno-collapse-perf |
+        inferno-flamegraph --title "sftp-s3 CPU" >"$RESULTS_DIR/flamegraph.svg"; then
+        echo "Done: $RESULTS_DIR/flamegraph.svg"
+    else
+        echo "Error: failed to generate flamegraph; see $RESULTS_DIR/perf-script.err" >&2
+    fi
+}
+
+finish() {
+    local status=$?
+    if [[ "$status" -eq 130 || "$status" -eq 143 || "$PERF_STATUS" -ne 0 ]]; then
+        generate_flamegraph
+    fi
+}
+
+trap finish EXIT
+trap 'PERF_STATUS=130; exit 130' INT
+trap 'PERF_STATUS=143; exit 143' TERM
 
 usage() {
     cat <<EOF
@@ -171,11 +205,5 @@ if [[ ! -f "$RESULTS_DIR/perf.data" ]]; then
     exit 1
 fi
 
-echo ""
-echo "Generating flamegraph..."
-perf script -i "$RESULTS_DIR/perf.data" 2>/dev/null |
-    inferno-collapse-perf |
-    inferno-flamegraph --title "sftp-s3 CPU" > "$RESULTS_DIR/flamegraph.svg"
-
-echo "Done: $RESULTS_DIR/flamegraph.svg"
+generate_flamegraph
 exit "$PERF_STATUS"
