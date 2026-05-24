@@ -34,6 +34,16 @@ generate_flamegraph() {
 
     echo ""
     echo "Generating flamegraph..."
+    if [[ -x "$PROJECT_DIR/target/release/perf-fold" ]]; then
+        if "$PROJECT_DIR/target/release/perf-fold" "$RESULTS_DIR/perf.data" 2>"$RESULTS_DIR/perf-fold.err" |
+            inferno-flamegraph --title "sftp-s3 CPU" >"$RESULTS_DIR/flamegraph.svg"; then
+            echo "Done: $RESULTS_DIR/flamegraph.svg"
+            return
+        else
+            echo "Warning: perf-fold failed; falling back to perf script (see $RESULTS_DIR/perf-fold.err)" >&2
+        fi
+    fi
+
     if perf script -i "$RESULTS_DIR/perf.data" 2>"$RESULTS_DIR/perf-script.err" |
         inferno-collapse-perf |
         inferno-flamegraph --title "sftp-s3 CPU" >"$RESULTS_DIR/flamegraph.svg"; then
