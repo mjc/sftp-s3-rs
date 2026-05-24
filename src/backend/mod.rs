@@ -1,14 +1,17 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::borrow::Cow;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod benchmark;
+pub mod delegated;
 pub mod local;
 pub mod memory;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+pub use benchmark::BenchmarkBackend;
+pub use delegated::{BackendRequest, BackendResponse, DelegatedBackend, DelegatedBackendFn};
 pub use local::LocalBackend;
 pub use memory::MemoryBackend;
 #[cfg(feature = "s3")]
@@ -32,6 +35,8 @@ pub enum BackendError {
     IsADirectory,
     #[error("Directory not empty")]
     DirectoryNotEmpty,
+    #[error("Operation not supported by this backend")]
+    Unsupported,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Backend error: {0}")]
@@ -46,10 +51,58 @@ pub struct DirEntry {
 }
 
 /// File metadata information
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+/// Settable file attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetAttrs {
+    pub size: Option<u64>,
+    pub permissions: Option<u32>,
+    pub atime: Option<u32>,
+    pub mtime: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+impl SetAttrs {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.size.is_none()
+            && self.permissions.is_none()
+            && self.atime.is_none()
+            && self.mtime.is_none()
+            && self.uid.is_none()
+            && self.gid.is_none()
+    }
+
+    pub fn merge_from(&mut self, other: &Self) {
+        self.size = other.size.or(self.size);
+        self.permissions = other.permissions.or(self.permissions);
+        self.atime = other.atime.or(self.atime);
+        self.mtime = other.mtime.or(self.mtime);
+        self.uid = other.uid.or(self.uid);
+        self.gid = other.gid.or(self.gid);
+    }
+}
+
+/// Backend capability flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub symlinks: bool,
+    pub set_attrs: bool,
+    pub delegated_safe_streaming_fallback: bool,
+}
+
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct FileInfo {
     pub size: u64,
+    pub kind: FileKind,
     pub is_dir: bool,
     pub permissions: u32,
     pub mtime: u32,
@@ -60,61 +113,65 @@ pub struct FileInfo {
 
 impl FileInfo {
     /// Create `FileInfo` for a directory.
-    pub fn directory() -> Self {
+    fn new(
+        size: u64,
+        kind: FileKind,
+        permissions: u32,
+        mtime: u32,
+        atime: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Self {
         Self {
-            size: 4096,
-            is_dir: true,
-            permissions: 0o755,
-            mtime: current_timestamp(),
-            atime: current_timestamp(),
-            uid: 1000,
-            gid: 1000,
+            size,
+            kind,
+            is_dir: kind == FileKind::Directory,
+            permissions,
+            mtime,
+            atime,
+            uid,
+            gid,
         }
+    }
+
+    /// Create `FileInfo` for a directory.
+    pub fn directory() -> Self {
+        let now = current_timestamp();
+        Self::new(4096, FileKind::Directory, 0o755, now, now, 1000, 1000)
     }
 
     /// Create `FileInfo` for a directory with specific mtime.
     pub fn directory_with_mtime(mtime: u32) -> Self {
-        Self {
-            size: 4096,
-            is_dir: true,
-            permissions: 0o755,
-            mtime,
-            atime: mtime,
-            uid: 1000,
-            gid: 1000,
-        }
+        Self::new(4096, FileKind::Directory, 0o755, mtime, mtime, 1000, 1000)
     }
 
     /// Create `FileInfo` for a regular file.
     pub fn file(size: u64) -> Self {
-        Self {
-            size,
-            is_dir: false,
-            permissions: 0o644,
-            mtime: current_timestamp(),
-            atime: current_timestamp(),
-            uid: 1000,
-            gid: 1000,
-        }
+        let now = current_timestamp();
+        Self::new(size, FileKind::File, 0o644, now, now, 1000, 1000)
     }
 
     /// Create `FileInfo` for a regular file with specific mtime.
     pub fn file_with_mtime(size: u64, mtime: u32) -> Self {
-        Self {
-            size,
-            is_dir: false,
-            permissions: 0o644,
-            mtime,
-            atime: mtime,
-            uid: 1000,
-            gid: 1000,
-        }
+        Self::new(size, FileKind::File, 0o644, mtime, mtime, 1000, 1000)
+    }
+
+    /// Create FileInfo for a symlink.
+    pub fn symlink(size: u64) -> Self {
+        let now = current_timestamp();
+        Self::new(size, FileKind::Symlink, 0o777, now, now, 1000, 1000)
     }
 }
 
 /// Handle for reading file data in chunks
 #[async_trait]
 pub trait ReadHandle: Send + Sync {
+    /// Fast path for handles that can satisfy the read synchronously without
+    /// constructing the boxed `async_trait` future.
+    fn try_read_at(&self, _offset: u64, _len: u32) -> Option<BackendResult<Bytes>> {
+        None
+    }
+
     /// Read data at the given offset
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes>;
 
@@ -125,6 +182,12 @@ pub trait ReadHandle: Send + Sync {
 /// Handle for writing file data in chunks (supports streaming uploads)
 #[async_trait]
 pub trait WriteHandle: Send {
+    /// Fast path for handles that can accept a write synchronously without
+    /// constructing the boxed `async_trait` future.
+    fn try_write_at(&mut self, _offset: u64, _data: &Bytes) -> Option<BackendResult<()>> {
+        None
+    }
+
     /// Write data at the given offset. Takes Bytes to support zero-copy passing
     /// from the SFTP protocol layer, avoiding unnecessary copies in the hot path.
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()>;
@@ -149,6 +212,23 @@ impl BufferedReadHandle {
 
 #[async_trait]
 impl ReadHandle for BufferedReadHandle {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+        let start = match usize::try_from(offset) {
+            Ok(start) => start,
+            Err(_) => {
+                return Some(Err(BackendError::Other(
+                    "read offset too large for this platform".into(),
+                )));
+            }
+        };
+        if start >= self.content.len() {
+            return Some(Ok(Bytes::new()));
+        }
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        let end = std::cmp::min(start.saturating_add(len), self.content.len());
+        Some(Ok(self.content.slice(start..end)))
+    }
+
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
         let start = usize::try_from(offset)
             .map_err(|_| BackendError::Other("read offset too large for this platform".into()))?;
@@ -227,11 +307,11 @@ impl WriteHandle for BufferedWriteHandle {
 pub struct BufferedWriteWithBackend<B: Backend> {
     inner: BufferedWriteHandle,
     path: String,
-    backend: Arc<B>,
+    backend: B,
 }
 
 impl<B: Backend> BufferedWriteWithBackend<B> {
-    pub fn new(path: String, backend: Arc<B>) -> Self {
+    pub fn new(path: String, backend: B) -> Self {
         Self {
             inner: BufferedWriteHandle::new(),
             path,
@@ -262,6 +342,15 @@ impl<B: Backend> WriteHandle for BufferedWriteWithBackend<B> {
 /// All paths are normalized strings without leading slashes.
 #[async_trait]
 pub trait Backend: Send + Sync + 'static {
+    /// Return backend capability flags.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            symlinks: false,
+            set_attrs: false,
+            delegated_safe_streaming_fallback: true,
+        }
+    }
+
     /// List directory contents
     ///
     /// Returns entries for the directory at `path`.
@@ -270,6 +359,11 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Get file or directory information
     async fn file_info(&self, path: &str) -> BackendResult<FileInfo>;
+
+    /// Get file or directory information without following symlinks.
+    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
+        self.file_info(path).await
+    }
 
     /// Create a directory
     ///
@@ -304,6 +398,21 @@ pub trait Backend: Send + Sync + 'static {
     /// For backends that support multipart uploads (e.g., S3), this enables
     /// uploading large files without buffering them entirely in memory.
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>>;
+
+    /// Read the target of a symlink.
+    async fn read_link(&self, _path: &str) -> BackendResult<String> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Create a symlink.
+    async fn symlink(&self, _linkpath: &str, _targetpath: &str) -> BackendResult<()> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Apply supported metadata mutations to a path.
+    async fn set_attrs(&self, _path: &str, _attrs: SetAttrs) -> BackendResult<()> {
+        Err(BackendError::Unsupported)
+    }
 }
 
 /// Normalize a path: trim leading/trailing slashes, handle empty as root,
@@ -311,6 +420,13 @@ pub trait Backend: Send + Sync + 'static {
 /// Returns `Cow::Borrowed` when input is already normalized, avoiding allocation.
 #[must_use]
 pub fn normalize_path(path: &str) -> Cow<'_, str> {
+    if !path.as_bytes().contains(&b'/') {
+        return match path {
+            "" | "." | ".." => Cow::Borrowed(""),
+            _ => Cow::Borrowed(path),
+        };
+    }
+
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
         return Cow::Borrowed("");
@@ -364,6 +480,14 @@ mod tests {
         assert!(matches!(
             normalize_path("/normal/file.txt/"),
             Cow::Borrowed("normal/file.txt")
+        ));
+    }
+
+    #[test]
+    fn test_normalize_plain_filename_borrows() {
+        assert!(matches!(
+            normalize_path("plain-file.txt"),
+            Cow::Borrowed("plain-file.txt")
         ));
     }
 

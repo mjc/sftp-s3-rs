@@ -1,11 +1,15 @@
 //! # sftp-s3
 //!
-//! A pluggable SFTP server with S3 and custom backend support.
+//! A pluggable SFTP/SCP server with local, memory, S3, and delegated backend support.
+//!
+//! `sftp-s3-rs` is the maintained parity target for the broader project family. The Rust
+//! implementation is the reference point for lifecycle control, backend semantics, and protocol
+//! behavior.
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use sftp_s3::{Server, ServerConfig, MemoryBackend};
+//! use sftp_s3::{MemoryBackend, Server, ServerConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -14,18 +18,20 @@
 //!         .port(2222)
 //!         .with_generated_key();
 //!
-//!     Server::new(backend)
+//!     let handle = Server::new(backend)
 //!         .config(config)
 //!         .with_users(vec![("user".into(), "pass".into())])
-//!         .run()
-//!         .await
+//!         .serve()
+//!         .await?;
+//!
+//!     handle.wait().await
 //! }
 //! ```
 //!
 //! ## S3 Backend
 //!
 //! ```rust,ignore
-//! use sftp_s3::{Server, ServerConfig, S3Backend, S3Config};
+//! use sftp_s3::{S3Backend, S3Config, Server, ServerConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -33,11 +39,13 @@
 //!         .with_prefix("sftp/");
 //!     let backend = S3Backend::from_env(s3_config).await;
 //!
-//!     Server::new(backend)
+//!     let handle = Server::new(backend)
 //!         .config(ServerConfig::new().with_generated_key())
 //!         .with_users(vec![("user".into(), "pass".into())])
-//!         .run()
-//!         .await
+//!         .serve()
+//!         .await?;
+//!
+//!     handle.wait().await
 //! }
 //! ```
 //!
@@ -63,7 +71,6 @@
 
 pub mod backend;
 pub mod error;
-pub mod handle;
 pub mod scp_handler;
 pub mod server;
 pub mod sftp_handler;
@@ -72,9 +79,12 @@ pub mod ssh_handler;
 // Re-exports for convenience
 pub use backend::local::LocalBackend;
 pub use backend::memory::MemoryBackend;
-pub use backend::{Backend, BackendError, BackendResult, DirEntry, FileInfo};
+pub use backend::{
+    Backend, BackendCapabilities, BackendError, BackendRequest, BackendResponse, BackendResult,
+    BenchmarkBackend, DelegatedBackend, DelegatedBackendFn, DirEntry, FileInfo, FileKind, SetAttrs,
+};
 #[cfg(feature = "s3")]
 pub use backend::{S3Backend, S3Config};
 
 pub use error::Error;
-pub use server::{parse_cipher, Server, ServerConfig, AVAILABLE_CIPHERS};
+pub use server::{parse_cipher, Server, ServerConfig, ServerHandle, AVAILABLE_CIPHERS};

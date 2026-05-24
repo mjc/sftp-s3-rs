@@ -1,7 +1,11 @@
 //! SFTP server with pluggable backends (local filesystem, S3, memory)
 
 use clap::Parser;
-use sftp_s3::{parse_cipher, LocalBackend, MemoryBackend, Server, ServerConfig, AVAILABLE_CIPHERS};
+use sftp_s3::{
+    parse_cipher, BenchmarkBackend, LocalBackend, MemoryBackend, Server, ServerConfig,
+    AVAILABLE_CIPHERS,
+};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -11,6 +15,7 @@ enum Backend {
     #[cfg(feature = "s3")]
     S3,
     Memory,
+    Benchmark,
 }
 
 impl std::str::FromStr for Backend {
@@ -22,11 +27,12 @@ impl std::str::FromStr for Backend {
             #[cfg(feature = "s3")]
             "s3" => Ok(Backend::S3),
             "memory" => Ok(Backend::Memory),
+            "benchmark" => Ok(Backend::Benchmark),
             other => {
                 let available = if cfg!(feature = "s3") {
-                    "local, s3, memory"
+                    "local, s3, memory, benchmark"
                 } else {
-                    "local, memory"
+                    "local, memory, benchmark"
                 };
                 Err(format!(
                     "unknown backend '{other}', choose from: {available}"
@@ -98,6 +104,10 @@ struct Cli {
     /// Enable compression (disabled by default for better throughput)
     #[arg(long, env = "COMPRESSION")]
     compression: bool,
+
+    /// Maximum concurrent SSH connections
+    #[arg(long, env = "MAX_CONNECTIONS")]
+    max_connections: Option<NonZeroUsize>,
 }
 
 /// Parse an OpenSSH public key line
@@ -215,6 +225,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("Compression enabled");
     }
 
+    if let Some(limit) = cli.max_connections {
+        config = config.with_max_connections(limit.get());
+        eprintln!("Max connections: {}", limit);
+    }
+
     // Parse credentials
     let users = parse_users(&cli.users);
     let authorized_keys = load_authorized_keys(
@@ -259,6 +274,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Backend::Memory => {
             eprintln!("Backend: in-memory (data will be lost on exit)");
             run_server(MemoryBackend::new(), config, users, authorized_keys).await
+        }
+        Backend::Benchmark => {
+            eprintln!("Backend: benchmark discard/synthetic data");
+            run_server(BenchmarkBackend::new(), config, users, authorized_keys).await
         }
     }
 }

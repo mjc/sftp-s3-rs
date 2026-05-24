@@ -2,14 +2,26 @@
 
 A pluggable SFTP server with S3 and custom backend support, written in Rust.
 
+## Project Status / Parity Target
+
+`sftp-s3-rs` is the maintained implementation target for this project family. The Elixir
+`sftpd-s3` codebase remains a useful behavioral reference, but Rust is the canonical target for
+new lifecycle APIs, backend semantics, protocol behavior, and documentation.
+
 ## Features
 
 - SFTP server using [russh](https://github.com/Eugeny/russh)
+- SCP send and receive support for files and recursive directories
 - Pluggable backend trait for custom storage implementations
 - Built-in backends:
+  - **Local** - Local filesystem backend with symlink and metadata mutation support
   - **Memory** - In-memory storage for testing/development
   - **S3** - Amazon S3 or S3-compatible storage (LocalStack, MinIO)
+- Delegated/process-backed backend adapter for actor-style integrations
 - Password authentication
+- Public-key authentication
+- Graceful lifecycle API with `serve()` and `ServerHandle`
+- Optional SSH connection limits with `max_connections`
 - Async/await with Tokio
 
 ## Guides
@@ -18,6 +30,29 @@ A pluggable SFTP server with S3 and custom backend support, written in Rust.
 - [CUSTOM_BACKENDS.md](CUSTOM_BACKENDS.md) for implementing your own backend
 - [TELEMETRY.md](TELEMETRY.md) for tracing, span fields, and operational logging
 
+## Capability Matrix
+
+| Capability | `sftp-s3-rs` | `sftpd-s3` reference | Notes |
+|----------|----------|----------|----------|
+| Password auth | Yes | Yes | Rust CLI and embedded API |
+| Public-key auth | Yes | Yes | Authorized keys and callback-based auth |
+| SFTP | Yes | Yes | Rust is the protocol reference target |
+| SCP receive/send | Yes | Yes | Rust supports file and recursive directory transfer |
+| Local backend | Yes | Yes | Rust local backend supports symlinks and metadata mutation |
+| Memory backend | Yes | Yes | Rust memory backend is the protocol semantics reference backend |
+| S3 backend | Yes | Yes | Uses `.keep` directory markers |
+| Session limits | Yes | Yes | `ServerConfig::with_max_connections` / `MAX_CONNECTIONS` |
+| Graceful shutdown API | Yes | Yes | `serve()`, `serve_on_socket()`, `ServerHandle` |
+| Delegated backends | Yes | Yes | Rust `DelegatedBackend` is the process-backed equivalent |
+| Symlink support | Local, memory, delegated | Reference support | S3 returns explicit `OpUnsupported` |
+| Metadata mutation by backend | Local, memory, delegated | Reference support | S3 returns explicit `OpUnsupported`; empty `setstat` remains `Ok` |
+
+## Migration Note
+
+If you are moving from `sftpd-s3`, treat `sftp-s3-rs` as the canonical implementation target.
+Match behavior against Rust first. The Rust API now exposes explicit lifecycle control,
+connection limits, delegated backends, and per-backend capability differences instead of silently
+acknowledging unsupported operations.
 ## Quick Start
 
 ```rust
@@ -30,11 +65,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .port(2222)
         .with_generated_key();
 
-    Server::new(backend)
+    let handle = Server::new(backend)
         .config(config)
         .with_users(vec![("user".into(), "pass".into())])
-        .run()
-        .await
+        .serve()
+        .await?;
+
+    handle.wait().await
 }
 ```
 
@@ -132,7 +169,7 @@ cargo run --example memory_server
 Run the S3 backend example:
 
 ```bash
-SFTP_BUCKET=my-bucket cargo run --example s3_server
+S3_BUCKET=my-bucket cargo run --example s3_server
 ```
 
 Connect with an SFTP client:
@@ -185,6 +222,153 @@ overhead without relying on SFTP glob expansion.
 | varied small files | 10,251 | 1GiB upload + 1GiB download | default OpenSSH | 224.0 MB/s | 2,242.7 files/s | 9.142s +/- 0.189s | 269.0 MB/s | 2,692.8 files/s | 7.614s +/- 0.126s | +20.1% |
 | varied small files | 10,251 | 1GiB upload + 1GiB download | aes256-gcm | 256.1 MB/s | 2,563.4 files/s | 7.998s +/- 0.131s | 334.6 MB/s | 3,349.8 files/s | 6.120s +/- 0.077s | +30.7% |
 
+## Benchmark Client
+
+The `sftp-bench-client` binary is a Rust SFTP client for measuring this server without relying on
+the system `sftp` command:
+
+```bash
+nix develop -c cargo run --release --bin sftp-bench-client -- \
+  --host 127.0.0.1 \
+  --port 2222 \
+  --user benchmark \
+  --password benchmark \
+  --operation roundtrip \
+  --size 256MiB \
+  --iterations 5
+```
+
+It supports `upload`, `download`, and `roundtrip` modes. Download mode uploads fixture files before
+measurement, then times repeated reads. By default benchmark files are removed after each run; pass
+`--keep-files` to inspect them on the server.
+
+## Benchmark Matrix
+
+Benchmarking and profiling now go through the `sftp-perf` runner. It supports:
+
+- current-stack reruns
+- local `russh` / `russh-sftp` stack reruns
+- russh × russh-sftp matrices
+- profiling traces (`perf` on Linux, `xctrace` on macOS)
+- `heaptrack` recording
+- both the repo benchmark client and stock OpenSSH
+- upload, download, and roundtrip workloads
+
+The generic entrypoint is:
+
+```bash
+nix develop -c ./perf.sh <subcommand> [options]
+```
+
+Available subcommands:
+
+- `current`
+- `small-files`
+- `local-stack`
+- `matrix`
+- `profile`
+- `heaptrack`
+- `list`
+- `show`
+- `mark-invalid`
+- `mark-valid`
+
+Common options include:
+
+- `--client bench|openssh`
+- `--operation upload|download|roundtrip|all`
+- `--sizes 1024,10240`
+- `--ciphers aes256-gcm`
+
+Examples:
+
+```bash
+nix develop -c ./perf.sh current --client bench --sizes 1024,10240
+nix develop -c ./perf.sh current --client openssh --operation all --sizes 1024
+nix develop -c ./perf.sh small-files --ciphers aes256-gcm
+nix develop -c ./perf.sh local-stack --russh-ref main --russh-sftp-ref master
+nix develop -c ./perf.sh matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
+nix develop -c ./perf.sh profile --client bench --operation roundtrip --sizes 1024
+nix develop -c ./perf.sh heaptrack --client openssh --operation upload --sizes 1024
+nix develop -c ./perf.sh list --all
+nix develop -c ./perf.sh mark-invalid 1779548493-profile --reason "system busy"
+nix develop -c ./perf.sh show 1779548808-matrix
+```
+
+Compatibility wrappers:
+
+- `./benchmark-all.sh ...` delegates to `./perf.sh matrix ...`
+- `./scripts/benchmark-russh-sftp-local.sh ...` delegates to `./perf.sh local-stack ...`
+
+The matrix defaults to a 2x2 comparison:
+
+- `current-current` = `russh main` + `russh-sftp master`
+- `current-mjc` = `russh main` + `russh-sftp deserialize-bytes-optimization`
+- `mjc-current` = `russh mjc/own-inbound-channel-payloads` + `russh-sftp master`
+- `mjc-mjc` = `russh mjc/own-inbound-channel-payloads` + `russh-sftp deserialize-bytes-optimization`
+
+Results are written under `benchmark_results/runs/<run-id>/` with:
+
+- `manifest.json` for refs, client, backend, sizes, operations, and machine metadata
+- `results.json` for structured timings and throughput
+- `summary.txt` for the human-readable summary, including host OS / arch / CPU / hostname
+- `artifacts/` for profiler output (`perf.data` on Linux profile runs, `.xctrace.trace` plus exported XML on macOS profile runs), heaptrack output, and bench-client JSON
+- `server-*.log` for server logs
+
+The runner keeps stable cached build outputs under `.perf-cache/` and uses `sccache` automatically
+when available.
+Runs can be annotated with `--note` at creation time, marked invalid later with `mark-invalid`, and
+restored to comparison eligibility with `mark-valid`. Invalid runs are skipped automatically when the
+runner looks for the previous comparable result.
+
+`small-files` is the repo-native version of the varied small files workload. By default it transfers
+1GiB as 10,251 deterministic varied-size files using explicit OpenSSH `sftp` batch entries, then
+downloads the same files in the same batch and reports both throughput and file operations per
+second. Use `--total-size-mb`, `--files`, `--runs`, and `--warmup` to tune the workload.
+
+Results below were measured on a Darwin arm64 Apple Silicon machine with the Rust benchmark client,
+the `benchmark` backend, and the 2x2 matrix:
+
+### Darwin arm64 matrix results
+
+#### `aes256-gcm`
+
+| Config | 1024MB MB/s | 1024MB mean | 10240MB MB/s | 10240MB mean |
+| --- | ---: | ---: | ---: | ---: |
+| current-current | 345.9 | 5.921s | 332.3 | 61.626s |
+| current-mjc | 1040.1 | 1.969s | 998.5 | 20.511s |
+| mjc-current | 343.2 | 5.968s | 328.8 | 62.293s |
+| mjc-mjc | 936.9 | 2.186s | 909.0 | 22.530s |
+
+Under `aes256-gcm`, the `russh-sftp` MJC branch is carrying nearly all of the win on this machine:
+`current-mjc` is about 3x faster than `current-current`, while `mjc-current` stays essentially flat
+against upstream/current. Pairing both MJC branches together remains much faster than upstream, but
+slightly behind `current-mjc`, so the `russh` branch is not where the large gain is coming from in
+this cipher on Apple Silicon.
+
+#### `chacha20-poly1305`
+
+| Config | 1024MB MB/s | 1024MB mean | 10240MB MB/s | 10240MB mean |
+| --- | ---: | ---: | ---: | ---: |
+| current-current | 225.3 | 9.091s | 231.6 | 88.446s |
+| current-mjc | 412.1 | 4.970s | 394.5 | 51.910s |
+| mjc-current | 247.0 | 8.293s | 252.4 | 81.136s |
+| mjc-mjc | 491.4 | 4.168s | 491.7 | 41.653s |
+
+Under `chacha20-poly1305`, both MJC branches help and `mjc-mjc` is the best combination. The
+`russh-sftp` branch still contributes most of the improvement, but unlike the GCM run, the `russh`
+branch also moves the result in the right direction. On this M1 machine, `aes256-gcm` still
+outperforms `chacha20-poly1305` across all four configs, which matches the expectation that Apple
+Silicon's AES acceleration makes GCM especially strong here.
+
+Default transfer sizes are:
+
+```text
+1MiB, 32MiB, 256MiB, 1GiB, 10GiB, 50GiB, 100GiB
+```
+
+Use `--note` to annotate a run at creation time. Use `list`, `show`, `mark-invalid`, and
+`mark-valid` to manage historical runs under `benchmark_results/runs/`.
 ## Docker Deployment
 
 ### Quick Start
@@ -261,6 +445,7 @@ aws s3 ls s3://test-bucket/sftp/ --endpoint-url="http://localhost:4566"
 |----------|---------|---------|---------|
 | `BACKEND` | `memory` | All | Storage backend: `memory`, `local`, or `s3` |
 | `PORT` | `2222` | All | SFTP listening port |
+| `MAX_CONNECTIONS` | - | All | Maximum concurrent SSH connections |
 | `SFTP_USERS` | - | All | Comma-separated user:password pairs (required unless using authorized_keys) |
 | `RUST_LOG` | `sftp_s3=info` | All | Logging level |
 | `HOST_KEY_FILE` | `/keys/ssh_host_ed25519_key` | All | Path to SSH host key |

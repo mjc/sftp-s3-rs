@@ -29,9 +29,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let backend = LocalBackend::new(&root);
     let config = ServerConfig::new().port(2222).with_key_from_env()?;
 
-    Server::new(backend)
+    let handle = Server::new(backend)
         .config(config)
         .with_users(vec![("user".into(), "pass".into())])
-        .run()
-        .await
+        .serve()
+        .await?;
+
+    println!("Listening on {}", handle.local_addr());
+    handle.wait().await
 }

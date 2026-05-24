@@ -85,9 +85,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // All loaded keys authorize any username
-    Server::new(MemoryBackend::new())
+    let handle = Server::new(MemoryBackend::new())
         .config(config)
         .with_pubkey_auth(move |_user, key| keys.iter().any(|k| k == key))
-        .run()
-        .await
+        .serve()
+        .await?;
+
+    println!("Listening on {}", handle.local_addr());
+    handle.wait().await
 }

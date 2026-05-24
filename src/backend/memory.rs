@@ -1,26 +1,109 @@
 use super::{
-    normalize_path, Backend, BackendError, BackendResult, BufferedReadHandle, DirEntry, FileInfo,
-    ReadHandle, WriteHandle,
+    current_timestamp, normalize_path, Backend, BackendCapabilities, BackendError, BackendResult,
+    BufferedReadHandle, DirEntry, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-const KEEP_MARKER: &str = ".keep";
-
-/// File data stored in memory
 #[derive(Debug, Clone)]
-struct FileData {
-    content: Bytes,
+struct EntryMeta {
+    permissions: u32,
+    atime: u32,
     mtime: u32,
+    uid: u32,
+    gid: u32,
 }
 
-/// In-memory storage backend for testing and development
+impl EntryMeta {
+    fn file_default() -> Self {
+        let now = current_timestamp();
+        Self {
+            permissions: 0o644,
+            atime: now,
+            mtime: now,
+            uid: 1000,
+            gid: 1000,
+        }
+    }
+
+    fn dir_default() -> Self {
+        let now = current_timestamp();
+        Self {
+            permissions: 0o755,
+            atime: now,
+            mtime: now,
+            uid: 1000,
+            gid: 1000,
+        }
+    }
+
+    fn symlink_default() -> Self {
+        let now = current_timestamp();
+        Self {
+            permissions: 0o777,
+            atime: now,
+            mtime: now,
+            uid: 1000,
+            gid: 1000,
+        }
+    }
+
+    fn apply(&mut self, attrs: &SetAttrs) {
+        if let Some(permissions) = attrs.permissions {
+            self.permissions = permissions;
+        }
+        if let Some(atime) = attrs.atime {
+            self.atime = atime;
+        }
+        if let Some(mtime) = attrs.mtime {
+            self.mtime = mtime;
+        }
+        if let Some(uid) = attrs.uid {
+            self.uid = uid;
+        }
+        if let Some(gid) = attrs.gid {
+            self.gid = gid;
+        }
+    }
+
+    fn to_info(&self, size: u64, kind: FileKind) -> FileInfo {
+        FileInfo {
+            size,
+            kind,
+            is_dir: kind == FileKind::Directory,
+            permissions: self.permissions,
+            mtime: self.mtime,
+            atime: self.atime,
+            uid: self.uid,
+            gid: self.gid,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum EntryData {
+    File { content: Bytes, meta: EntryMeta },
+    Symlink { target: String, meta: EntryMeta },
+    DirMarker { meta: EntryMeta },
+}
+
+impl EntryData {
+    fn lstat_info(&self) -> FileInfo {
+        match self {
+            Self::File { content, meta } => meta.to_info(content.len() as u64, FileKind::File),
+            Self::Symlink { target, meta } => meta.to_info(target.len() as u64, FileKind::Symlink),
+            Self::DirMarker { meta } => meta.to_info(4096, FileKind::Directory),
+        }
+    }
+}
+
+/// In-memory storage backend for testing and development.
 #[must_use]
 pub struct MemoryBackend {
-    files: Arc<RwLock<HashMap<String, FileData>>>,
+    entries: Arc<RwLock<HashMap<String, EntryData>>>,
 }
 
 impl Default for MemoryBackend {
@@ -32,44 +115,183 @@ impl Default for MemoryBackend {
 impl MemoryBackend {
     pub fn new() -> Self {
         Self {
-            files: Arc::new(RwLock::new(HashMap::new())),
+            entries: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Create with pre-populated files
+    /// Create with pre-populated files.
     pub fn with_files(files: HashMap<String, impl Into<Bytes>>) -> Self {
-        let mtime = super::current_timestamp();
-        let files = files
+        let entries = files
             .into_iter()
-            .map(|(k, content)| {
+            .map(|(path, content)| {
                 (
-                    k,
-                    FileData {
+                    normalize_path(&path).into_owned(),
+                    EntryData::File {
                         content: content.into(),
-                        mtime,
+                        meta: EntryMeta::file_default(),
                     },
                 )
             })
             .collect();
+
         Self {
-            files: Arc::new(RwLock::new(files)),
+            entries: Arc::new(RwLock::new(entries)),
         }
     }
-}
 
-#[async_trait]
-impl Backend for MemoryBackend {
-    async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
-        let normalized = normalize_path(path);
-        let prefix = if normalized.is_empty() {
+    fn dir_exists(entries: &HashMap<String, EntryData>, path: &str) -> bool {
+        if path.is_empty() {
+            return true;
+        }
+
+        matches!(entries.get(path), Some(EntryData::DirMarker { .. }))
+            || Self::has_descendants(entries, path)
+    }
+
+    fn has_descendants(entries: &HashMap<String, EntryData>, path: &str) -> bool {
+        let prefix = format!("{path}/");
+        entries.keys().any(|key| key.starts_with(&prefix))
+    }
+
+    fn resolve_link_target(link_path: &str, target: &str) -> String {
+        if target.starts_with('/') {
+            return normalize_virtual_path(target);
+        }
+
+        let parent = link_path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        if parent.is_empty() {
+            normalize_virtual_path(target)
+        } else {
+            normalize_virtual_path(&format!("{parent}/{target}"))
+        }
+    }
+
+    fn resolve_info(
+        entries: &HashMap<String, EntryData>,
+        path: &str,
+        follow_symlinks: bool,
+        depth: usize,
+    ) -> BackendResult<FileInfo> {
+        if depth > 40 {
+            return Err(BackendError::Other(
+                "too many levels of symbolic links".into(),
+            ));
+        }
+
+        if path.is_empty() {
+            return Ok(FileInfo::directory());
+        }
+
+        match entries.get(path) {
+            Some(EntryData::File { .. }) | Some(EntryData::DirMarker { .. }) => {
+                Ok(entries.get(path).expect("entry exists").lstat_info())
+            }
+            Some(EntryData::Symlink { target, .. }) if follow_symlinks => {
+                let resolved = Self::resolve_link_target(path, target);
+                Self::resolve_info(entries, &resolved, true, depth + 1)
+            }
+            Some(EntryData::Symlink { .. }) => {
+                Ok(entries.get(path).expect("entry exists").lstat_info())
+            }
+            None if Self::has_descendants(entries, path) => Ok(FileInfo::directory()),
+            None => Err(BackendError::NotFound),
+        }
+    }
+
+    fn read_file_resolved(
+        entries: &HashMap<String, EntryData>,
+        path: &str,
+        depth: usize,
+    ) -> BackendResult<Bytes> {
+        if depth > 40 {
+            return Err(BackendError::Other(
+                "too many levels of symbolic links".into(),
+            ));
+        }
+
+        match entries.get(path) {
+            Some(EntryData::File { content, .. }) => Ok(content.clone()),
+            Some(EntryData::Symlink { target, .. }) => {
+                let resolved = Self::resolve_link_target(path, target);
+                Self::read_file_resolved(entries, &resolved, depth + 1)
+            }
+            Some(EntryData::DirMarker { .. }) => Err(BackendError::IsADirectory),
+            None if Self::has_descendants(entries, path) => Err(BackendError::IsADirectory),
+            None => Err(BackendError::NotFound),
+        }
+    }
+
+    fn immediate_children(
+        entries: &HashMap<String, EntryData>,
+        path: &str,
+    ) -> BackendResult<Vec<DirEntry>> {
+        if !path.is_empty() {
+            match entries.get(path) {
+                Some(EntryData::DirMarker { .. }) => {}
+                Some(_) => return Err(BackendError::NotADirectory),
+                None if !Self::has_descendants(entries, path) => {
+                    return Err(BackendError::NotFound)
+                }
+                None => {}
+            }
+        }
+
+        let prefix = if path.is_empty() {
             String::new()
         } else {
-            format!("{normalized}/")
+            format!("{path}/")
         };
 
-        let files = self.files.read();
-        let mut entries_by_name = BTreeMap::new();
-        let mut entries = vec![
+        let mut seen = HashSet::new();
+        let mut children = BTreeMap::new();
+
+        for (key, entry) in entries {
+            let relative = if prefix.is_empty() {
+                key.as_str()
+            } else if let Some(stripped) = key.strip_prefix(&prefix) {
+                stripped
+            } else {
+                continue;
+            };
+
+            if relative.is_empty() {
+                continue;
+            }
+
+            let name = relative.split('/').next().unwrap_or(relative);
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+
+            let child_path = if path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{path}/{name}")
+            };
+
+            let attrs = if relative.contains('/') {
+                match entries.get(&child_path) {
+                    Some(EntryData::DirMarker { .. }) => FileInfo::directory(),
+                    Some(other) => other.lstat_info(),
+                    None => FileInfo::directory(),
+                }
+            } else {
+                entry.lstat_info()
+            };
+
+            children.insert(
+                name.to_string(),
+                DirEntry {
+                    name: name.to_string(),
+                    attrs,
+                },
+            );
+        }
+
+        let mut result = vec![
             DirEntry {
                 name: ".".to_string(),
                 attrs: FileInfo::directory(),
@@ -79,131 +301,171 @@ impl Backend for MemoryBackend {
                 attrs: FileInfo::directory(),
             },
         ];
+        result.extend(children.into_values());
+        Ok(result)
+    }
+}
 
-        for (key, data) in files.iter() {
-            let relative = if prefix.is_empty() {
-                key.as_str()
-            } else if let Some(stripped) = key.strip_prefix(&prefix) {
-                stripped
-            } else {
-                continue;
-            };
-
-            // Get first path component
-            let name = relative.split('/').next().unwrap_or(relative);
-
-            if name.is_empty() || name == KEEP_MARKER {
-                continue;
-            }
-
-            let is_dir = relative.contains('/');
-            let attrs = if is_dir {
-                FileInfo::directory_with_mtime(data.mtime)
-            } else {
-                FileInfo::file_with_mtime(
-                    u64::try_from(data.content.len()).unwrap_or(u64::MAX),
-                    data.mtime,
-                )
-            };
-
-            entries_by_name.entry(name.to_string()).or_insert(attrs);
+#[async_trait]
+impl Backend for MemoryBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            symlinks: true,
+            set_attrs: true,
+            delegated_safe_streaming_fallback: true,
         }
+    }
 
-        entries.extend(
-            entries_by_name
-                .into_iter()
-                .map(|(name, attrs)| DirEntry { name, attrs }),
-        );
-
-        Ok(entries)
+    async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
+        let normalized = normalize_path(path);
+        let entries = self.entries.read();
+        Self::immediate_children(&entries, normalized.as_ref())
     }
 
     async fn file_info(&self, path: &str) -> BackendResult<FileInfo> {
         let normalized = normalize_path(path);
+        let entries = self.entries.read();
+        Self::resolve_info(&entries, normalized.as_ref(), true, 0)
+    }
 
-        if normalized.is_empty() {
-            return Ok(FileInfo::directory());
-        }
-
-        let files = self.files.read();
-
-        // Check if it's a file
-        if let Some(data) = files.get(normalized.as_ref()) {
-            return Ok(FileInfo::file_with_mtime(
-                u64::try_from(data.content.len()).unwrap_or(u64::MAX),
-                data.mtime,
-            ));
-        }
-
-        // Check if it's a directory
-        let prefix = format!("{normalized}/");
-        if files.keys().any(|k| k.starts_with(&prefix)) {
-            return Ok(FileInfo::directory());
-        }
-
-        Err(BackendError::NotFound)
+    async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
+        let normalized = normalize_path(path);
+        let entries = self.entries.read();
+        Self::resolve_info(&entries, normalized.as_ref(), false, 0)
     }
 
     async fn make_dir(&self, path: &str) -> BackendResult<()> {
-        let key = format!("{}/{}", normalize_path(path), KEEP_MARKER);
-        self.files.write().insert(
-            key,
-            FileData {
-                content: Bytes::new(),
-                mtime: super::current_timestamp(),
+        let normalized = normalize_path(path).into_owned();
+        if normalized.is_empty() {
+            return Ok(());
+        }
+
+        let mut entries = self.entries.write();
+        match entries.get(normalized.as_str()) {
+            Some(EntryData::DirMarker { .. }) => return Err(BackendError::AlreadyExists),
+            Some(_) => return Err(BackendError::AlreadyExists),
+            None if Self::has_descendants(&entries, &normalized) => {
+                return Err(BackendError::AlreadyExists)
+            }
+            None => {}
+        }
+
+        entries.insert(
+            normalized,
+            EntryData::DirMarker {
+                meta: EntryMeta::dir_default(),
             },
         );
         Ok(())
     }
 
     async fn del_dir(&self, path: &str) -> BackendResult<()> {
-        let normalized = normalize_path(path);
-        let prefix = format!("{normalized}/");
-        let keep_marker_key = format!("{prefix}{KEEP_MARKER}");
-
-        let mut files = self.files.write();
-        if files
-            .keys()
-            .any(|key| key.starts_with(&prefix) && key != &keep_marker_key)
-        {
-            return Err(BackendError::DirectoryNotEmpty);
+        let normalized = normalize_path(path).into_owned();
+        if normalized.is_empty() {
+            return Err(BackendError::PermissionDenied);
         }
 
-        files.remove(&keep_marker_key);
-        Ok(())
+        let mut entries = self.entries.write();
+        match entries.get(normalized.as_str()) {
+            Some(EntryData::DirMarker { .. }) => {
+                if Self::has_descendants(&entries, &normalized) {
+                    return Err(BackendError::DirectoryNotEmpty);
+                }
+                entries.remove(&normalized);
+                Ok(())
+            }
+            Some(_) => Err(BackendError::NotADirectory),
+            None if Self::has_descendants(&entries, &normalized) => {
+                Err(BackendError::DirectoryNotEmpty)
+            }
+            None => Err(BackendError::NotFound),
+        }
     }
 
     async fn delete(&self, path: &str) -> BackendResult<()> {
-        self.files.write().remove(normalize_path(path).as_ref());
-        Ok(())
+        let normalized = normalize_path(path).into_owned();
+        let mut entries = self.entries.write();
+
+        match entries.get(normalized.as_str()) {
+            Some(EntryData::DirMarker { .. }) => Err(BackendError::IsADirectory),
+            Some(_) => {
+                entries.remove(&normalized);
+                Ok(())
+            }
+            None if Self::has_descendants(&entries, &normalized) => Err(BackendError::IsADirectory),
+            None => Err(BackendError::NotFound),
+        }
     }
 
     async fn rename(&self, src: &str, dst: &str) -> BackendResult<()> {
-        let src_key = normalize_path(src);
-        let dst_key = normalize_path(dst);
+        let src = normalize_path(src).into_owned();
+        let dst = normalize_path(dst).into_owned();
+        let mut entries = self.entries.write();
 
-        let mut files = self.files.write();
-        if let Some(data) = files.remove(src_key.as_ref()) {
-            files.insert(dst_key.into_owned(), data);
+        if dst == src || dst.starts_with(&(src.clone() + "/")) {
+            return Err(BackendError::PermissionDenied);
         }
+
+        if matches!(
+            entries.get(src.as_str()),
+            Some(EntryData::File { .. }) | Some(EntryData::Symlink { .. })
+        ) {
+            let Some(entry) = entries.remove(src.as_str()) else {
+                return Err(BackendError::NotFound);
+            };
+            entries.insert(dst, entry);
+            return Ok(());
+        }
+
+        let src_prefix = format!("{src}/");
+        if dst != src && dst.starts_with(&src_prefix) {
+            return Err(BackendError::Other(
+                "cannot rename a directory into its own subtree".into(),
+            ));
+        }
+        let mut moved = Vec::new();
+        for key in entries.keys() {
+            if key == &src || key.starts_with(&src_prefix) {
+                moved.push(key.clone());
+            }
+        }
+
+        if moved.is_empty() {
+            return Err(BackendError::NotFound);
+        }
+
+        for old_key in moved {
+            let entry = entries.remove(old_key.as_str()).expect("entry exists");
+            let new_key = if old_key == src {
+                dst.clone()
+            } else {
+                format!("{dst}/{}", old_key.strip_prefix(&src_prefix).unwrap_or(""))
+            };
+            entries.insert(new_key, entry);
+        }
+
         Ok(())
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Bytes> {
         let normalized = normalize_path(path);
-        self.files
-            .read()
-            .get(normalized.as_ref())
-            .map(|d| d.content.clone()) // Bytes clone is O(1)
-            .ok_or(BackendError::NotFound)
+        let entries = self.entries.read();
+        Self::read_file_resolved(&entries, normalized.as_ref(), 0)
     }
 
     async fn write_file(&self, path: &str, content: Bytes) -> BackendResult<()> {
-        self.files.write().insert(
-            normalize_path(path).into_owned(),
-            FileData {
+        let normalized = normalize_path(path).into_owned();
+        let mut entries = self.entries.write();
+
+        if Self::dir_exists(&entries, &normalized) {
+            return Err(BackendError::IsADirectory);
+        }
+
+        entries.insert(
+            normalized,
+            EntryData::File {
                 content,
-                mtime: super::current_timestamp(),
+                meta: EntryMeta::file_default(),
             },
         );
         Ok(())
@@ -218,105 +480,301 @@ impl Backend for MemoryBackend {
         let normalized = normalize_path(path).into_owned();
         Ok(Box::new(MemoryWriteHandle::new(
             normalized,
-            self.files.clone(),
+            self.entries.clone(),
         )))
+    }
+
+    async fn read_link(&self, path: &str) -> BackendResult<String> {
+        let normalized = normalize_path(path);
+        let entries = self.entries.read();
+        match entries.get(normalized.as_ref()) {
+            Some(EntryData::Symlink { target, .. }) => Ok(target.clone()),
+            Some(_) => Err(BackendError::Other("path is not a symlink".into())),
+            None => Err(BackendError::NotFound),
+        }
+    }
+
+    async fn symlink(&self, linkpath: &str, targetpath: &str) -> BackendResult<()> {
+        let linkpath = normalize_path(linkpath).into_owned();
+        let mut entries = self.entries.write();
+
+        if matches!(
+            entries.get(linkpath.as_str()),
+            Some(EntryData::DirMarker { .. })
+        ) || Self::has_descendants(&entries, &linkpath)
+        {
+            return Err(BackendError::IsADirectory);
+        }
+        if entries.contains_key(linkpath.as_str()) {
+            return Err(BackendError::AlreadyExists);
+        }
+
+        entries.insert(
+            linkpath,
+            EntryData::Symlink {
+                target: targetpath.to_string(),
+                meta: EntryMeta::symlink_default(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn set_attrs(&self, path: &str, attrs: SetAttrs) -> BackendResult<()> {
+        let normalized = normalize_path(path).into_owned();
+        let mut entries = self.entries.write();
+
+        if let Some(entry) = entries.get_mut(normalized.as_str()) {
+            match entry {
+                EntryData::File { content, meta } => {
+                    if let Some(size) = attrs.size {
+                        let mut bytes = content.to_vec();
+                        bytes.resize(size as usize, 0);
+                        *content = Bytes::from(bytes);
+                    }
+                    meta.apply(&attrs);
+                    Ok(())
+                }
+                EntryData::Symlink { meta, .. } => {
+                    if attrs.size.is_some() {
+                        return Err(BackendError::Unsupported);
+                    }
+                    meta.apply(&attrs);
+                    Ok(())
+                }
+                EntryData::DirMarker { meta } => {
+                    if attrs.size.is_some() {
+                        return Err(BackendError::Unsupported);
+                    }
+                    meta.apply(&attrs);
+                    Ok(())
+                }
+            }
+        } else if Self::has_descendants(&entries, &normalized) {
+            if attrs.size.is_some() {
+                return Err(BackendError::Unsupported);
+            }
+
+            let mut meta = EntryMeta::dir_default();
+            meta.apply(&attrs);
+            entries.insert(normalized, EntryData::DirMarker { meta });
+            Ok(())
+        } else {
+            Err(BackendError::NotFound)
+        }
     }
 }
 
-/// Write handle for memory backend using sparse chunk storage to avoid page faults.
-/// Instead of maintaining a single contiguous Vec with zero-padding for gaps,
-/// we store chunks as (offset, Bytes) pairs, eliminating the resize(0) overhead
-/// and associated page faults that were showing 10.7% in profiles.
+/// Write handle for memory backend using sparse chunk storage.
 struct MemoryWriteHandle {
     path: String,
-    /// Sparse storage of written chunks, keyed by offset.
-    /// This avoids allocating and zeroing memory for gaps in the written regions.
-    chunks: BTreeMap<u64, Bytes>,
-    files: Arc<RwLock<HashMap<String, FileData>>>,
+    writes: PendingWrites,
+    entries: Arc<RwLock<HashMap<String, EntryData>>>,
+}
+
+#[derive(Default)]
+enum PendingWrites {
+    #[default]
+    Empty,
+    Single {
+        offset: u64,
+        data: Bytes,
+    },
+    Sequential {
+        start_offset: u64,
+        len: usize,
+        chunks: Vec<Bytes>,
+    },
+    Sparse(BTreeMap<u64, Bytes>),
 }
 
 impl MemoryWriteHandle {
-    fn new(path: String, files: Arc<RwLock<HashMap<String, FileData>>>) -> Self {
+    fn new(path: String, entries: Arc<RwLock<HashMap<String, EntryData>>>) -> Self {
         Self {
             path,
-            chunks: BTreeMap::new(),
-            files,
+            writes: PendingWrites::Empty,
+            entries,
+        }
+    }
+
+    fn checked_end(offset: u64, len: usize) -> BackendResult<u64> {
+        offset
+            .checked_add(
+                u64::try_from(len)
+                    .map_err(|_| BackendError::Other("file chunk too large".into()))?,
+            )
+            .ok_or_else(|| BackendError::Other("file size too large for this platform".into()))
+    }
+
+    fn record_write(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
+        let writes = std::mem::take(&mut self.writes);
+        self.writes = match writes {
+            PendingWrites::Empty => PendingWrites::Single { offset, data },
+            PendingWrites::Single {
+                offset: existing_offset,
+                data: existing_data,
+            } => {
+                if offset == Self::checked_end(existing_offset, existing_data.len())? {
+                    PendingWrites::Sequential {
+                        start_offset: existing_offset,
+                        len: existing_data.len() + data.len(),
+                        chunks: vec![existing_data, data],
+                    }
+                } else {
+                    let mut chunks = BTreeMap::new();
+                    chunks.insert(existing_offset, existing_data);
+                    chunks.insert(offset, data);
+                    PendingWrites::Sparse(chunks)
+                }
+            }
+            PendingWrites::Sequential {
+                start_offset,
+                len,
+                mut chunks,
+            } => {
+                if offset == Self::checked_end(start_offset, len)? {
+                    let next_len = len.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Other("file size too large for this platform".into())
+                    })?;
+                    chunks.push(data);
+                    PendingWrites::Sequential {
+                        start_offset,
+                        len: next_len,
+                        chunks,
+                    }
+                } else {
+                    let mut sparse = BTreeMap::new();
+                    let mut chunk_offset = start_offset;
+                    for chunk in chunks {
+                        let current_offset = chunk_offset;
+                        chunk_offset = Self::checked_end(chunk_offset, chunk.len())?;
+                        sparse.insert(current_offset, chunk);
+                    }
+                    sparse.insert(offset, data);
+                    PendingWrites::Sparse(sparse)
+                }
+            }
+            PendingWrites::Sparse(mut chunks) => {
+                chunks.insert(offset, data);
+                PendingWrites::Sparse(chunks)
+            }
+        };
+        Ok(())
+    }
+
+    fn finish_content(writes: PendingWrites) -> BackendResult<Bytes> {
+        match writes {
+            PendingWrites::Empty => Ok(Bytes::new()),
+            PendingWrites::Single { offset, data } => {
+                if offset == 0 {
+                    Ok(data)
+                } else {
+                    let offset = usize::try_from(offset).map_err(|_| {
+                        BackendError::Other("file offset too large for this platform".into())
+                    })?;
+                    let mut merged =
+                        Vec::with_capacity(offset.checked_add(data.len()).ok_or_else(|| {
+                            BackendError::Other("file size too large for this platform".into())
+                        })?);
+                    merged.resize(offset, 0);
+                    merged.extend_from_slice(&data);
+                    Ok(Bytes::from(merged))
+                }
+            }
+            PendingWrites::Sequential {
+                start_offset,
+                len,
+                chunks,
+            } => {
+                let start_offset = usize::try_from(start_offset).map_err(|_| {
+                    BackendError::Other("file offset too large for this platform".into())
+                })?;
+                let total_size = start_offset.checked_add(len).ok_or_else(|| {
+                    BackendError::Other("file too large for this platform".into())
+                })?;
+                let mut merged = Vec::with_capacity(total_size);
+                if start_offset > 0 {
+                    merged.resize(start_offset, 0);
+                }
+                for chunk in chunks {
+                    merged.extend_from_slice(&chunk);
+                }
+                Ok(Bytes::from(merged))
+            }
+            PendingWrites::Sparse(chunks) => {
+                let total_size_u64 = chunks.iter().fold(0u64, |max, (offset, data)| {
+                    max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
+                });
+                let total_size = usize::try_from(total_size_u64)
+                    .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
+
+                let mut merged = Vec::with_capacity(total_size);
+                for (offset, data) in chunks {
+                    let offset = usize::try_from(offset).map_err(|_| {
+                        BackendError::Other("file offset too large for this platform".into())
+                    })?;
+                    if merged.len() < offset {
+                        merged.resize(offset, 0);
+                    }
+                    let end = offset.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Other("file size too large for this platform".into())
+                    })?;
+                    if merged.len() < end {
+                        merged.resize(end, 0);
+                    }
+                    merged[offset..end].copy_from_slice(&data);
+                }
+
+                Ok(Bytes::from(merged))
+            }
         }
     }
 }
 
 #[async_trait]
 impl WriteHandle for MemoryWriteHandle {
+    fn try_write_at(&mut self, offset: u64, data: &Bytes) -> Option<BackendResult<()>> {
+        Some(self.record_write(offset, data.clone()))
+    }
+
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        // Store the chunk without zero-padding or copying. This is the hot path (~10.7% of CPU
-        // was spent in page faults from resize(0) calls + copy_from_slice in the old implementation.
-        // By taking Bytes directly from the SFTP protocol layer, we avoid both the zero-filling
-        // overhead AND the copy that would happen with &[u8].
-        self.chunks.insert(offset, data);
-        Ok(())
+        self.record_write(offset, data)
     }
 
     async fn finish(self: Box<Self>) -> BackendResult<()> {
-        let content = if self.chunks.is_empty() {
-            Bytes::new()
-        } else if self.chunks.len() == 1 {
-            let (offset, data) = self.chunks.into_iter().next().expect("one chunk");
-            if offset == 0 {
-                data
-            } else {
-                let offset = usize::try_from(offset).map_err(|_| {
-                    BackendError::Other("file offset too large for this platform".into())
-                })?;
-                let total_size = offset.checked_add(data.len()).ok_or_else(|| {
-                    BackendError::Other("file size too large for this platform".into())
-                })?;
-                let mut result = vec![0; total_size];
-                result[offset..].copy_from_slice(&data);
-                Bytes::from(result)
-            }
-        } else {
-            // Calculate total file size
-            let total_size_u64 = self.chunks.iter().fold(0u64, |max, (offset, data)| {
-                max.max(offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)))
-            });
-            let total_size = usize::try_from(total_size_u64)
-                .map_err(|_| BackendError::Other("file too large for this platform".into()))?;
+        let MemoryWriteHandle {
+            path,
+            writes,
+            entries,
+        } = *self;
+        let content = Self::finish_content(writes)?;
 
-            // Only allocate the actual needed size
-            let mut result = Vec::with_capacity(total_size);
-
-            for (offset, data) in self.chunks {
-                let offset = usize::try_from(offset).map_err(|_| {
-                    BackendError::Other("file offset too large for this platform".into())
-                })?;
-                // Pad with zeros only if there's a gap (rare)
-                if result.len() < offset {
-                    result.resize(offset, 0);
-                }
-                let end = offset + data.len();
-                if result.len() < end {
-                    result.resize(end, 0);
-                }
-                result[offset..end].copy_from_slice(&data);
-            }
-
-            Bytes::from(result)
-        };
-
-        self.files.write().insert(
-            self.path,
-            FileData {
+        entries.write().insert(
+            path,
+            EntryData::File {
                 content,
-                mtime: super::current_timestamp(),
+                meta: EntryMeta::file_default(),
             },
         );
         Ok(())
     }
 
     async fn abort(self: Box<Self>) -> BackendResult<()> {
-        // Nothing to clean up
         Ok(())
     }
+}
+
+fn normalize_virtual_path(path: &str) -> String {
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    components.join("/")
 }
 
 #[cfg(test)]
@@ -325,7 +783,6 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::Arc;
 
-    // Unit tests
     #[tokio::test]
     async fn test_write_and_read_file() {
         let backend = MemoryBackend::new();
@@ -368,7 +825,7 @@ mod tests {
             .await
             .unwrap();
         backend
-            .write_file("file2.txt", Bytes::from_static(b"b"))
+            .write_file("dir/file2.txt", Bytes::from_static(b"b"))
             .await
             .unwrap();
 
@@ -378,7 +835,7 @@ mod tests {
         assert!(names.contains(&"."));
         assert!(names.contains(&".."));
         assert!(names.contains(&"file1.txt"));
-        assert!(names.contains(&"file2.txt"));
+        assert!(names.contains(&"dir"));
     }
 
     #[tokio::test]
@@ -390,6 +847,10 @@ mod tests {
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
 
         assert!(names.contains(&"subdir"));
+        assert_eq!(
+            backend.file_info("subdir").await.unwrap().kind,
+            FileKind::Directory
+        );
     }
 
     #[tokio::test]
@@ -423,10 +884,12 @@ mod tests {
             .unwrap();
 
         let info = backend.file_info("test.txt").await.unwrap();
+        assert_eq!(info.kind, FileKind::File);
         assert!(!info.is_dir);
         assert_eq!(info.size, 5);
 
         let root_info = backend.file_info("/").await.unwrap();
+        assert_eq!(root_info.kind, FileKind::Directory);
         assert!(root_info.is_dir);
     }
 
@@ -465,6 +928,39 @@ mod tests {
         assert!(names.contains(&"file.txt"));
     }
 
+    #[tokio::test]
+    async fn test_list_dir_uses_directory_attrs_for_implicit_child_dirs() {
+        let backend = MemoryBackend::new();
+        backend
+            .write_file("dir/child.txt", Bytes::from_static(b"content"))
+            .await
+            .unwrap();
+
+        let entries = backend.list_dir(".").await.unwrap();
+        let dir = entries
+            .into_iter()
+            .find(|entry| entry.name == "dir")
+            .expect("dir entry");
+
+        assert_eq!(dir.attrs.kind, FileKind::Directory);
+        assert!(dir.attrs.is_dir);
+    }
+
+    #[tokio::test]
+    async fn test_rename_rejects_directory_into_own_subtree() {
+        let backend = MemoryBackend::new();
+        backend.make_dir("a").await.unwrap();
+        backend
+            .write_file("a/file.txt", Bytes::from_static(b"content"))
+            .await
+            .unwrap();
+
+        let result = backend.rename("a", "a/b").await;
+        assert!(matches!(result, Err(BackendError::PermissionDenied)));
+
+        assert!(backend.file_info("a/file.txt").await.is_ok());
+    }
+
     // Concurrent access test
     #[tokio::test]
     async fn test_concurrent_writes() {
@@ -476,7 +972,7 @@ mod tests {
                 let b = backend.clone();
                 tokio::spawn(async move {
                     let content = Bytes::from(vec![i as u8; 100]);
-                    b.write_file(&format!("file{}", i), content).await
+                    b.write_file(&format!("file{i}"), content).await
                 })
             })
             .collect();
@@ -484,16 +980,130 @@ mod tests {
         let results = join_all(tasks).await;
         assert!(results.iter().all(|r| r.is_ok()));
 
-        // Verify all files exist with correct content
         for i in 0..100u8 {
-            let content = backend.read_file(&format!("file{}", i)).await.unwrap();
+            let content = backend.read_file(&format!("file{i}")).await.unwrap();
             assert_eq!(content.as_ref(), &vec![i; 100]);
         }
     }
 
-    // Property tests
+    #[tokio::test]
+    async fn test_symlink_readlink_and_stat() {
+        let backend = MemoryBackend::new();
+        backend
+            .write_file("target.txt", Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        backend.symlink("link.txt", "target.txt").await.unwrap();
+
+        assert_eq!(backend.read_link("link.txt").await.unwrap(), "target.txt");
+        assert_eq!(
+            backend.lstat("link.txt").await.unwrap().kind,
+            FileKind::Symlink
+        );
+        assert_eq!(
+            backend.file_info("link.txt").await.unwrap().kind,
+            FileKind::File
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broken_symlink_stat_fails_lstat_succeeds() {
+        let backend = MemoryBackend::new();
+        backend.symlink("broken", "missing").await.unwrap();
+
+        assert_eq!(
+            backend.lstat("broken").await.unwrap().kind,
+            FileKind::Symlink
+        );
+        assert!(matches!(
+            backend.file_info("broken").await,
+            Err(BackendError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_set_attrs_resize_file() {
+        let backend = MemoryBackend::new();
+        backend
+            .write_file("data.bin", Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        backend
+            .set_attrs(
+                "data.bin",
+                SetAttrs {
+                    size: Some(5),
+                    permissions: Some(0o600),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let info = backend.file_info("data.bin").await.unwrap();
+        let content = backend.read_file("data.bin").await.unwrap();
+        assert_eq!(info.size, 5);
+        assert_eq!(info.permissions, 0o600);
+        assert_eq!(content.as_ref(), b"abc\0\0");
+    }
+
+    #[tokio::test]
+    async fn test_set_attrs_size_on_symlink_unsupported() {
+        let backend = MemoryBackend::new();
+        backend.symlink("link", "target").await.unwrap();
+
+        let result = backend
+            .set_attrs(
+                "link",
+                SetAttrs {
+                    size: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(BackendError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn test_delete_rejects_directory() {
+        let backend = MemoryBackend::new();
+        backend.make_dir("dir").await.unwrap();
+
+        let result = backend.delete("dir").await;
+        assert!(matches!(result, Err(BackendError::IsADirectory)));
+    }
+
+    #[tokio::test]
+    async fn test_rename_directory_moves_descendants() {
+        let backend = MemoryBackend::new();
+        backend.make_dir("src").await.unwrap();
+        backend
+            .write_file("src/nested/file.txt", Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        backend
+            .symlink("src/link", "nested/file.txt")
+            .await
+            .unwrap();
+
+        backend.rename("src", "dst").await.unwrap();
+
+        assert_eq!(
+            backend.read_file("dst/nested/file.txt").await.unwrap(),
+            Bytes::from_static(b"data")
+        );
+        assert_eq!(
+            backend.read_link("dst/link").await.unwrap(),
+            "nested/file.txt"
+        );
+        assert!(matches!(
+            backend.file_info("src").await,
+            Err(BackendError::NotFound)
+        ));
+    }
+
     proptest! {
-        // Path normalization: idempotent
         #[test]
         fn prop_normalize_idempotent(path in ".*") {
             let once = normalize_path(&path);
@@ -501,28 +1111,6 @@ mod tests {
             prop_assert_eq!(once.as_ref(), twice.as_ref());
         }
 
-        // Path normalization: no leading slash
-        #[test]
-        fn prop_normalize_no_leading_slash(path in ".*") {
-            let result = normalize_path(&path);
-            prop_assert!(!result.starts_with('/') || result.is_empty());
-        }
-
-        // Path normalization: no trailing slash
-        #[test]
-        fn prop_normalize_no_trailing_slash(path in ".*") {
-            let result = normalize_path(&path);
-            prop_assert!(!result.ends_with('/') || result.is_empty());
-        }
-
-        // Path normalization: root variants normalize to empty
-        #[test]
-        fn prop_root_normalizes_empty(slashes in "/+") {
-            let result = normalize_path(&slashes);
-            prop_assert!(result.is_empty());
-        }
-
-        // Write-then-read roundtrip
         #[test]
         fn prop_write_read_roundtrip(
             path in "[a-z][a-z0-9_]{0,15}(\\.[a-z]{1,4})?",
@@ -539,24 +1127,6 @@ mod tests {
             })?
         }
 
-        // Delete then not found
-        #[test]
-        fn prop_delete_then_not_found(
-            path in "[a-z][a-z0-9_]{0,15}",
-            content in prop::collection::vec(any::<u8>(), 1..100)
-        ) {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let backend = MemoryBackend::new();
-                backend.write_file(&path, Bytes::from(content)).await.unwrap();
-                backend.delete(&path).await.unwrap();
-                let result = backend.read_file(&path).await;
-                prop_assert!(matches!(result, Err(BackendError::NotFound)));
-                Ok(())
-            })?
-        }
-
-        // Rename preserves content
         #[test]
         fn prop_rename_preserves_content(
             src in "[a-z][a-z0-9]{0,10}",
@@ -576,89 +1146,27 @@ mod tests {
                 Ok(())
             })?
         }
-
-        // mkdir then appears in listing
-        #[test]
-        fn prop_mkdir_appears_in_listing(dirname in "[a-z][a-z0-9]{0,15}") {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let backend = MemoryBackend::new();
-                backend.make_dir(&dirname).await.unwrap();
-                let entries = backend.list_dir("/").await.unwrap();
-                let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
-                prop_assert!(names.contains(&dirname.as_str()));
-                Ok(())
-            })?
-        }
-
-        // deldir removes from listing
-        #[test]
-        fn prop_deldir_removes_from_listing(dirname in "[a-z][a-z0-9]{0,15}") {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let backend = MemoryBackend::new();
-                backend.make_dir(&dirname).await.unwrap();
-                backend.del_dir(&dirname).await.unwrap();
-                let entries = backend.list_dir("/").await.unwrap();
-                let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
-                prop_assert!(!names.contains(&dirname.as_str()));
-                Ok(())
-            })?
-        }
-
-        // file_info size matches content
-        #[test]
-        fn prop_file_info_size(
-            path in "[a-z][a-z0-9_]{0,15}",
-            content in prop::collection::vec(any::<u8>(), 0..1024)
-        ) {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let backend = MemoryBackend::new();
-                let size = content.len() as u64;
-                backend.write_file(&path, Bytes::from(content)).await.unwrap();
-                let info = backend.file_info(&path).await.unwrap();
-                prop_assert_eq!(info.size, size);
-                prop_assert!(!info.is_dir);
-                Ok(())
-            })?
-        }
     }
 
     #[tokio::test]
     async fn test_rsync_temp_file_pattern() {
-        // Simulate rsync's atomic write pattern:
-        // 1. Create temp file with dot prefix
-        // 2. Write data
-        // 3. Rename to final name
         let backend = MemoryBackend::new();
-
-        // Create temp file like rsync does
         let temp_path = ".file_123.bin.wU0ylU";
         let final_path = "file_123.bin";
         let content = Bytes::from(vec![0xABu8; 1024]);
 
-        // Open for write (should create the file)
         let mut handle = backend.open_write(temp_path).await.unwrap();
-
-        // Write data
         handle.write_at(0, content).await.unwrap();
-
-        // Finish (commit)
         handle.finish().await.unwrap();
 
-        // Verify temp file exists
         let read = backend.read_file(temp_path).await.unwrap();
         assert_eq!(read.len(), 1024);
 
-        // Rename to final
         backend.rename(temp_path, final_path).await.unwrap();
 
-        // Verify final file exists
         let final_read = backend.read_file(final_path).await.unwrap();
         assert_eq!(final_read.len(), 1024);
 
-        // Verify temp file is gone
         let temp_result = backend.read_file(temp_path).await;
         assert!(matches!(temp_result, Err(BackendError::NotFound)));
     }
@@ -676,6 +1184,48 @@ mod tests {
         let read = backend.read_file("single.bin").await.unwrap();
         assert_eq!(read.len(), 1024);
         assert_eq!(read.as_ptr(), content_ptr);
+    }
+
+    #[tokio::test]
+    async fn test_sequential_multi_chunk_write_round_trips() {
+        let backend = MemoryBackend::new();
+        let mut handle = backend.open_write("multi.bin").await.unwrap();
+
+        assert!(matches!(
+            handle.try_write_at(0, &Bytes::from_static(b"abc")),
+            Some(Ok(()))
+        ));
+        assert!(matches!(
+            handle.try_write_at(3, &Bytes::from_static(b"def")),
+            Some(Ok(()))
+        ));
+        handle
+            .write_at(6, Bytes::from_static(b"ghi"))
+            .await
+            .unwrap();
+        handle.finish().await.unwrap();
+
+        let content = backend.read_file("multi.bin").await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"abcdefghi"));
+    }
+
+    #[tokio::test]
+    async fn test_sequential_write_with_initial_gap_preserves_prefix_zeros() {
+        let backend = MemoryBackend::new();
+        let mut handle = backend.open_write("offset.bin").await.unwrap();
+
+        handle
+            .write_at(3, Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        handle
+            .write_at(6, Bytes::from_static(b"def"))
+            .await
+            .unwrap();
+        handle.finish().await.unwrap();
+
+        let content = backend.read_file("offset.bin").await.unwrap();
+        assert_eq!(content.as_ref(), b"\0\0\0abcdef");
     }
 
     #[tokio::test]

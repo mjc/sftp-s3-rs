@@ -9,9 +9,12 @@ repository = "https://github.com/elixir-ssh/sftp-s3-rs"
 [features]
 default = ["s3"]
 s3 = ["aws-sdk-s3", "aws-config"]
-# Reserved compatibility flag for testing russh-sftp master. The pinned
-# dependency currently uses Bytes handles and Bytes data.
+# Deprecated compatibility flag retained for old benchmark scripts. The pinned
+# dependency already uses byte handles and byte payloads by default.
 sftp-master = []
+# Use the stream-based SFTP server path when benchmarking older russh/russh-sftp
+# combinations that predate the owned-bytes sender APIs.
+benchmark-matrix-compat = []
 
 [dependencies]
 # SSH/SFTP
@@ -37,7 +40,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 parking_lot = "0.12"
 clap = { version = "4", features = ["derive", "env"] }
-rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+filetime = "0.2"
+nix = { version = "0.29", default-features = false, features = ["user", "fs"] }
+getrandom = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -45,8 +52,6 @@ tempfile = "3"
 proptest = "1.4"
 criterion = { version = "0.8", features = ["async_tokio"] }
 iai-callgrind = "0.16"
-russh = { git = "https://github.com/mjc/russh.git", branch = "mjc/own-inbound-channel-payloads", default-features = false, features = ["aws-lc-rs", "flate2"] }
-russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

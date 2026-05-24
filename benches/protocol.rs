@@ -10,7 +10,7 @@ fn bench_write_serialize(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(10));
     group.sample_size(100);
 
-    for size in [1 * KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
+    for size in [KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
         let size_name = format!("{}KB", size / KB);
         let data = black_box(Bytes::from(vec![0xABu8; size]));
 
@@ -35,7 +35,7 @@ fn bench_write_deserialize(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(10));
     group.sample_size(100);
 
-    for size in [1 * KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
+    for size in [KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
         let size_name = format!("{}KB", size / KB);
         let data = Bytes::from(vec![0xABu8; size]);
 
@@ -68,7 +68,7 @@ fn bench_data_serialize(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(10));
     group.sample_size(100);
 
-    for size in [1 * KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
+    for size in [KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
         let size_name = format!("{}KB", size / KB);
         let data = black_box(Bytes::from(vec![0xABu8; size]));
 
@@ -91,7 +91,7 @@ fn bench_data_deserialize(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(10));
     group.sample_size(100);
 
-    for size in [1 * KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
+    for size in [KB, 4 * KB, 16 * KB, 64 * KB, 256 * KB] {
         let size_name = format!("{}KB", size / KB);
         let data = Bytes::from(vec![0xABu8; size]);
 

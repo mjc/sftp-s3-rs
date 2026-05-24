@@ -4,6 +4,8 @@ use crate::sftp_handler::SftpHandler;
 use russh::keys::PublicKey;
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId};
+#[cfg(not(feature = "benchmark-matrix-compat"))]
+use russh_sftp::protocol::SerializedPacket;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -171,23 +173,40 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
             match name.as_str() {
                 "sftp" => {
                     if let Some(channel) = channels.lock().await.remove(&channel_id) {
-                        let sftp_handler = SftpHandler::new(backend);
-                        let (mut read_half, write_half) = channel.split();
-                        let write_half = Arc::new(write_half);
-                        tokio::spawn(async move {
-                            let mut reader = read_half.make_reader();
-                            let mut handler = sftp_handler;
-                            let mut send_bytes = move |bytes| {
-                                let write_half = Arc::clone(&write_half);
-                                async move { write_half.data_bytes(bytes).await }
-                            };
-                            russh_sftp::server::serve_with_sender(
-                                &mut reader,
-                                &mut send_bytes,
-                                &mut handler,
-                            )
-                            .await;
-                        });
+                        let sftp_handler =
+                            russh_sftp::server::ManagedSession::new(SftpHandler::new(backend));
+                        #[cfg(feature = "benchmark-matrix-compat")]
+                        {
+                            russh_sftp::server::run(channel.into_stream(), sftp_handler).await;
+                        }
+                        #[cfg(not(feature = "benchmark-matrix-compat"))]
+                        {
+                            let (mut read_half, write_half) = channel.split();
+                            let write_half = Arc::new(write_half);
+                            tokio::spawn(async move {
+                                let mut reader = read_half.make_reader();
+                                let mut handler = sftp_handler;
+                                let mut send_packet = move |packet: SerializedPacket| {
+                                    let write_half = Arc::clone(&write_half);
+                                    async move {
+                                        match packet {
+                                            SerializedPacket::Contiguous(bytes) => {
+                                                write_half.data_bytes(bytes).await
+                                            }
+                                            SerializedPacket::Split { header, data } => {
+                                                write_half.data_pair_bytes(header, data).await
+                                            }
+                                        }
+                                    }
+                                };
+                                russh_sftp::server::serve_with_packet_sender(
+                                    &mut reader,
+                                    &mut send_packet,
+                                    &mut handler,
+                                )
+                                .await;
+                            });
+                        }
                     }
                 }
                 "scp" => {
@@ -272,16 +291,25 @@ mod tests {
             .expect("ssh_handler source should contain production code");
 
         assert!(
-            production_source.contains("russh_sftp::server::serve_with_sender"),
-            "SFTP subsystem must keep using the russh-sftp owned-bytes server path"
+            production_source.contains("russh_sftp::server::serve_with_packet_sender"),
+            "SFTP subsystem must keep using the russh-sftp packet sender path"
         );
         assert!(
-            production_source.contains("write_half.data_bytes(bytes).await"),
-            "SFTP responses must be sent through russh ChannelWriteHalf::data_bytes"
+            production_source.contains("SerializedPacket::Split { header, data }"),
+            "SFTP subsystem must preserve split DATA packets on the channel writer path"
         );
         assert!(
-            !production_source.contains("russh_sftp::server::run("),
-            "SFTP subsystem must not regress to the copying stream-based server::run path"
+            production_source.contains("write_half.data_pair_bytes(header, data).await"),
+            "split SFTP response packets must be coalesced through russh ChannelWriteHalf::data_pair_bytes"
+        );
+        assert!(
+            production_source.contains("#[cfg(feature = \"benchmark-matrix-compat\")]"),
+            "benchmark matrix compatibility must remain an explicit opt-in feature"
+        );
+        assert!(
+            production_source
+                .contains("russh_sftp::server::run(channel.into_stream(), sftp_handler).await;"),
+            "benchmark matrix compatibility must keep the stream-based fallback available"
         );
     }
 }
