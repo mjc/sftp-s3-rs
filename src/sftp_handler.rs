@@ -143,8 +143,14 @@ impl<B: Backend> russh_sftp::server::Handler for SftpHandler<B> {
         let hb = handle_as_bytes(&handle);
         // If it's a write handle, finish it
         if let Some((path, write_handle_arc, pending_attrs)) = self.handles.take_write_handle(hb) {
-            let mut guard = write_handle_arc.lock().await;
-            if let Some(write_handle) = guard.take() {
+            let write_handle = match Arc::try_unwrap(write_handle_arc) {
+                Ok(mutex) => mutex.into_inner(),
+                Err(write_handle_arc) => {
+                    let mut guard = write_handle_arc.lock().await;
+                    guard.take()
+                }
+            };
+            if let Some(write_handle) = write_handle {
                 write_handle.finish().await.map_err(StatusCode::from)?;
                 if !pending_attrs.is_empty() {
                     self.backend
