@@ -2,4 +2,5 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/perf.sh" matrix "$@"
+cd "$SCRIPT_DIR"
+exec nix develop -c cargo run --quiet --bin sftp-perf -- matrix "$@"

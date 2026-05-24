@@ -3,4 +3,5 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-exec "$ROOT_DIR/perf.sh" local-stack "$@"
+cd "$ROOT_DIR"
+exec nix develop -c cargo run --quiet --bin sftp-perf -- local-stack "$@"

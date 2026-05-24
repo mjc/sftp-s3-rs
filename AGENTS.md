@@ -5,7 +5,7 @@
 Use the repo-native benchmark runner instead of ad hoc scripts:
 
 ```bash
-nix develop -c ./perf.sh <subcommand> [options]
+nix develop -c cargo run --quiet --bin sftp-perf -- <subcommand> [options]
 ```
 
 Supported subcommands:
@@ -32,22 +32,22 @@ Common options:
 Useful examples:
 
 ```bash
-nix develop -c ./perf.sh current --client bench --sizes 1024,10240
-nix develop -c ./perf.sh current --client openssh --operation all --sizes 1024
-nix develop -c ./perf.sh small-files --ciphers aes256-gcm
-nix develop -c ./perf.sh local-stack --russh-ref main --russh-sftp-ref master
-nix develop -c ./perf.sh matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
-nix develop -c ./perf.sh profile --client bench --operation roundtrip --sizes 1024
-nix develop -c ./perf.sh heaptrack --client openssh --operation upload --sizes 1024
-nix develop -c ./perf.sh list --all
-nix develop -c ./perf.sh show 1779548808-matrix
-nix develop -c ./perf.sh mark-invalid 1779548493-profile --reason "system busy"
+nix develop -c cargo run --quiet --bin sftp-perf -- current --client bench --sizes 1024,10240
+nix develop -c cargo run --quiet --bin sftp-perf -- current --client openssh --operation all --sizes 1024
+nix develop -c cargo run --quiet --bin sftp-perf -- small-files --ciphers aes256-gcm
+nix develop -c cargo run --quiet --bin sftp-perf -- local-stack --russh-ref main --russh-sftp-ref master
+nix develop -c cargo run --quiet --bin sftp-perf -- matrix --client bench --ciphers aes256-gcm --sizes 1024,10240
+nix develop -c cargo run --quiet --bin sftp-perf -- profile --client bench --operation roundtrip --sizes 1024
+nix develop -c cargo run --quiet --bin sftp-perf -- heaptrack --client openssh --operation upload --sizes 1024
+nix develop -c cargo run --quiet --bin sftp-perf -- list --all
+nix develop -c cargo run --quiet --bin sftp-perf -- show 1779548808-matrix
+nix develop -c cargo run --quiet --bin sftp-perf -- mark-invalid 1779548493-profile --reason "system busy"
 ```
 
 Compatibility wrappers still exist:
 
-- `./benchmark-all.sh ...` -> `./perf.sh matrix ...`
-- `./scripts/benchmark-russh-sftp-local.sh ...` -> `./perf.sh local-stack ...`
+- `./benchmark-all.sh ...` -> `nix develop -c cargo run --quiet --bin sftp-perf -- matrix ...`
+- `./scripts/benchmark-russh-sftp-local.sh ...` -> `nix develop -c cargo run --quiet --bin sftp-perf -- local-stack ...`
 
 The default matrix is a 2x2 comparison:
 
@@ -71,8 +71,8 @@ small files benchmark. By default it transfers 1GiB as 10,251 varied-size files
 with OpenSSH `sftp`, then downloads the same files back in the same batch:
 
 ```bash
-nix develop -c ./perf.sh small-files
-nix develop -c ./perf.sh small-files --ciphers aes256-gcm --runs 10 --warmup 2
+nix develop -c cargo run --quiet --bin sftp-perf -- small-files
+nix develop -c cargo run --quiet --bin sftp-perf -- small-files --ciphers aes256-gcm --runs 10 --warmup 2
 ```
 
 ### macOS specifics
@@ -83,13 +83,13 @@ nix develop -c ./perf.sh small-files --ciphers aes256-gcm --runs 10 --warmup 2
 - `local-stack`, `matrix`, and `profile` still default `--russh-repo` / `--russh-sftp-repo` to `/home/mjc/...`, so on this machine pass explicit macOS paths:
 
 ```bash
-nix develop -c ./perf.sh local-stack \
+nix develop -c cargo run --quiet --bin sftp-perf -- local-stack \
   --russh-repo /Users/mjc/projects/russh \
   --russh-sftp-repo /Users/mjc/projects/russh-sftp \
   --russh-ref main \
   --russh-sftp-ref master
 
-nix develop -c ./perf.sh profile \
+nix develop -c cargo run --quiet --bin sftp-perf -- profile \
   --russh-repo /Users/mjc/projects/russh \
   --russh-sftp-repo /Users/mjc/projects/russh-sftp \
   --client bench \
@@ -100,5 +100,5 @@ nix develop -c ./perf.sh profile \
 If a run was noisy or incomplete, mark it invalid so later comparisons skip it:
 
 ```bash
-nix develop -c ./perf.sh mark-invalid <run-id> --reason "system busy"
+nix develop -c cargo run --quiet --bin sftp-perf -- mark-invalid <run-id> --reason "system busy"
 ```

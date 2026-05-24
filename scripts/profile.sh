@@ -12,7 +12,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 ATTACH_PID=""
-BACKEND="${PROFILE_BACKEND:-memory}"
+BACKEND="${PROFILE_BACKEND:-benchmark}"
 PORT="${PORT:-2222}"
 LOCAL_ROOT="${LOCAL_ROOT:-$PROJECT_DIR/profile-root}"
 AUTHORIZED_KEYS_FILE="${AUTHORIZED_KEYS_FILE:-$HOME/.ssh/authorized_keys}"
@@ -72,7 +72,8 @@ Profile sftp-s3 CPU usage with perf.
 
 Options:
   --pid PID                    Attach to an already-running process
-  --backend memory|local       Backend to launch when not attaching (default: $BACKEND)
+  --backend benchmark|memory|local
+                               Backend to launch when not attaching (default: $BACKEND)
   --port PORT                  Listen port when launching (default: $PORT)
   --root PATH                  Local backend root (default: $LOCAL_ROOT)
   --authorized-keys-file PATH  Authorized keys file (default: $AUTHORIZED_KEYS_FILE)
@@ -150,9 +151,9 @@ mkdir -p "$RESULTS_DIR"
 
 if [[ -z "$ATTACH_PID" ]]; then
     case "$BACKEND" in
-        memory|local) ;;
+        benchmark|memory|local) ;;
         *)
-            echo "Error: --backend must be memory or local" >&2
+            echo "Error: --backend must be benchmark, memory, or local" >&2
             exit 1
             ;;
     esac
