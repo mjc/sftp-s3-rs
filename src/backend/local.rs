@@ -4,15 +4,22 @@ use super::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs::File as StdFile;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use tokio::fs::{self, File};
+use std::sync::mpsc;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::oneshot;
 use tracing::debug;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
     root: PathBuf,
+    fs_pool: Arc<LocalFsPool>,
+    metadata_cache: Arc<LocalMetadataCache>,
 }
 
 impl LocalBackend {
@@ -20,6 +27,8 @@ impl LocalBackend {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            fs_pool: default_local_fs_pool(),
+            metadata_cache: Arc::new(LocalMetadataCache::default()),
         }
     }
 
@@ -186,10 +195,169 @@ impl LocalBackend {
 
     async fn lstat_path(&self, path: &str) -> BackendResult<FileInfo> {
         let full_path = self.full_path(path)?;
-        let metadata = fs::symlink_metadata(&full_path)
+        if let Some(info) = self
+            .metadata_cache
+            .get(&full_path, MetadataCacheKind::Lstat)
+        {
+            return Ok(info);
+        }
+
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let lookup_path = full_path.clone();
+        let info = self
+            .fs_pool
+            .run_on_shard(shard, move || {
+                let metadata =
+                    std::fs::symlink_metadata(&lookup_path).map_err(Self::map_io_error)?;
+                Ok(Self::metadata_to_info(&metadata))
+            })
+            .await?;
+        self.metadata_cache
+            .insert(full_path, MetadataCacheKind::Lstat, info.clone());
+        Ok(info)
+    }
+
+    fn invalidate_path_and_parent(&self, path: &Path) {
+        self.metadata_cache.invalidate_path(path);
+        if let Some(parent) = path.parent() {
+            self.metadata_cache.invalidate_path(parent);
+        }
+    }
+
+    fn invalidate_paths<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) {
+        for path in paths {
+            self.invalidate_path_and_parent(path);
+        }
+    }
+}
+
+type LocalFsTask = Box<dyn FnOnce() + Send + 'static>;
+
+struct LocalFsPool {
+    workers: Box<[mpsc::Sender<LocalFsTask>]>,
+}
+
+impl LocalFsPool {
+    fn new(worker_count: usize) -> Self {
+        let mut workers = Vec::with_capacity(worker_count);
+        for worker_id in 0..worker_count {
+            let (tx, rx) = mpsc::channel::<LocalFsTask>();
+            std::thread::Builder::new()
+                .name(format!("local-fs-worker-{worker_id}"))
+                .spawn(move || {
+                    while let Ok(task) = rx.recv() {
+                        task();
+                    }
+                })
+                .expect("failed to spawn local fs worker");
+            workers.push(tx);
+        }
+
+        Self {
+            workers: workers.into_boxed_slice(),
+        }
+    }
+
+    fn shard_for_path(&self, path: &Path) -> usize {
+        self.shard_for_key(path.to_string_lossy().as_ref())
+    }
+
+    fn shard_for_paths(&self, paths: &[&Path]) -> usize {
+        let mut keys = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+
+        let mut hasher = DefaultHasher::new();
+        for key in keys {
+            key.hash(&mut hasher);
+        }
+        (hasher.finish() as usize) % self.workers.len()
+    }
+
+    fn shard_for_key(&self, key: &str) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % self.workers.len()
+    }
+
+    async fn run_on_shard<T, F>(&self, shard: usize, task: F) -> BackendResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> BackendResult<T> + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.workers[shard]
+            .send(Box::new(move || {
+                let _ = reply_tx.send(task());
+            }))
+            .map_err(|err| BackendError::Other(err.to_string()))?;
+
+        reply_rx
             .await
-            .map_err(Self::map_io_error)?;
-        Ok(Self::metadata_to_info(&metadata))
+            .map_err(|err| BackendError::Other(err.to_string()))?
+    }
+}
+
+fn default_local_fs_pool() -> Arc<LocalFsPool> {
+    static POOL: OnceLock<Arc<LocalFsPool>> = OnceLock::new();
+    Arc::clone(POOL.get_or_init(|| Arc::new(LocalFsPool::new(default_local_fs_worker_count()))))
+}
+
+fn default_local_fs_worker_count() -> usize {
+    std::thread::available_parallelism().map_or(2, |count| count.get().clamp(2, 4))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataCacheKind {
+    Stat,
+    Lstat,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CachedMetadata {
+    stat: Option<FileInfo>,
+    lstat: Option<FileInfo>,
+}
+
+#[derive(Default)]
+struct LocalMetadataCache {
+    entries: RwLock<HashMap<PathBuf, CachedMetadata>>,
+}
+
+impl LocalMetadataCache {
+    fn get(&self, path: &Path, kind: MetadataCacheKind) -> Option<FileInfo> {
+        let entries = self.entries.read();
+        let entry = entries.get(path)?;
+        match kind {
+            MetadataCacheKind::Stat => entry.stat.clone(),
+            MetadataCacheKind::Lstat => entry.lstat.clone(),
+        }
+    }
+
+    fn insert(&self, path: PathBuf, kind: MetadataCacheKind, info: FileInfo) {
+        let mut entries = self.entries.write();
+        let entry = entries.entry(path).or_default();
+        match kind {
+            MetadataCacheKind::Stat => entry.stat = Some(info),
+            MetadataCacheKind::Lstat => entry.lstat = Some(info),
+        }
+    }
+
+    fn insert_from_metadata(&self, path: PathBuf, metadata: &std::fs::Metadata) -> FileInfo {
+        let info = LocalBackend::metadata_to_info(metadata);
+        let mut entries = self.entries.write();
+        let entry = entries.entry(path).or_default();
+        entry.lstat = Some(info.clone());
+        if !metadata.file_type().is_symlink() {
+            entry.stat = Some(info.clone());
+        }
+        info
+    }
+
+    fn invalidate_path(&self, path: &Path) {
+        self.entries.write().remove(path);
     }
 }
 
@@ -259,33 +427,38 @@ impl Backend for LocalBackend {
 
     async fn list_dir(&self, path: &str) -> BackendResult<Vec<DirEntry>> {
         let full_path = self.full_path(path)?;
+        let metadata_cache = Arc::clone(&self.metadata_cache);
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let dir_path = full_path.clone();
 
         debug!(path = %full_path.display(), "Listing directory");
 
-        let mut entries = vec![
-            DirEntry {
-                name: ".".to_string(),
-                attrs: FileInfo::directory(),
-            },
-            DirEntry {
-                name: "..".to_string(),
-                attrs: FileInfo::directory(),
-            },
-        ];
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                let mut entries = vec![
+                    DirEntry {
+                        name: ".".to_string(),
+                        attrs: FileInfo::directory(),
+                    },
+                    DirEntry {
+                        name: "..".to_string(),
+                        attrs: FileInfo::directory(),
+                    },
+                ];
 
-        let mut read_dir = fs::read_dir(&full_path).await.map_err(Self::map_io_error)?;
+                for entry in std::fs::read_dir(&dir_path).map_err(Self::map_io_error)? {
+                    let entry = entry.map_err(Self::map_io_error)?;
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let entry_path = entry.path();
+                    let metadata =
+                        std::fs::symlink_metadata(&entry_path).map_err(Self::map_io_error)?;
+                    let attrs = metadata_cache.insert_from_metadata(entry_path, &metadata);
+                    entries.push(DirEntry { name, attrs });
+                }
 
-        while let Some(entry) = read_dir.next_entry().await.map_err(Self::map_io_error)? {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let metadata = fs::symlink_metadata(entry.path())
-                .await
-                .map_err(Self::map_io_error)?;
-            let attrs = Self::metadata_to_info(&metadata);
-
-            entries.push(DirEntry { name, attrs });
-        }
-
-        Ok(entries)
+                Ok(entries)
+            })
+            .await
     }
 
     async fn file_info(&self, path: &str) -> BackendResult<FileInfo> {
@@ -293,8 +466,22 @@ impl Backend for LocalBackend {
 
         debug!(path = %full_path.display(), "Getting file info");
 
-        let metadata = fs::metadata(&full_path).await.map_err(Self::map_io_error)?;
-        Ok(Self::metadata_to_info(&metadata))
+        if let Some(info) = self.metadata_cache.get(&full_path, MetadataCacheKind::Stat) {
+            return Ok(info);
+        }
+
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let lookup_path = full_path.clone();
+        let info = self
+            .fs_pool
+            .run_on_shard(shard, move || {
+                let metadata = std::fs::metadata(&lookup_path).map_err(Self::map_io_error)?;
+                Ok(Self::metadata_to_info(&metadata))
+            })
+            .await?;
+        self.metadata_cache
+            .insert(full_path, MetadataCacheKind::Stat, info.clone());
+        Ok(info)
     }
 
     async fn lstat(&self, path: &str) -> BackendResult<FileInfo> {
@@ -304,69 +491,113 @@ impl Backend for LocalBackend {
 
     async fn make_dir(&self, path: &str) -> BackendResult<()> {
         let full_path = self.full_path(path)?;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let create_path = full_path.clone();
 
         debug!(path = %full_path.display(), "Creating directory");
 
-        fs::create_dir(&full_path).await.map_err(Self::map_io_error)
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                std::fs::create_dir(&create_path).map_err(Self::map_io_error)
+            })
+            .await?;
+        self.invalidate_path_and_parent(&full_path);
+        Ok(())
     }
 
     async fn del_dir(&self, path: &str) -> BackendResult<()> {
         let full_path = self.full_path(path)?;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let remove_path = full_path.clone();
 
         debug!(path = %full_path.display(), "Removing directory");
 
-        fs::remove_dir(&full_path).await.map_err(Self::map_io_error)
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                std::fs::remove_dir(&remove_path).map_err(Self::map_io_error)
+            })
+            .await?;
+        self.invalidate_path_and_parent(&full_path);
+        Ok(())
     }
 
     async fn delete(&self, path: &str) -> BackendResult<()> {
-        let normalized = normalize_path(path);
         let full_path = self.full_path(path)?;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let delete_path = full_path.clone();
 
         debug!(path = %full_path.display(), "Deleting file");
 
-        match fs::remove_file(&full_path).await {
-            Ok(()) => Ok(()),
-            Err(err) => match err.kind() {
-                std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied => {
-                    if self.lstat_path(normalized.as_ref()).await?.kind == FileKind::Directory {
-                        Err(BackendError::IsADirectory)
-                    } else {
-                        Err(Self::map_io_error(err))
+        self.fs_pool
+            .run_on_shard(shard, move || match std::fs::remove_file(&delete_path) {
+                Ok(()) => Ok(()),
+                Err(err) => match err.kind() {
+                    std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied => {
+                        let metadata =
+                            std::fs::symlink_metadata(&delete_path).map_err(Self::map_io_error)?;
+                        if Self::metadata_to_info(&metadata).kind == FileKind::Directory {
+                            Err(BackendError::IsADirectory)
+                        } else {
+                            Err(Self::map_io_error(err))
+                        }
                     }
-                }
-                _ => Err(Self::map_io_error(err)),
-            },
-        }
+                    _ => Err(Self::map_io_error(err)),
+                },
+            })
+            .await?;
+        self.invalidate_path_and_parent(&full_path);
+        Ok(())
     }
 
     async fn rename(&self, src: &str, dst: &str) -> BackendResult<()> {
         let src_path = self.full_path(src)?;
         let dst_path = self.full_path(dst)?;
+        let shard = self
+            .fs_pool
+            .shard_for_paths(&[src_path.as_path(), dst_path.as_path()]);
+        let rename_src = src_path.clone();
+        let rename_dst = dst_path.clone();
 
         debug!(from = %src_path.display(), to = %dst_path.display(), "Renaming");
 
-        fs::rename(&src_path, &dst_path)
-            .await
-            .map_err(Self::map_io_error)
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                std::fs::rename(&rename_src, &rename_dst).map_err(Self::map_io_error)
+            })
+            .await?;
+        self.invalidate_paths([src_path.as_path(), dst_path.as_path()]);
+        Ok(())
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Bytes> {
         let full_path = self.full_path(path)?;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let read_path = full_path.clone();
 
         debug!(path = %full_path.display(), "Reading file");
 
-        let content = fs::read(&full_path).await.map_err(Self::map_io_error)?;
-        Ok(Bytes::from(content))
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                let content = std::fs::read(&read_path).map_err(Self::map_io_error)?;
+                Ok(Bytes::from(content))
+            })
+            .await
     }
 
     async fn write_file(&self, path: &str, content: Bytes) -> BackendResult<()> {
         let full_path = self.full_path(path)?;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let write_path = full_path.clone();
 
         debug!(path = %full_path.display(), len = content.len(), "Writing file");
 
-        fs::write(&full_path, &content)
-            .await
-            .map_err(Self::map_io_error)
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                std::fs::write(&write_path, &content).map_err(Self::map_io_error)
+            })
+            .await?;
+        self.invalidate_path_and_parent(&full_path);
+        Ok(())
     }
 
     async fn open_read(&self, path: &str) -> BackendResult<Box<dyn ReadHandle>> {
@@ -374,17 +605,22 @@ impl Backend for LocalBackend {
 
         debug!(path = %full_path.display(), "Opening file for read");
 
-        let (file, size) = tokio::task::spawn_blocking(move || -> BackendResult<(StdFile, u64)> {
-            let file = StdFile::open(&full_path).map_err(Self::map_io_error)?;
-            let size = file.metadata().map_err(Self::map_io_error)?.len();
-            Ok((file, size))
-        })
-        .await
-        .map_err(|err| BackendError::Other(err.to_string()))??;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let open_path = full_path.clone();
+        let (file, size) = self
+            .fs_pool
+            .run_on_shard(shard, move || {
+                let file = StdFile::open(&open_path).map_err(Self::map_io_error)?;
+                let size = file.metadata().map_err(Self::map_io_error)?.len();
+                Ok((Arc::new(file), size))
+            })
+            .await?;
 
         Ok(Box::new(LocalReadHandle {
+            pool: Arc::clone(&self.fs_pool),
+            shard,
             file,
-            buf: Mutex::new(bytes::BytesMut::with_capacity(64 * 1024)),
+            buf: Arc::new(Mutex::new(bytes::BytesMut::with_capacity(64 * 1024))),
             size,
         }))
     }
@@ -394,22 +630,38 @@ impl Backend for LocalBackend {
 
         debug!(path = %full_path.display(), "Opening file for write");
 
-        let file = tokio::task::spawn_blocking(move || -> BackendResult<StdFile> {
-            StdFile::create(&full_path).map_err(Self::map_io_error)
-        })
-        .await
-        .map_err(|err| BackendError::Other(err.to_string()))??;
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let open_path = full_path.clone();
+        let file = self
+            .fs_pool
+            .run_on_shard(shard, move || {
+                StdFile::create(&open_path)
+                    .map(Arc::new)
+                    .map_err(Self::map_io_error)
+            })
+            .await?;
+        self.invalidate_path_and_parent(&full_path);
 
-        Ok(Box::new(LocalWriteHandle { file }))
+        Ok(Box::new(LocalWriteHandle {
+            pool: Arc::clone(&self.fs_pool),
+            metadata_cache: Arc::clone(&self.metadata_cache),
+            shard,
+            file,
+            path: full_path,
+        }))
     }
 
     async fn read_link(&self, path: &str) -> BackendResult<String> {
         let normalized = normalize_path(path);
         let full_path = self.full_path(&normalized)?;
-        let target = fs::read_link(&full_path)
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let link_path = full_path.clone();
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                let target = std::fs::read_link(&link_path).map_err(Self::map_io_error)?;
+                Ok(target.to_string_lossy().to_string())
+            })
             .await
-            .map_err(Self::map_io_error)?;
-        Ok(target.to_string_lossy().to_string())
     }
 
     async fn symlink(&self, linkpath: &str, targetpath: &str) -> BackendResult<()> {
@@ -418,27 +670,34 @@ impl Backend for LocalBackend {
         let _ = self.resolve_symlink_target_path(&linkpath, &targetpath_owned)?;
         #[cfg(windows)]
         let target_exists_path = self.resolve_symlink_target_path(&linkpath, &targetpath_owned)?;
+        let shard = self.fs_pool.shard_for_path(&linkpath);
+        let symlink_path = linkpath.clone();
 
-        tokio::task::spawn_blocking(move || {
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&targetpath_owned, &linkpath)
-            }
-
-            #[cfg(windows)]
-            {
-                let target_is_dir = target_exists_path.is_dir() || targetpath_owned.ends_with('/');
-                if target_is_dir {
-                    std::os::windows::fs::symlink_dir(&targetpath_owned, &linkpath)
-                } else {
-                    std::os::windows::fs::symlink_file(&targetpath_owned, &linkpath)
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&targetpath_owned, &symlink_path)
+                        .map_err(Self::map_io_error)?;
+                    Ok(())
                 }
-            }
-        })
-        .await
-        .map_err(|err| BackendError::Other(err.to_string()))?
-        .map_err(Self::map_io_error)?;
 
+                #[cfg(windows)]
+                {
+                    let target_is_dir =
+                        target_exists_path.is_dir() || targetpath_owned.ends_with('/');
+                    if target_is_dir {
+                        std::os::windows::fs::symlink_dir(&targetpath_owned, &symlink_path)
+                    } else {
+                        std::os::windows::fs::symlink_file(&targetpath_owned, &symlink_path)
+                    }
+                    .map_err(Self::map_io_error)?;
+                    Ok(())
+                }
+            })
+            .await?;
+
+        self.invalidate_path_and_parent(&linkpath);
         Ok(())
     }
 
@@ -459,95 +718,97 @@ impl Backend for LocalBackend {
             return Err(BackendError::Unsupported);
         }
 
-        if let Some(size) = attrs.size {
-            let file = File::options()
-                .write(true)
-                .open(&full_path)
-                .await
-                .map_err(Self::map_io_error)?;
-            file.set_len(size).await.map_err(Self::map_io_error)?;
-        }
+        let shard = self.fs_pool.shard_for_path(&full_path);
+        let attr_path = full_path.clone();
+        self.fs_pool
+            .run_on_shard(shard, move || {
+                if let Some(size) = attrs.size {
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&attr_path)
+                        .map_err(Self::map_io_error)?;
+                    file.set_len(size).map_err(Self::map_io_error)?;
+                }
 
-        if let Some(mode) = attrs.permissions {
-            let metadata = fs::metadata(&full_path).await.map_err(Self::map_io_error)?;
-            let mut permissions = metadata.permissions();
+                if let Some(mode) = attrs.permissions {
+                    let metadata = std::fs::metadata(&attr_path).map_err(Self::map_io_error)?;
+                    let mut permissions = metadata.permissions();
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                permissions.set_mode(mode);
-            }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        permissions.set_mode(mode);
+                    }
 
-            #[cfg(not(unix))]
-            {
-                permissions.set_readonly(mode & 0o222 == 0);
-            }
+                    #[cfg(not(unix))]
+                    {
+                        permissions.set_readonly(mode & 0o222 == 0);
+                    }
 
-            fs::set_permissions(&full_path, permissions)
-                .await
-                .map_err(Self::map_io_error)?;
-        }
+                    std::fs::set_permissions(&attr_path, permissions)
+                        .map_err(Self::map_io_error)?;
+                }
 
-        if attrs.atime.is_some() || attrs.mtime.is_some() {
-            let atime =
-                filetime::FileTime::from_unix_time(attrs.atime.unwrap_or(lstat.atime) as i64, 0);
-            let mtime =
-                filetime::FileTime::from_unix_time(attrs.mtime.unwrap_or(lstat.mtime) as i64, 0);
-            let path = full_path.clone();
-            tokio::task::spawn_blocking(move || filetime::set_file_times(&path, atime, mtime))
-                .await
-                .map_err(|err| BackendError::Other(err.to_string()))?
-                .map_err(Self::map_io_error)?;
-        }
+                if attrs.atime.is_some() || attrs.mtime.is_some() {
+                    let atime = filetime::FileTime::from_unix_time(
+                        attrs.atime.unwrap_or(lstat.atime) as i64,
+                        0,
+                    );
+                    let mtime = filetime::FileTime::from_unix_time(
+                        attrs.mtime.unwrap_or(lstat.mtime) as i64,
+                        0,
+                    );
+                    filetime::set_file_times(&attr_path, atime, mtime)
+                        .map_err(Self::map_io_error)?;
+                }
 
-        #[cfg(unix)]
-        if attrs.uid.is_some() || attrs.gid.is_some() {
-            let uid = attrs.uid.map(nix::unistd::Uid::from_raw);
-            let gid = attrs.gid.map(nix::unistd::Gid::from_raw);
-            let path = full_path.clone();
-            tokio::task::spawn_blocking(move || nix::unistd::chown(&path, uid, gid))
-                .await
-                .map_err(|err| BackendError::Other(err.to_string()))?
-                .map_err(|err| BackendError::Other(err.to_string()))?;
-        }
+                #[cfg(unix)]
+                if attrs.uid.is_some() || attrs.gid.is_some() {
+                    let uid = attrs.uid.map(nix::unistd::Uid::from_raw);
+                    let gid = attrs.gid.map(nix::unistd::Gid::from_raw);
+                    nix::unistd::chown(&attr_path, uid, gid)
+                        .map_err(|err| BackendError::Other(err.to_string()))?;
+                }
 
-        #[cfg(not(unix))]
-        if attrs.uid.is_some() || attrs.gid.is_some() {
-            return Err(BackendError::Unsupported);
-        }
+                #[cfg(not(unix))]
+                if attrs.uid.is_some() || attrs.gid.is_some() {
+                    return Err(BackendError::Unsupported);
+                }
 
+                Ok(())
+            })
+            .await?;
+        self.invalidate_path_and_parent(&full_path);
         Ok(())
     }
 }
 
 /// Read handle for local filesystem - uses seek + read for random access.
-/// Includes a reusable buffer to avoid repeated allocations and page faults.
 struct LocalReadHandle {
-    file: StdFile,
-    /// Reusable read buffer retained across reads to avoid repeated allocations.
-    buf: Mutex<bytes::BytesMut>,
+    pool: Arc<LocalFsPool>,
+    shard: usize,
+    file: Arc<StdFile>,
+    buf: Arc<Mutex<bytes::BytesMut>>,
     size: u64,
 }
 
 #[async_trait]
 impl ReadHandle for LocalReadHandle {
-    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
-        let mut buf = self.buf.lock();
-        buf.clear();
-        let len = usize::try_from(len).unwrap_or(usize::MAX);
-        buf.resize(len, 0);
-
-        let bytes_read = match read_file_at(&self.file, &mut buf[..], offset) {
-            Ok(bytes_read) => bytes_read,
-            Err(err) => return Some(Err(LocalBackend::map_io_error(err))),
-        };
-
-        buf.truncate(bytes_read);
-        Some(Ok(buf.split().freeze()))
-    }
-
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
-        self.try_read_at(offset, len).unwrap()
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        let file = Arc::clone(&self.file);
+        let buf = Arc::clone(&self.buf);
+        self.pool
+            .run_on_shard(self.shard, move || {
+                let mut buf = buf.lock();
+                buf.clear();
+                buf.resize(len, 0);
+                let bytes_read = read_file_at(file.as_ref(), &mut buf[..], offset)
+                    .map_err(LocalBackend::map_io_error)?;
+                buf.truncate(bytes_read);
+                Ok(buf.split().freeze())
+            })
+            .await
     }
 
     fn size(&self) -> u64 {
@@ -557,26 +818,33 @@ impl ReadHandle for LocalReadHandle {
 
 /// Write handle for local filesystem - writes directly to file
 struct LocalWriteHandle {
-    file: StdFile,
+    pool: Arc<LocalFsPool>,
+    metadata_cache: Arc<LocalMetadataCache>,
+    shard: usize,
+    file: Arc<StdFile>,
+    path: PathBuf,
 }
 
 #[async_trait]
 impl WriteHandle for LocalWriteHandle {
-    fn try_write_at(&mut self, offset: u64, data: &Bytes) -> Option<BackendResult<()>> {
-        Some(write_all_file_at(&self.file, data, offset).map_err(LocalBackend::map_io_error))
-    }
-
     async fn write_at(&mut self, offset: u64, data: Bytes) -> BackendResult<()> {
-        self.try_write_at(offset, &data).unwrap()
+        let file = Arc::clone(&self.file);
+        self.pool
+            .run_on_shard(self.shard, move || {
+                write_all_file_at(file.as_ref(), &data, offset).map_err(LocalBackend::map_io_error)
+            })
+            .await
     }
 
     async fn finish(self: Box<Self>) -> BackendResult<()> {
+        self.metadata_cache.invalidate_path(&self.path);
         Ok(())
     }
 
     async fn abort(self: Box<Self>) -> BackendResult<()> {
         // File will be closed on drop, but it may have partial content
         // For a cleaner abort, we'd need to track the path and delete the file
+        self.metadata_cache.invalidate_path(&self.path);
         Ok(())
     }
 }
@@ -691,6 +959,47 @@ mod tests {
         backend.delete("test.txt").await.unwrap();
         let result = backend.read_file("test.txt").await;
         assert!(matches!(result, Err(BackendError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_file_info_cache_invalidates_on_rewrite() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend
+            .write_file("test.txt", Bytes::from_static(b"old"))
+            .await
+            .unwrap();
+        let original = backend.file_info("test.txt").await.unwrap();
+        assert_eq!(original.size, 3);
+
+        backend
+            .write_file("test.txt", Bytes::from_static(b"newer-data"))
+            .await
+            .unwrap();
+        let rewritten = backend.file_info("test.txt").await.unwrap();
+        assert_eq!(rewritten.size, 10);
+    }
+
+    #[tokio::test]
+    async fn test_rename_invalidates_cached_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend
+            .write_file("before.txt", Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        let original = backend.file_info("before.txt").await.unwrap();
+        assert_eq!(original.size, 4);
+
+        backend.rename("before.txt", "after.txt").await.unwrap();
+
+        let old = backend.file_info("before.txt").await;
+        assert!(matches!(old, Err(BackendError::NotFound)));
+
+        let renamed = backend.file_info("after.txt").await.unwrap();
+        assert_eq!(renamed.size, 4);
     }
 
     #[tokio::test]
