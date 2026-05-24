@@ -637,12 +637,7 @@ impl Backend for LocalBackend {
             })
             .await?;
 
-        Ok(Box::new(LocalReadHandle {
-            pool: Arc::clone(&self.fs_pool),
-            shard,
-            file,
-            size,
-        }))
+        Ok(Box::new(LocalReadHandle { file, size }))
     }
 
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
@@ -805,46 +800,48 @@ impl Backend for LocalBackend {
 
 /// Read handle for local filesystem - uses seek + read for random access.
 struct LocalReadHandle {
-    pool: Arc<LocalFsPool>,
-    shard: usize,
     file: Arc<StdFile>,
     size: u64,
 }
 
-#[async_trait]
-impl ReadHandle for LocalReadHandle {
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+impl LocalReadHandle {
+    fn read_at_sync(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
         let len = usize::try_from(len).map_err(|_| {
             BackendError::Other("requested read length does not fit in usize".to_string())
         })?;
-        let file = Arc::clone(&self.file);
-        self.pool
-            .run_on_shard(self.shard, move || {
-                let mut buf = BytesMut::with_capacity(len);
+        let mut buf = BytesMut::with_capacity(len);
 
-                #[cfg(unix)]
-                let bytes_read =
-                    read_file_at_uninit(file.as_ref(), buf.spare_capacity_mut(), offset)
-                        .map_err(LocalBackend::map_io_error)?;
+        #[cfg(unix)]
+        let bytes_read = read_file_at_uninit(&self.file, buf.spare_capacity_mut(), offset)
+            .map_err(LocalBackend::map_io_error)?;
 
-                #[cfg(unix)]
-                unsafe {
-                    buf.set_len(bytes_read);
-                }
+        #[cfg(unix)]
+        unsafe {
+            buf.set_len(bytes_read);
+        }
 
-                #[cfg(not(unix))]
-                buf.resize(len, 0);
+        #[cfg(not(unix))]
+        buf.resize(len, 0);
 
-                #[cfg(not(unix))]
-                let bytes_read = read_file_at(file.as_ref(), &mut buf[..], offset)
-                    .map_err(LocalBackend::map_io_error)?;
+        #[cfg(not(unix))]
+        let bytes_read = read_file_at(self.file.as_ref(), &mut buf[..], offset)
+            .map_err(LocalBackend::map_io_error)?;
 
-                #[cfg(not(unix))]
-                buf.truncate(bytes_read);
+        #[cfg(not(unix))]
+        buf.truncate(bytes_read);
 
-                Ok(buf.freeze())
-            })
-            .await
+        Ok(buf.freeze())
+    }
+}
+
+#[async_trait]
+impl ReadHandle for LocalReadHandle {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+        Some(self.read_at_sync(offset, len))
+    }
+
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+        self.read_at_sync(offset, len)
     }
 
     fn size(&self) -> u64 {

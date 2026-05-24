@@ -922,30 +922,30 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
     let iterations = match args.client {
         ClientKind::Openssh => {
             for iteration in 0..warmup {
-                let _ = run_small_files_iteration(
+                let _ = run_small_files_iteration(SmallFilesIteration {
                     port,
-                    &ctx.keys,
-                    args.ciphers.as_deref(),
-                    args.sftp_requests,
-                    args.sftp_buffer_size,
-                    &file_paths,
-                    &artifact_dir,
-                    &format!("warmup-{iteration}"),
-                )?;
+                    keys: &ctx.keys,
+                    ciphers: args.ciphers.as_deref(),
+                    sftp_requests: args.sftp_requests,
+                    sftp_buffer_size: args.sftp_buffer_size,
+                    file_paths: &file_paths,
+                    artifact_dir: &artifact_dir,
+                    iteration_label: &format!("warmup-{iteration}"),
+                })?;
             }
 
             let mut iterations = Vec::new();
             for iteration in 0..runs {
-                iterations.push(run_small_files_iteration(
+                iterations.push(run_small_files_iteration(SmallFilesIteration {
                     port,
-                    &ctx.keys,
-                    args.ciphers.as_deref(),
-                    args.sftp_requests,
-                    args.sftp_buffer_size,
-                    &file_paths,
-                    &artifact_dir,
-                    &format!("run-{iteration}"),
-                )?);
+                    keys: &ctx.keys,
+                    ciphers: args.ciphers.as_deref(),
+                    sftp_requests: args.sftp_requests,
+                    sftp_buffer_size: args.sftp_buffer_size,
+                    file_paths: &file_paths,
+                    artifact_dir: &artifact_dir,
+                    iteration_label: &format!("run-{iteration}"),
+                })?);
             }
             iterations
         }
@@ -1874,16 +1874,28 @@ fn run_sftp_batch(
     }
 }
 
-fn run_small_files_iteration(
+struct SmallFilesIteration<'a> {
     port: u16,
-    keys: &KeyMaterial,
-    ciphers: Option<&str>,
+    keys: &'a KeyMaterial,
+    ciphers: Option<&'a str>,
     sftp_requests: Option<u32>,
     sftp_buffer_size: Option<usize>,
-    file_paths: &[PathBuf],
-    artifact_dir: &Path,
-    iteration_label: &str,
-) -> Result<f64, BoxError> {
+    file_paths: &'a [PathBuf],
+    artifact_dir: &'a Path,
+    iteration_label: &'a str,
+}
+
+fn run_small_files_iteration(args: SmallFilesIteration<'_>) -> Result<f64, BoxError> {
+    let SmallFilesIteration {
+        port,
+        keys,
+        ciphers,
+        sftp_requests,
+        sftp_buffer_size,
+        file_paths,
+        artifact_dir,
+        iteration_label,
+    } = args;
     let remote_prefix = format!("small-files-{iteration_label}");
     let download_dir = artifact_dir.join(format!("download-{iteration_label}"));
     if download_dir.exists() {
