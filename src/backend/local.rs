@@ -3,8 +3,8 @@ use super::{
     DirEntry, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
-use parking_lot::{Mutex, RwLock};
+use bytes::{Bytes, BytesMut};
+use parking_lot::RwLock;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
@@ -361,12 +361,8 @@ impl LocalMetadataCache {
     }
 }
 
+#[cfg(not(unix))]
 fn read_file_at(file: &StdFile, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.read_at(buf, offset)
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileExt;
@@ -377,6 +373,31 @@ fn read_file_at(file: &StdFile, buf: &mut [u8], offset: u64) -> std::io::Result<
         let mut cloned = file.try_clone()?;
         std::io::Seek::seek(&mut cloned, std::io::SeekFrom::Start(offset))?;
         std::io::Read::read(&mut cloned, buf)
+    }
+}
+
+#[cfg(unix)]
+fn read_file_at_uninit(
+    file: &StdFile,
+    buf: &mut [std::mem::MaybeUninit<u8>],
+    offset: u64,
+) -> std::io::Result<usize> {
+    use std::os::fd::AsRawFd;
+
+    let offset = nix::libc::off_t::try_from(offset).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "file offset does not fit in off_t",
+        )
+    })?;
+
+    let bytes_read =
+        unsafe { nix::libc::pread(file.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), offset) };
+
+    if bytes_read < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(bytes_read as usize)
     }
 }
 
@@ -620,7 +641,6 @@ impl Backend for LocalBackend {
             pool: Arc::clone(&self.fs_pool),
             shard,
             file,
-            buf: Arc::new(Mutex::new(bytes::BytesMut::with_capacity(64 * 1024))),
             size,
         }))
     }
@@ -788,25 +808,41 @@ struct LocalReadHandle {
     pool: Arc<LocalFsPool>,
     shard: usize,
     file: Arc<StdFile>,
-    buf: Arc<Mutex<bytes::BytesMut>>,
     size: u64,
 }
 
 #[async_trait]
 impl ReadHandle for LocalReadHandle {
     async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
-        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        let len = usize::try_from(len).map_err(|_| {
+            BackendError::Other("requested read length does not fit in usize".to_string())
+        })?;
         let file = Arc::clone(&self.file);
-        let buf = Arc::clone(&self.buf);
         self.pool
             .run_on_shard(self.shard, move || {
-                let mut buf = buf.lock();
-                buf.clear();
+                let mut buf = BytesMut::with_capacity(len);
+
+                #[cfg(unix)]
+                let bytes_read =
+                    read_file_at_uninit(file.as_ref(), buf.spare_capacity_mut(), offset)
+                        .map_err(LocalBackend::map_io_error)?;
+
+                #[cfg(unix)]
+                unsafe {
+                    buf.set_len(bytes_read);
+                }
+
+                #[cfg(not(unix))]
                 buf.resize(len, 0);
+
+                #[cfg(not(unix))]
                 let bytes_read = read_file_at(file.as_ref(), &mut buf[..], offset)
                     .map_err(LocalBackend::map_io_error)?;
+
+                #[cfg(not(unix))]
                 buf.truncate(bytes_read);
-                Ok(buf.split().freeze())
+
+                Ok(buf.freeze())
             })
             .await
     }
