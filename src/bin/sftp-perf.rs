@@ -95,7 +95,7 @@ struct CommonArgs {
     #[arg(long)]
     sftp_requests: Option<u32>,
 
-    /// OpenSSH sftp transfer buffer size in bytes (-B)
+    /// OpenSSH sftp/scp transfer buffer size in bytes
     #[arg(long)]
     sftp_buffer_size: Option<usize>,
 
@@ -156,7 +156,7 @@ struct SmallFilesArgs {
     #[arg(long)]
     sftp_requests: Option<u32>,
 
-    /// OpenSSH sftp transfer buffer size in bytes (-B)
+    /// OpenSSH sftp/scp transfer buffer size in bytes
     #[arg(long)]
     sftp_buffer_size: Option<usize>,
 
@@ -279,6 +279,8 @@ struct MarkInvalidArgs {
 enum ClientKind {
     #[value(alias = "rust")]
     Bench,
+    #[value(name = "openssh-scp", alias = "scp")]
+    OpensshScp,
     Openssh,
 }
 
@@ -817,7 +819,19 @@ fn run_mode(
                         &run_dir,
                         &artifact_prefix,
                     )?,
-                    ClientKind::Openssh => run_openssh(
+                    ClientKind::Openssh => run_openssh_sftp(
+                        &common,
+                        *operation,
+                        *size_mb,
+                        warmup,
+                        runs,
+                        port,
+                        &ctx.keys,
+                        &test_file,
+                        &run_dir,
+                        &artifact_prefix,
+                    )?,
+                    ClientKind::OpensshScp => run_openssh_scp(
                         &common,
                         *operation,
                         *size_mb,
@@ -988,6 +1002,9 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
             port,
             &artifact_dir,
         )?,
+        ClientKind::OpensshScp => {
+            return Err("--client openssh-scp is not supported for small-files".into());
+        }
     };
     stop_server(&mut server)?;
 
@@ -1469,7 +1486,7 @@ fn invoke_small_files_bench_client(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_openssh(
+fn run_openssh_sftp(
     common: &CommonArgs,
     operation: OperationKind,
     size_mb: u64,
@@ -1482,7 +1499,7 @@ fn run_openssh(
     artifact_prefix: &str,
 ) -> Result<MeasurementSeries, BoxError> {
     for iteration in 0..warmup {
-        let _ = run_openssh_iteration(
+        let _ = run_openssh_sftp_iteration(
             common,
             operation,
             size_mb,
@@ -1495,7 +1512,7 @@ fn run_openssh(
     }
     let mut iterations = Vec::new();
     for iteration in 0..runs {
-        iterations.push(run_openssh_iteration(
+        iterations.push(run_openssh_sftp_iteration(
             common,
             operation,
             size_mb,
@@ -1513,7 +1530,7 @@ fn run_openssh(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_openssh_iteration(
+fn run_openssh_sftp_iteration(
     common: &CommonArgs,
     operation: OperationKind,
     size_mb: u64,
@@ -1621,6 +1638,96 @@ fn run_openssh_iteration(
                 common.sftp_buffer_size,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
+            let _ = fs::remove_file(download_file);
+            Ok(elapsed)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_openssh_scp(
+    common: &CommonArgs,
+    operation: OperationKind,
+    size_mb: u64,
+    warmup: u32,
+    runs: u32,
+    port: u16,
+    keys: &KeyMaterial,
+    test_file: &Path,
+    run_dir: &Path,
+    artifact_prefix: &str,
+) -> Result<MeasurementSeries, BoxError> {
+    for iteration in 0..warmup {
+        let _ = run_openssh_scp_iteration(
+            common,
+            operation,
+            size_mb,
+            port,
+            keys,
+            test_file,
+            run_dir,
+            &format!("{artifact_prefix}-warmup-{iteration}"),
+        )?;
+    }
+    let mut iterations = Vec::new();
+    for iteration in 0..runs {
+        iterations.push(run_openssh_scp_iteration(
+            common,
+            operation,
+            size_mb,
+            port,
+            keys,
+            test_file,
+            run_dir,
+            &format!("{artifact_prefix}-{iteration}"),
+        )?);
+    }
+    Ok(MeasurementSeries {
+        bytes: bytes_for_operation(operation, size_mb),
+        iterations,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_openssh_scp_iteration(
+    common: &CommonArgs,
+    operation: OperationKind,
+    size_mb: u64,
+    port: u16,
+    keys: &KeyMaterial,
+    test_file: &Path,
+    run_dir: &Path,
+    artifact_prefix: &str,
+) -> Result<f64, BoxError> {
+    let remote_file = format!("bench-{}-{}.bin", artifact_prefix, size_mb);
+    let download_file = run_dir
+        .join("artifacts")
+        .join(format!("download-{artifact_prefix}.bin"));
+    match operation {
+        OperationKind::Upload => {
+            let start = Instant::now();
+            run_scp_upload(port, keys, common, test_file, &remote_file)?;
+            let elapsed = start.elapsed().as_secs_f64();
+            let _ = remove_remote_file(port, keys, common.ciphers.as_deref(), &remote_file);
+            Ok(elapsed)
+        }
+        OperationKind::Download => {
+            run_scp_upload(port, keys, common, test_file, &remote_file)?;
+            let start = Instant::now();
+            run_scp_download(port, keys, common, &remote_file, &download_file)?;
+            let elapsed = start.elapsed().as_secs_f64();
+            verify_local_file_size(&download_file, mib_to_bytes(size_mb)?)?;
+            let _ = remove_remote_file(port, keys, common.ciphers.as_deref(), &remote_file);
+            let _ = fs::remove_file(download_file);
+            Ok(elapsed)
+        }
+        OperationKind::Roundtrip => {
+            let start = Instant::now();
+            run_scp_upload(port, keys, common, test_file, &remote_file)?;
+            run_scp_download(port, keys, common, &remote_file, &download_file)?;
+            let elapsed = start.elapsed().as_secs_f64();
+            verify_local_file_size(&download_file, mib_to_bytes(size_mb)?)?;
+            let _ = remove_remote_file(port, keys, common.ciphers.as_deref(), &remote_file);
             let _ = fs::remove_file(download_file);
             Ok(elapsed)
         }
@@ -1996,6 +2103,101 @@ fn run_sftp_batch(
     } else {
         Err(format!("sftp batch failed with {status}").into())
     }
+}
+
+fn run_scp_upload(
+    port: u16,
+    keys: &KeyMaterial,
+    common: &CommonArgs,
+    local_file: &Path,
+    remote_file: &str,
+) -> Result<(), BoxError> {
+    let mut command = Command::new("scp");
+    add_scp_common_args(&mut command, port, keys, common);
+    command
+        .arg(local_file)
+        .arg(format!("benchmark@127.0.0.1:{remote_file}"));
+    run_scp_status(&mut command, "run OpenSSH scp upload")
+}
+
+fn run_scp_download(
+    port: u16,
+    keys: &KeyMaterial,
+    common: &CommonArgs,
+    remote_file: &str,
+    local_file: &Path,
+) -> Result<(), BoxError> {
+    let mut command = Command::new("scp");
+    add_scp_common_args(&mut command, port, keys, common);
+    command
+        .arg(format!("benchmark@127.0.0.1:{remote_file}"))
+        .arg(local_file);
+    run_scp_status(&mut command, "run OpenSSH scp download")
+}
+
+fn add_scp_common_args(command: &mut Command, port: u16, keys: &KeyMaterial, common: &CommonArgs) {
+    command
+        .arg("-P")
+        .arg(port.to_string())
+        .arg("-i")
+        .arg(&keys.private_key)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("LogLevel=ERROR")
+        .arg("-o")
+        .arg("Compression=no");
+    if let Some(cipher_list) = common.ciphers.as_deref() {
+        command.arg("-c").arg(openssh_ciphers(cipher_list));
+    }
+    if let Some(requests) = common.sftp_requests {
+        command.arg("-X").arg(format!("nrequests={requests}"));
+    }
+    if let Some(buffer_size) = common.sftp_buffer_size {
+        command.arg("-X").arg(format!("buffer={buffer_size}"));
+    }
+}
+
+fn run_scp_status(command: &mut Command, description: &str) -> Result<(), BoxError> {
+    let status = command.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{description} failed with {status}").into())
+    }
+}
+
+fn verify_local_file_size(path: &Path, expected_bytes: u64) -> Result<(), BoxError> {
+    let actual_bytes = fs::metadata(path)?.len();
+    if actual_bytes == expected_bytes {
+        Ok(())
+    } else {
+        Err(format!(
+            "downloaded file {} has {actual_bytes} bytes, expected {expected_bytes}",
+            path.display()
+        )
+        .into())
+    }
+}
+
+fn remove_remote_file(
+    port: u16,
+    keys: &KeyMaterial,
+    ciphers: Option<&str>,
+    remote_file: &str,
+) -> Result<(), BoxError> {
+    run_sftp_batch(
+        port,
+        keys,
+        ciphers,
+        None,
+        None,
+        &[format!("rm {remote_file}"), "quit".to_string()],
+    )
 }
 
 struct SmallFilesIteration<'a> {
@@ -2561,24 +2763,27 @@ fn ensure_small_files_args(args: &SmallFilesArgs) -> Result<(), BoxError> {
     if args.file_depth == 0 {
         return Err("--file-depth must be greater than zero".into());
     }
-    if args.client != ClientKind::Openssh {
+    if args.client == ClientKind::OpensshScp {
+        return Err("--client openssh-scp is not supported for small-files".into());
+    }
+    if !matches!(args.client, ClientKind::Openssh | ClientKind::OpensshScp) {
         if args.sftp_requests.is_some() {
-            return Err("--sftp-requests only applies to --client openssh".into());
+            return Err("--sftp-requests only applies to OpenSSH clients".into());
         }
         if args.sftp_buffer_size.is_some() {
-            return Err("--sftp-buffer-size only applies to --client openssh".into());
+            return Err("--sftp-buffer-size only applies to OpenSSH clients".into());
         }
     }
     Ok(())
 }
 
 fn ensure_common_args(args: &CommonArgs) -> Result<(), BoxError> {
-    if args.client != ClientKind::Openssh {
+    if !matches!(args.client, ClientKind::Openssh | ClientKind::OpensshScp) {
         if args.sftp_requests.is_some() {
-            return Err("--sftp-requests only applies to --client openssh".into());
+            return Err("--sftp-requests only applies to OpenSSH clients".into());
         }
         if args.sftp_buffer_size.is_some() {
-            return Err("--sftp-buffer-size only applies to --client openssh".into());
+            return Err("--sftp-buffer-size only applies to OpenSSH clients".into());
         }
     }
     Ok(())
@@ -2899,6 +3104,7 @@ fn operation_name(operation: OperationKind) -> &'static str {
 fn client_name(client: ClientKind) -> &'static str {
     match client {
         ClientKind::Bench => "bench",
+        ClientKind::OpensshScp => "openssh-scp",
         ClientKind::Openssh => "openssh",
     }
 }

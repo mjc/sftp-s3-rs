@@ -1,12 +1,13 @@
 use crate::backend::Backend;
 use crate::scp_handler::ScpHandler;
 use crate::sftp_handler::SftpHandler;
+use parking_lot::Mutex as StdMutex;
 use russh::keys::PublicKey;
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId};
 #[cfg(not(feature = "benchmark-matrix-compat"))]
 use russh_sftp::protocol::SerializedPacket;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -64,6 +65,7 @@ pub struct SshSession<B: Backend> {
     backend: Arc<B>,
     auth_config: AuthConfig,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    sftp_channels: Arc<StdMutex<HashSet<ChannelId>>>,
 }
 
 impl<B: Backend> SshSession<B> {
@@ -72,6 +74,7 @@ impl<B: Backend> SshSession<B> {
             backend,
             auth_config,
             channels: Arc::new(Mutex::new(HashMap::new())),
+            sftp_channels: Arc::new(StdMutex::new(HashSet::new())),
         }
     }
 }
@@ -158,6 +161,7 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         let name = name.to_string();
         let channels = self.channels.clone();
+        let sftp_channels = self.sftp_channels.clone();
         let backend = self.backend.clone();
 
         // Handle session operations synchronously before the async block
@@ -173,6 +177,7 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
             match name.as_str() {
                 "sftp" => {
                     if let Some(channel) = channels.lock().await.remove(&channel_id) {
+                        sftp_channels.lock().insert(channel_id);
                         let sftp_handler =
                             russh_sftp::server::ManagedSession::new(SftpHandler::new(backend));
                         #[cfg(feature = "benchmark-matrix-compat")]
@@ -275,11 +280,21 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
         channel_id: ChannelId,
         session: &mut Session,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        let result = session.close(channel_id);
+        let is_sftp_channel = self.sftp_channels.lock().remove(&channel_id);
+        let exit_status_result =
+            is_sftp_channel.then(|| session.exit_status_request(channel_id, 0));
+        let eof_result = is_sftp_channel.then(|| session.eof(channel_id));
+        let close_result = session.close(channel_id);
 
         async move {
             debug!(channel_id = ?channel_id, "Channel EOF");
-            result?;
+            if let Some(result) = exit_status_result {
+                result?;
+            }
+            if let Some(result) = eof_result {
+                result?;
+            }
+            close_result?;
             Ok(())
         }
     }
