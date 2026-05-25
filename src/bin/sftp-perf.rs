@@ -91,6 +91,10 @@ struct CommonArgs {
     #[arg(long, default_value = "64KiB")]
     chunk_size: String,
 
+    /// SSH channel maximum packet size advertised by the Rust benchmark client
+    #[arg(long, default_value = "64KiB")]
+    max_packet_size: String,
+
     /// OpenSSH sftp outstanding request count (-R)
     #[arg(long)]
     sftp_requests: Option<u32>,
@@ -163,6 +167,10 @@ struct SmallFilesArgs {
     /// Chunk size passed to the Rust benchmark client
     #[arg(long, default_value = "64KiB")]
     chunk_size: String,
+
+    /// SSH channel maximum packet size advertised by the Rust benchmark client
+    #[arg(long, default_value = "64KiB")]
+    max_packet_size: String,
 
     /// Number of files the Rust benchmark client processes concurrently
     #[arg(long, default_value_t = 1)]
@@ -1414,6 +1422,8 @@ fn invoke_bench_client(
         .arg(iterations.to_string())
         .arg("--chunk-size")
         .arg(&common.chunk_size)
+        .arg("--max-packet-size")
+        .arg(&common.max_packet_size)
         .arg("--nodelay")
         .arg("--insecure")
         .arg("--json-output")
@@ -1474,6 +1484,8 @@ fn invoke_small_files_bench_client(
         .arg(iterations.to_string())
         .arg("--chunk-size")
         .arg(&args.chunk_size)
+        .arg("--max-packet-size")
+        .arg(&args.max_packet_size)
         .arg("--file-depth")
         .arg(args.file_depth.to_string())
         .arg("--insecure")

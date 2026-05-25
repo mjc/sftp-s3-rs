@@ -119,6 +119,10 @@ struct Cli {
     #[arg(long)]
     nodelay: bool,
 
+    /// SSH channel maximum packet size to advertise, accepts suffixes B, KiB, MiB, GiB
+    #[arg(long, default_value = "64KiB", value_parser = parse_size_u32)]
+    max_packet_size: u32,
+
     /// Preferred ciphers (comma-separated, in order of preference)
     /// Available: aes256-gcm, aes128-ctr, aes256-ctr, chacha20-poly1305
     #[arg(long, env = "SFTP_BENCH_CIPHERS", value_delimiter = ',')]
@@ -265,6 +269,7 @@ async fn main() -> Result<(), BoxError> {
 async fn connect_sftp(addr: &str, cli: &Cli) -> Result<SftpSession, BoxError> {
     let mut config = client::Config {
         nodelay: cli.nodelay,
+        maximum_packet_size: cli.max_packet_size,
         ..Default::default()
     };
     if let Some(cipher_names) = cli.ciphers.as_ref() {
@@ -940,6 +945,11 @@ fn parse_ciphers(cipher_names: &[String]) -> Result<Vec<russh::cipher::Name>, Bo
 fn parse_size_usize(raw: &str) -> Result<usize, String> {
     let size = parse_size(raw)?;
     usize::try_from(size).map_err(|_| format!("size '{raw}' is too large for this platform"))
+}
+
+fn parse_size_u32(raw: &str) -> Result<u32, String> {
+    let size = parse_size(raw)?;
+    u32::try_from(size).map_err(|_| format!("size '{raw}' exceeds u32::MAX"))
 }
 
 fn parse_size(raw: &str) -> Result<u64, String> {
