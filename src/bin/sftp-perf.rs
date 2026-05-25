@@ -91,6 +91,14 @@ struct CommonArgs {
     #[arg(long, default_value = "64KiB")]
     chunk_size: String,
 
+    /// OpenSSH sftp outstanding request count (-R)
+    #[arg(long)]
+    sftp_requests: Option<u32>,
+
+    /// OpenSSH sftp transfer buffer size in bytes (-B)
+    #[arg(long)]
+    sftp_buffer_size: Option<usize>,
+
     /// Disable sccache even if present
     #[arg(long)]
     no_sccache: bool,
@@ -691,6 +699,7 @@ fn run_mode(
     matrix_baseline: Option<String>,
 ) -> Result<(), BoxError> {
     ensure_sizes(&common.sizes)?;
+    ensure_common_args(&common)?;
     let run_id = build_run_id(mode, common.label.as_deref());
     let run_dir = ctx.results_root.join(&run_id);
     fs::create_dir_all(&run_dir)?;
@@ -710,6 +719,8 @@ fn run_mode(
         &operations,
         &plans,
         profile_mode,
+        common.sftp_requests,
+        common.sftp_buffer_size,
     );
 
     let previous = find_previous_run(&ctx.results_root, &comparison_key)?;
@@ -870,6 +881,8 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
             &[OperationKind::Roundtrip],
             std::slice::from_ref(&plan),
             profile_mode,
+            args.sftp_requests,
+            args.sftp_buffer_size,
         ),
         args.files
     );
@@ -1505,8 +1518,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[
                     format!("put {} {}", test_file.display(), remote_file),
                     "quit".to_string(),
@@ -1517,8 +1530,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
             Ok(elapsed)
@@ -1528,8 +1541,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[
                     format!("put {} {}", test_file.display(), remote_file),
                     "quit".to_string(),
@@ -1540,8 +1553,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[
                     format!("get {} {}", remote_file, download_file.display()),
                     "quit".to_string(),
@@ -1552,8 +1565,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
             let _ = fs::remove_file(download_file);
@@ -1565,8 +1578,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[
                     format!("put {} {}", test_file.display(), remote_file),
                     "quit".to_string(),
@@ -1576,8 +1589,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[
                     format!("get {} {}", remote_file, download_file.display()),
                     "quit".to_string(),
@@ -1588,8 +1601,8 @@ fn run_openssh_iteration(
                 port,
                 keys,
                 common.ciphers.as_deref(),
-                None,
-                None,
+                common.sftp_requests,
+                common.sftp_buffer_size,
                 &[format!("rm {}", remote_file), "quit".to_string()],
             );
             let _ = fs::remove_file(download_file);
@@ -2448,6 +2461,18 @@ fn ensure_small_files_args(args: &SmallFilesArgs) -> Result<(), BoxError> {
     Ok(())
 }
 
+fn ensure_common_args(args: &CommonArgs) -> Result<(), BoxError> {
+    if args.client != ClientKind::Openssh {
+        if args.sftp_requests.is_some() {
+            return Err("--sftp-requests only applies to --client openssh".into());
+        }
+        if args.sftp_buffer_size.is_some() {
+            return Err("--sftp-buffer-size only applies to --client openssh".into());
+        }
+    }
+    Ok(())
+}
+
 fn mib_to_bytes(size_mb: u64) -> Result<u64, BoxError> {
     size_mb
         .checked_mul(1024 * 1024)
@@ -2595,6 +2620,8 @@ fn make_comparison_key(
     operations: &[OperationKind],
     targets: &[BuildPlan],
     profile_mode: Option<ProfileKind>,
+    sftp_requests: Option<u32>,
+    sftp_buffer_size: Option<usize>,
 ) -> String {
     let target_labels = targets
         .iter()
@@ -2612,13 +2639,19 @@ fn make_comparison_key(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "mode={mode};client={};backend={};ciphers={};sizes={sizes};ops={operations};targets={target_labels};profile={}",
+        "mode={mode};client={};backend={};ciphers={};sizes={sizes};ops={operations};targets={target_labels};profile={};sftp_requests={};sftp_buffer_size={}",
         client_name(client),
         backend_name(backend),
         ciphers.unwrap_or("default"),
         profile_mode
             .map(profile_tool_name)
             .unwrap_or_else(|| "none".to_string()),
+        sftp_requests
+            .map(|requests| requests.to_string())
+            .unwrap_or_else(|| "default".to_string()),
+        sftp_buffer_size
+            .map(|buffer_size| buffer_size.to_string())
+            .unwrap_or_else(|| "default".to_string()),
     )
 }
 
