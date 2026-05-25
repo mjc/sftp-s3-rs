@@ -95,6 +95,14 @@ struct CommonArgs {
     #[arg(long, default_value = "64KiB")]
     max_packet_size: String,
 
+    /// Number of concurrent SFTP read requests per file for the Rust benchmark client
+    #[arg(long, default_value_t = 64)]
+    read_depth: usize,
+
+    /// Number of concurrent SFTP write requests per file for the Rust benchmark client
+    #[arg(long, default_value_t = 64)]
+    write_depth: usize,
+
     /// OpenSSH sftp outstanding request count (-R)
     #[arg(long)]
     sftp_requests: Option<u32>,
@@ -171,6 +179,14 @@ struct SmallFilesArgs {
     /// SSH channel maximum packet size advertised by the Rust benchmark client
     #[arg(long, default_value = "64KiB")]
     max_packet_size: String,
+
+    /// Number of concurrent SFTP read requests per file for the Rust benchmark client
+    #[arg(long, default_value_t = 64)]
+    read_depth: usize,
+
+    /// Number of concurrent SFTP write requests per file for the Rust benchmark client
+    #[arg(long, default_value_t = 64)]
+    write_depth: usize,
 
     /// Number of files the Rust benchmark client processes concurrently
     #[arg(long, default_value_t = 1)]
@@ -1424,6 +1440,10 @@ fn invoke_bench_client(
         .arg(&common.chunk_size)
         .arg("--max-packet-size")
         .arg(&common.max_packet_size)
+        .arg("--read-depth")
+        .arg(common.read_depth.to_string())
+        .arg("--write-depth")
+        .arg(common.write_depth.to_string())
         .arg("--nodelay")
         .arg("--insecure")
         .arg("--json-output")
@@ -1486,6 +1506,10 @@ fn invoke_small_files_bench_client(
         .arg(&args.chunk_size)
         .arg("--max-packet-size")
         .arg(&args.max_packet_size)
+        .arg("--read-depth")
+        .arg(args.read_depth.to_string())
+        .arg("--write-depth")
+        .arg(args.write_depth.to_string())
         .arg("--file-depth")
         .arg(args.file_depth.to_string())
         .arg("--insecure")
@@ -2776,6 +2800,12 @@ fn ensure_small_files_args(args: &SmallFilesArgs) -> Result<(), BoxError> {
     if args.file_depth == 0 {
         return Err("--file-depth must be greater than zero".into());
     }
+    if args.read_depth == 0 {
+        return Err("--read-depth must be greater than zero".into());
+    }
+    if args.write_depth == 0 {
+        return Err("--write-depth must be greater than zero".into());
+    }
     if args.client == ClientKind::OpensshScp {
         return Err("--client openssh-scp is not supported for small-files".into());
     }
@@ -2791,6 +2821,12 @@ fn ensure_small_files_args(args: &SmallFilesArgs) -> Result<(), BoxError> {
 }
 
 fn ensure_common_args(args: &CommonArgs) -> Result<(), BoxError> {
+    if args.read_depth == 0 {
+        return Err("--read-depth must be greater than zero".into());
+    }
+    if args.write_depth == 0 {
+        return Err("--write-depth must be greater than zero".into());
+    }
     if !matches!(args.client, ClientKind::Openssh | ClientKind::OpensshScp) {
         if args.sftp_requests.is_some() {
             return Err("--sftp-requests only applies to OpenSSH clients".into());

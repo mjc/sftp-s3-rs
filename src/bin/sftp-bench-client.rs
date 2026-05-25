@@ -219,8 +219,9 @@ async fn main() -> Result<(), BoxError> {
     let addr = format!("{}:{}", cli.host, cli.port);
     let sftp = Arc::new(connect_sftp(&addr, &cli).await?);
     let run_id = cli.run_id.clone().unwrap_or_else(run_id);
+    let data_chunk_size = data_payload_chunk_size(cli.chunk_size, cli.max_packet_size);
     let payload = Arc::new(make_payload(
-        cli.chunk_size.min(max_file_size(cli.size, cli.files)),
+        data_chunk_size.min(max_file_size(cli.size, cli.files)),
     ));
 
     println!("target:     {addr}");
@@ -243,8 +244,12 @@ async fn main() -> Result<(), BoxError> {
 
     let results = match cli.operation {
         Operation::Upload => run_upload_benchmark(&sftp, &cli, &payload, &run_id).await?,
-        Operation::Download => run_download_benchmark(&sftp, &cli, &payload, &run_id).await?,
-        Operation::Roundtrip => run_roundtrip_benchmark(&sftp, &cli, &payload, &run_id).await?,
+        Operation::Download => {
+            run_download_benchmark(&sftp, &cli, &payload, &run_id, data_chunk_size).await?
+        }
+        Operation::Roundtrip => {
+            run_roundtrip_benchmark(&sftp, &cli, &payload, &run_id, data_chunk_size).await?
+        }
     };
 
     let summary = build_summary(&results, cli.size, cli.operation);
@@ -349,6 +354,7 @@ async fn run_download_benchmark(
     cli: &Cli,
     payload: &Arc<Vec<u8>>,
     run_id: &str,
+    read_chunk_size: usize,
 ) -> Result<Vec<IterationResult>, BoxError> {
     let paths = iteration_paths(cli, run_id, 0);
     if !cli.skip_download_setup {
@@ -368,7 +374,7 @@ async fn run_download_benchmark(
         let download = download_paths(
             sftp,
             &paths,
-            cli.chunk_size,
+            read_chunk_size,
             cli.size,
             cli.read_depth,
             cli.file_depth,
@@ -412,6 +418,7 @@ async fn run_roundtrip_benchmark(
     cli: &Cli,
     payload: &Arc<Vec<u8>>,
     run_id: &str,
+    read_chunk_size: usize,
 ) -> Result<Vec<IterationResult>, BoxError> {
     let mut results = Vec::with_capacity(cli.iterations as usize);
 
@@ -429,7 +436,7 @@ async fn run_roundtrip_benchmark(
         let download = download_paths(
             sftp,
             &paths,
-            cli.chunk_size,
+            read_chunk_size,
             cli.size,
             cli.read_depth,
             cli.file_depth,
@@ -658,6 +665,17 @@ fn max_file_size(total_size: u64, files: usize) -> usize {
     let base = total_size / files as u64;
     let remainder = total_size % files as u64;
     (base + u64::from(remainder > 0)) as usize
+}
+
+fn data_payload_chunk_size(requested: usize, max_packet_size: u32) -> usize {
+    const SFTP_DATA_PACKET_OVERHEAD: usize = 13;
+
+    let max_packet_size = max_packet_size as usize;
+    requested.min(
+        max_packet_size
+            .saturating_sub(SFTP_DATA_PACKET_OVERHEAD)
+            .max(1),
+    )
 }
 
 fn make_payload(size: usize) -> Vec<u8> {
