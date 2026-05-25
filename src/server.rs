@@ -49,7 +49,7 @@ pub struct ServerConfig {
     pub nodelay: bool,
     /// SSH channel window size for flow control (default: 2MB)
     pub window_size: u32,
-    /// Maximum SSH packet size (default: 32KB, max: 256KB)
+    /// Maximum SSH channel packet size (default: 256KB)
     pub maximum_packet_size: u32,
     /// Rekey write limit in bytes (default: 1GB). Lower for testing.
     pub rekey_write_limit: usize,
@@ -67,7 +67,7 @@ impl Default for ServerConfig {
             compression: false,
             nodelay: true, // Enable by default for better small file performance
             window_size: 2 * 1024 * 1024, // 2MB default
-            maximum_packet_size: 65_535, // russh caps this at the TCP packet limit
+            maximum_packet_size: 256 * 1024,
             rekey_write_limit: 1 << 30, // 1GB default (matches russh default)
             max_connections: None,
         }
@@ -740,7 +740,7 @@ mod tests {
         assert!(!config.compression);
         assert!(config.nodelay);
         assert_eq!(config.window_size, 2 * 1024 * 1024);
-        assert_eq!(config.maximum_packet_size, 65_535);
+        assert_eq!(config.maximum_packet_size, 256 * 1024);
         assert!(config.max_connections.is_none());
     }
 

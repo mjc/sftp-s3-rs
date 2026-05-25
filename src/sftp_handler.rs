@@ -22,6 +22,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
+const SFTP_MAX_READ_LEN: u64 = 65_535 - 13;
+const SFTP_MAX_WRITE_LEN: u64 = 256 * 1024;
+
 // Unix file type bits for SFTP
 const S_IFREG: u32 = 0o100000; // Regular file
 const S_IFDIR: u32 = 0o040000; // Directory
@@ -139,6 +142,8 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
             .insert("fsync@openssh.com".to_string(), "1".to_string());
         v.extensions
             .insert("statvfs@openssh.com".to_string(), "2".to_string());
+        v.extensions
+            .insert(russh_sftp::extensions::LIMITS.to_string(), "1".to_string());
         Ok(v)
     }
 
@@ -625,6 +630,23 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
                     },
                 ))
             }
+            russh_sftp::extensions::LIMITS => {
+                let limits = russh_sftp::extensions::LimitsExtension {
+                    max_packet_len: 256 * 1024,
+                    max_read_len: SFTP_MAX_READ_LEN,
+                    max_write_len: SFTP_MAX_WRITE_LEN,
+                    max_open_handles: 0,
+                };
+
+                Ok(russh_sftp::protocol::Packet::ExtendedReply(
+                    russh_sftp::protocol::ExtendedReply {
+                        id,
+                        data: russh_sftp::ser::to_bytes(&limits)
+                            .map_err(|_| StatusCode::Failure)?
+                            .to_vec(),
+                    },
+                ))
+            }
             _ => {
                 debug!(id, request = %request, "Unsupported extended request");
                 Err(StatusCode::OpUnsupported)
@@ -686,6 +708,9 @@ mod tests {
         assert!(version.extensions.contains_key("posix-rename@openssh.com"));
         assert!(version.extensions.contains_key("fsync@openssh.com"));
         assert!(version.extensions.contains_key("statvfs@openssh.com"));
+        assert!(version
+            .extensions
+            .contains_key(russh_sftp::extensions::LIMITS));
     }
 
     #[tokio::test]
@@ -1119,6 +1144,28 @@ mod tests {
             result,
             russh_sftp::protocol::Packet::ExtendedReply(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_extended_limits() {
+        let mut handler = make_handler();
+
+        let result = handler
+            .extended(1, russh_sftp::extensions::LIMITS.to_string(), Vec::new())
+            .await
+            .unwrap();
+
+        let russh_sftp::protocol::Packet::ExtendedReply(reply) = result else {
+            panic!("expected limits extended reply");
+        };
+        let mut bytes = Bytes::from(reply.data);
+        let limits: russh_sftp::extensions::LimitsExtension =
+            russh_sftp::de::from_bytes(&mut bytes).unwrap();
+
+        assert_eq!(limits.max_packet_len, 256 * 1024);
+        assert_eq!(limits.max_read_len, SFTP_MAX_READ_LEN);
+        assert_eq!(limits.max_write_len, SFTP_MAX_WRITE_LEN);
+        assert_eq!(limits.max_open_handles, 0);
     }
 
     #[tokio::test]

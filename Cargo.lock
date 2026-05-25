@@ -2613,7 +2613,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#4b86cc5b9484c0c3845ba56acd5a0f7f564d036b"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3ef500c7d05c0150e8b21249035542ac8291ac73"
 dependencies = [
  "base16ct 1.0.0",
  "byteorder",
@@ -3113,7 +3113,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#4b86cc5b9484c0c3845ba56acd5a0f7f564d036b"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3ef500c7d05c0150e8b21249035542ac8291ac73"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3183,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#4b86cc5b9484c0c3845ba56acd5a0f7f564d036b"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3ef500c7d05c0150e8b21249035542ac8291ac73"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -3213,7 +3213,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#4b86cc5b9484c0c3845ba56acd5a0f7f564d036b"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3ef500c7d05c0150e8b21249035542ac8291ac73"
 dependencies = [
  "chrono",
  "tokio",

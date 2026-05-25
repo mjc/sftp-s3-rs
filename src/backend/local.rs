@@ -21,7 +21,7 @@ use tracing::debug;
 const MAX_LOCAL_READ_LEN: usize = 16 * 1024 * 1024;
 const MAX_POOLED_READ_BUFFERS: usize = 128;
 const LOCAL_READ_PREFIX_RESERVE: usize = 13;
-const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 65_535 - LOCAL_READ_PREFIX_RESERVE;
+pub(crate) const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 65_535 - LOCAL_READ_PREFIX_RESERVE;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
