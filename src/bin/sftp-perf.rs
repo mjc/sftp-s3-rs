@@ -532,6 +532,22 @@ fn kill_pid(pid: u32) -> Result<(), BoxError> {
     Ok(())
 }
 
+fn interrupt_pid(pid: u32) -> Result<(), BoxError> {
+    #[cfg(unix)]
+    {
+        run_status(
+            Command::new("kill").arg("-INT").arg(pid.to_string()),
+            &format!("interrupt process {pid}"),
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        return Err("interrupting launched profile targets is only supported on Unix".into());
+    }
+    Ok(())
+}
+
 fn wait_for_exit(
     child: &mut Child,
     timeout: Duration,
@@ -1706,6 +1722,8 @@ exec "$@"
             export_path: artifact_dir.join(format!("{artifact_prefix}.xctrace.xml")),
             target_pid_path: artifact_dir.join(format!("{artifact_prefix}.xctrace-target.pid")),
         }
+    } else if matches!(profile_mode, Some(ProfileKind::Perf)) {
+        RunningServerKind::PerfRecord
     } else {
         RunningServerKind::ServerProcess
     };
@@ -1762,6 +1780,7 @@ struct RunningServer {
 
 enum RunningServerKind {
     ServerProcess,
+    PerfRecord,
     XctraceLaunch {
         trace_path: PathBuf,
         export_path: PathBuf,
@@ -1772,6 +1791,7 @@ enum RunningServerKind {
 fn stop_server(server: &mut RunningServer) -> Result<(), BoxError> {
     match &server.kind {
         RunningServerKind::ServerProcess => stop_child(&mut server.child),
+        RunningServerKind::PerfRecord => stop_perf_record(&mut server.child),
         RunningServerKind::XctraceLaunch {
             trace_path,
             export_path,
@@ -1802,6 +1822,22 @@ fn stop_server(server: &mut RunningServer) -> Result<(), BoxError> {
             }
             Ok(())
         }
+    }
+}
+
+fn stop_perf_record(child: &mut Child) -> Result<(), BoxError> {
+    if child.try_wait()?.is_none() {
+        interrupt_pid(child.id())?;
+    }
+    let status = wait_for_exit(child, Duration::from_secs(60))?;
+    #[cfg(unix)]
+    let interrupted = matches!(status.signal(), Some(2 | 15));
+    #[cfg(not(unix))]
+    let interrupted = false;
+    if status.success() || interrupted || status.code() == Some(130) || status.code() == Some(143) {
+        Ok(())
+    } else {
+        Err(format!("perf record exited unsuccessfully: {status}").into())
     }
 }
 
