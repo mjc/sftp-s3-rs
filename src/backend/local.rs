@@ -3,8 +3,11 @@ use super::{
     DirEntry, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+use parking_lot::Mutex as ParkingMutex;
 use parking_lot::RwLock;
+use russh::{ChannelData, ChannelDataRecycler, ReusableChannelData};
+use russh_sftp::protocol::DataPayload;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
@@ -14,6 +17,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::oneshot;
 use tracing::debug;
+
+const MAX_LOCAL_READ_LEN: usize = 16 * 1024 * 1024;
+const MAX_POOLED_READ_BUFFERS: usize = 128;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
@@ -637,7 +643,11 @@ impl Backend for LocalBackend {
             })
             .await?;
 
-        Ok(Box::new(LocalReadHandle { file, size }))
+        Ok(Box::new(LocalReadHandle {
+            file,
+            size,
+            read_buffers: Arc::new(LocalReadBufferPool::default()),
+        }))
     }
 
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn WriteHandle + Send>> {
@@ -802,14 +812,20 @@ impl Backend for LocalBackend {
 struct LocalReadHandle {
     file: Arc<StdFile>,
     size: u64,
+    read_buffers: Arc<LocalReadBufferPool>,
 }
 
 impl LocalReadHandle {
-    fn read_at_sync(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+    fn read_at_sync(&self, offset: u64, len: u32) -> BackendResult<DataPayload> {
         let len = usize::try_from(len).map_err(|_| {
             BackendError::Other("requested read length does not fit in usize".to_string())
         })?;
-        let mut buf = BytesMut::with_capacity(len);
+        if len > MAX_LOCAL_READ_LEN {
+            return Err(BackendError::Other(format!(
+                "requested read length {len} exceeds local backend limit {MAX_LOCAL_READ_LEN}"
+            )));
+        }
+        let mut buf = self.read_buffers.take(len);
 
         #[cfg(unix)]
         let bytes_read = read_file_at_uninit(&self.file, buf.spare_capacity_mut(), offset)
@@ -830,17 +846,53 @@ impl LocalReadHandle {
         #[cfg(not(unix))]
         buf.truncate(bytes_read);
 
-        Ok(buf.freeze())
+        let recycler: Arc<dyn ChannelDataRecycler> = self.read_buffers.clone();
+        Ok(ChannelData::Reusable(ReusableChannelData::new(buf, recycler)).into())
+    }
+}
+
+#[derive(Default)]
+struct LocalReadBufferPool {
+    buffers: ParkingMutex<Vec<Vec<u8>>>,
+}
+
+impl LocalReadBufferPool {
+    fn take(&self, len: usize) -> Vec<u8> {
+        let mut buffers = self.buffers.lock();
+        let index = buffers.iter().position(|buf| buf.capacity() >= len);
+        let mut buf = index
+            .map(|index| buffers.swap_remove(index))
+            .unwrap_or_else(|| Vec::with_capacity(len));
+        buf.clear();
+        buf
+    }
+
+    fn put(&self, mut buf: Vec<u8>) {
+        if buf.capacity() > MAX_LOCAL_READ_LEN {
+            return;
+        }
+
+        buf.clear();
+        let mut buffers = self.buffers.lock();
+        if buffers.len() < MAX_POOLED_READ_BUFFERS {
+            buffers.push(buf);
+        }
+    }
+}
+
+impl ChannelDataRecycler for LocalReadBufferPool {
+    fn recycle(&self, data: Vec<u8>) {
+        self.put(data);
     }
 }
 
 #[async_trait]
 impl ReadHandle for LocalReadHandle {
-    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<DataPayload>> {
         Some(self.read_at_sync(offset, len))
     }
 
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<DataPayload> {
         self.read_at_sync(offset, len)
     }
 
@@ -918,6 +970,22 @@ mod tests {
 
         assert_eq!(read.len(), 32_768);
         assert_eq!(read.as_ref(), &content[..32_768]);
+    }
+
+    #[tokio::test]
+    async fn test_open_read_rejects_oversized_request_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+
+        backend
+            .write_file("test.bin", Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+
+        let handle = backend.open_read("test.bin").await.unwrap();
+        let result = handle.read_at(0, (MAX_LOCAL_READ_LEN + 1) as u32).await;
+
+        assert!(matches!(result, Err(BackendError::Other(_))));
     }
 
     #[tokio::test]

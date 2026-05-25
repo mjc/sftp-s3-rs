@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use russh_sftp::protocol::DataPayload;
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -168,12 +169,12 @@ impl FileInfo {
 pub trait ReadHandle: Send + Sync {
     /// Fast path for handles that can satisfy the read synchronously without
     /// constructing the boxed `async_trait` future.
-    fn try_read_at(&self, _offset: u64, _len: u32) -> Option<BackendResult<Bytes>> {
+    fn try_read_at(&self, _offset: u64, _len: u32) -> Option<BackendResult<DataPayload>> {
         None
     }
 
     /// Read data at the given offset
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes>;
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<DataPayload>;
 
     /// Get the total file size
     fn size(&self) -> u64;
@@ -212,7 +213,7 @@ impl BufferedReadHandle {
 
 #[async_trait]
 impl ReadHandle for BufferedReadHandle {
-    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<DataPayload>> {
         let start = match usize::try_from(offset) {
             Ok(start) => start,
             Err(_) => {
@@ -222,22 +223,22 @@ impl ReadHandle for BufferedReadHandle {
             }
         };
         if start >= self.content.len() {
-            return Some(Ok(Bytes::new()));
+            return Some(Ok(Bytes::new().into()));
         }
         let len = usize::try_from(len).unwrap_or(usize::MAX);
         let end = std::cmp::min(start.saturating_add(len), self.content.len());
-        Some(Ok(self.content.slice(start..end)))
+        Some(Ok(self.content.slice(start..end).into()))
     }
 
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<DataPayload> {
         let start = usize::try_from(offset)
             .map_err(|_| BackendError::Other("read offset too large for this platform".into()))?;
         if start >= self.content.len() {
-            return Ok(Bytes::new());
+            return Ok(Bytes::new().into());
         }
         let len = usize::try_from(len).unwrap_or(usize::MAX);
         let end = std::cmp::min(start.saturating_add(len), self.content.len());
-        Ok(self.content.slice(start..end))
+        Ok(self.content.slice(start..end).into())
     }
 
     fn size(&self) -> u64 {

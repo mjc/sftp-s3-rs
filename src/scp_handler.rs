@@ -594,7 +594,7 @@ impl<B: Backend> ScpHandler<B> {
                         if chunk.is_empty() {
                             break;
                         }
-                        stream.write_all(&chunk).await?;
+                        stream.write_all(chunk.as_ref()).await?;
                         offset += chunk.len() as u64;
                     }
                     stream.write_all(&[SCP_OK]).await?;

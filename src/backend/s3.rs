@@ -8,6 +8,7 @@ use aws_sdk_s3::types::CompletedMultipartUpload;
 use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
+use russh_sftp::protocol::DataPayload;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 use tracing::debug;
@@ -640,9 +641,9 @@ struct S3ReadHandle {
 
 #[async_trait]
 impl ReadHandle for S3ReadHandle {
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<DataPayload> {
         if offset >= self.size {
-            return Ok(Bytes::new());
+            return Ok(Bytes::new().into());
         }
 
         let end = std::cmp::min(offset + u64::from(len), self.size) - 1;
@@ -665,7 +666,7 @@ impl ReadHandle for S3ReadHandle {
             .map_err(|e| BackendError::Other(e.to_string()))?
             .into_bytes();
 
-        Ok(bytes)
+        Ok(bytes.into())
     }
 
     fn size(&self) -> u64 {

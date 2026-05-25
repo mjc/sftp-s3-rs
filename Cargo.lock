@@ -2613,7 +2613,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#54c59d50931022e0a2a1efcfc46a851b48a8bfe5"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3661ad42fa7c60a04e82d6453ddcc4ed0203d2c2"
 dependencies = [
  "base16ct 1.0.0",
  "byteorder",
@@ -3113,7 +3113,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#54c59d50931022e0a2a1efcfc46a851b48a8bfe5"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3661ad42fa7c60a04e82d6453ddcc4ed0203d2c2"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3183,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.61.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#54c59d50931022e0a2a1efcfc46a851b48a8bfe5"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3661ad42fa7c60a04e82d6453ddcc4ed0203d2c2"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -3194,7 +3194,7 @@ dependencies = [
 [[package]]
 name = "russh-sftp"
 version = "3.0.0"
-source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#73c6272640de144a7daabe4bce9570a4a532ca08"
+source = "git+https://github.com/mjc/russh-sftp.git?branch=deserialize-bytes-optimization#8bb7c84be1b75390d58e4b98b9f329e7dfd17949"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3203,6 +3203,7 @@ dependencies = [
  "futures",
  "log",
  "rand 0.10.1",
+ "russh",
  "serde",
  "thiserror",
  "tokio",
@@ -3212,7 +3213,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#54c59d50931022e0a2a1efcfc46a851b48a8bfe5"
+source = "git+https://github.com/mjc/russh.git?branch=mjc%2Fown-inbound-channel-payloads#3661ad42fa7c60a04e82d6453ddcc4ed0203d2c2"
 dependencies = [
  "chrono",
  "tokio",

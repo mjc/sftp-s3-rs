@@ -5,6 +5,7 @@ use super::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
+use russh_sftp::protocol::DataPayload;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -219,27 +220,27 @@ struct BenchmarkReadHandle {
 
 #[async_trait]
 impl ReadHandle for BenchmarkReadHandle {
-    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<Bytes>> {
+    fn try_read_at(&self, offset: u64, len: u32) -> Option<BackendResult<DataPayload>> {
         if offset >= self.size {
-            return Some(Ok(Bytes::new()));
+            return Some(Ok(Bytes::new().into()));
         }
         let len = (self.size - offset).min(u64::from(len)) as usize;
         if len <= STATIC_ZERO_READ_CHUNK.len() {
-            Some(Ok(Bytes::from_static(&STATIC_ZERO_READ_CHUNK[..len])))
+            Some(Ok(Bytes::from_static(&STATIC_ZERO_READ_CHUNK[..len]).into()))
         } else {
-            Some(Ok(Bytes::from(vec![0; len])))
+            Some(Ok(Bytes::from(vec![0; len]).into()))
         }
     }
 
-    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<Bytes> {
+    async fn read_at(&self, offset: u64, len: u32) -> BackendResult<DataPayload> {
         if offset >= self.size {
-            return Ok(Bytes::new());
+            return Ok(Bytes::new().into());
         }
         let len = (self.size - offset).min(u64::from(len)) as usize;
         if len <= STATIC_ZERO_READ_CHUNK.len() {
-            Ok(Bytes::from_static(&STATIC_ZERO_READ_CHUNK[..len]))
+            Ok(Bytes::from_static(&STATIC_ZERO_READ_CHUNK[..len]).into())
         } else {
-            Ok(Bytes::from(vec![0; len]))
+            Ok(Bytes::from(vec![0; len]).into())
         }
     }
 
@@ -307,7 +308,7 @@ mod tests {
         let reader = backend.open_read("large.bin").await.unwrap();
         let data = reader.read_at(1024 * 1024, 8).await.unwrap();
         assert_eq!(data.len(), 1);
-        assert_eq!(&data[..], &[0]);
+        assert_eq!(data.as_ref(), &[0]);
     }
 
     #[tokio::test]

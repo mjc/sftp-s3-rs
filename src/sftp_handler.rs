@@ -6,7 +6,7 @@ fn write_data_into_bytes(data: SftpWriteData) -> Bytes {
     data
 }
 
-fn sftp_data(id: u32, data: Bytes) -> Data {
+fn sftp_data(id: u32, data: DataPayload) -> Data {
     Data { id, data }
 }
 
@@ -14,7 +14,7 @@ use crate::backend::{
     normalize_path, Backend, BackendError, FileInfo, FileKind, ReadHandle, SetAttrs, WriteHandle,
 };
 use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, Name, OpenFlags, Status, StatusCode, Version,
+    Attrs, Data, DataPayload, File, FileAttributes, Name, OpenFlags, Status, StatusCode, Version,
 };
 use russh_sftp::server::SessionHandler;
 use std::collections::HashMap;
@@ -1221,7 +1221,7 @@ mod tests {
                     match handler.read(2, rh_bytes.clone(), offset, 32768).await {
                         Ok(d) => {
                             offset += d.data.len() as u64;
-                            read_data.extend_from_slice(&d.data);
+                            read_data.extend_from_slice(d.data.as_ref());
                         }
                         Err(StatusCode::Eof) => break,
                         Err(e) => panic!("read error: {:?}", e),

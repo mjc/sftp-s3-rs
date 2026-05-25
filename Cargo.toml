@@ -19,7 +19,7 @@ benchmark-matrix-compat = []
 [dependencies]
 # SSH/SFTP
 russh = { git = "https://github.com/mjc/russh.git", branch = "mjc/own-inbound-channel-payloads", default-features = false, features = ["aws-lc-rs", "flate2"] }
-russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization" }
+russh-sftp = { git = "https://github.com/mjc/russh-sftp.git", branch = "deserialize-bytes-optimization", features = ["russh-channel-data"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros", "time"] }
