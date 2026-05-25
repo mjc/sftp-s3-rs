@@ -21,6 +21,7 @@ use tracing::debug;
 const MAX_LOCAL_READ_LEN: usize = 16 * 1024 * 1024;
 const MAX_POOLED_READ_BUFFERS: usize = 128;
 const LOCAL_READ_PREFIX_RESERVE: usize = 13;
+const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 65_535 - LOCAL_READ_PREFIX_RESERVE;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
@@ -826,6 +827,7 @@ impl LocalReadHandle {
                 "requested read length {len} exceeds local backend limit {MAX_LOCAL_READ_LEN}"
             )));
         }
+        let len = len.min(LOCAL_READ_MAX_SINGLE_CHANNEL_DATA);
         let capacity = len
             .checked_add(LOCAL_READ_PREFIX_RESERVE)
             .ok_or_else(|| BackendError::Other("requested read length overflow".to_string()))?;
@@ -1005,6 +1007,23 @@ mod tests {
         let result = handle.read_at(0, (MAX_LOCAL_READ_LEN + 1) as u32).await;
 
         assert!(matches!(result, Err(BackendError::Other(_))));
+    }
+
+    #[tokio::test]
+    async fn test_open_read_caps_payload_to_single_channel_packet() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path());
+        let content = Bytes::from(vec![7; LOCAL_READ_MAX_SINGLE_CHANNEL_DATA + 1024]);
+
+        backend.write_file("test.bin", content).await.unwrap();
+
+        let handle = backend.open_read("test.bin").await.unwrap();
+        let read = handle
+            .read_at(0, (LOCAL_READ_MAX_SINGLE_CHANNEL_DATA + 1024) as u32)
+            .await
+            .unwrap();
+
+        assert_eq!(read.len(), LOCAL_READ_MAX_SINGLE_CHANNEL_DATA);
     }
 
     #[tokio::test]
