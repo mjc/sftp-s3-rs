@@ -73,13 +73,12 @@ impl<B: Backend> SftpHandler<B> {
     }
 }
 
-type SharedReadHandle = Arc<Mutex<Box<dyn ReadHandle>>>;
 type SharedWriteHandle = Arc<Mutex<Option<Box<dyn WriteHandle>>>>;
 
 pub enum SftpOpenFile {
     Read {
         path: Arc<str>,
-        handle: SharedReadHandle,
+        handle: Box<dyn ReadHandle>,
         size: u64,
     },
     Write {
@@ -262,7 +261,7 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
                     debug!(id, path = %path, "Opened file for read");
                     SftpOpenFile::Read {
                         path: Arc::from(normalized.as_ref()),
-                        handle: Arc::new(Mutex::new(read_handle)),
+                        handle: read_handle,
                         size,
                     }
                 }
@@ -296,11 +295,13 @@ impl<B: Backend> SessionHandler for SftpHandler<B> {
             return Err(StatusCode::Eof);
         }
 
-        let guard = read_handle.lock().await;
-        let data = if let Some(result) = guard.try_read_at(offset, len) {
+        let data = if let Some(result) = read_handle.try_read_at(offset, len) {
             result.map_err(StatusCode::from)?
         } else {
-            guard.read_at(offset, len).await.map_err(StatusCode::from)?
+            read_handle
+                .read_at(offset, len)
+                .await
+                .map_err(StatusCode::from)?
         };
 
         if data.is_empty() {
