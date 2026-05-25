@@ -20,6 +20,7 @@ use tracing::debug;
 
 const MAX_LOCAL_READ_LEN: usize = 16 * 1024 * 1024;
 const MAX_POOLED_READ_BUFFERS: usize = 128;
+const LOCAL_READ_PREFIX_RESERVE: usize = 13;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
@@ -825,29 +826,47 @@ impl LocalReadHandle {
                 "requested read length {len} exceeds local backend limit {MAX_LOCAL_READ_LEN}"
             )));
         }
-        let mut buf = self.read_buffers.take(len);
+        let capacity = len
+            .checked_add(LOCAL_READ_PREFIX_RESERVE)
+            .ok_or_else(|| BackendError::Other("requested read length overflow".to_string()))?;
+        let mut buf = self.read_buffers.take(capacity);
+        buf.resize(LOCAL_READ_PREFIX_RESERVE, 0);
 
         #[cfg(unix)]
-        let bytes_read = read_file_at_uninit(&self.file, buf.spare_capacity_mut(), offset)
-            .map_err(LocalBackend::map_io_error)?;
+        let bytes_read = {
+            let spare = buf.spare_capacity_mut();
+            read_file_at_uninit(&self.file, &mut spare[..len], offset)
+                .map_err(LocalBackend::map_io_error)?
+        };
 
         #[cfg(unix)]
         unsafe {
-            buf.set_len(bytes_read);
+            buf.set_len(LOCAL_READ_PREFIX_RESERVE + bytes_read);
         }
 
         #[cfg(not(unix))]
-        buf.resize(len, 0);
+        buf.resize(capacity, 0);
 
         #[cfg(not(unix))]
-        let bytes_read = read_file_at(self.file.as_ref(), &mut buf[..], offset)
-            .map_err(LocalBackend::map_io_error)?;
+        let bytes_read = read_file_at(
+            self.file.as_ref(),
+            &mut buf[LOCAL_READ_PREFIX_RESERVE..capacity],
+            offset,
+        )
+        .map_err(LocalBackend::map_io_error)?;
 
         #[cfg(not(unix))]
-        buf.truncate(bytes_read);
+        buf.truncate(LOCAL_READ_PREFIX_RESERVE + bytes_read);
 
         let recycler: Arc<dyn ChannelDataRecycler> = self.read_buffers.clone();
-        Ok(ChannelData::Reusable(ReusableChannelData::new(buf, recycler)).into())
+        let data = ReusableChannelData::try_new_with_range(
+            buf,
+            LOCAL_READ_PREFIX_RESERVE,
+            bytes_read,
+            recycler,
+        )
+        .ok_or_else(|| BackendError::Other("invalid local read buffer range".to_string()))?;
+        Ok(ChannelData::Reusable(data).into())
     }
 }
 
