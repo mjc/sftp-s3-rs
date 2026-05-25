@@ -206,6 +206,18 @@ impl<B: Backend> russh::server::Handler for SshSession<B> {
                                                     )
                                                     .await
                                             }
+                                            SerializedPacket::SplitInlineHeader {
+                                                header,
+                                                header_len,
+                                                data,
+                                            } => {
+                                                write_half
+                                                    .data_pair_inline_channel_data(
+                                                        &header[..usize::from(header_len)],
+                                                        data.into_channel_data(),
+                                                    )
+                                                    .await
+                                            }
                                         }
                                     }
                                 };
@@ -319,10 +331,15 @@ mod tests {
             "SFTP subsystem must preserve split DATA packets on the channel writer path"
         );
         assert!(
+            production_source.contains("SerializedPacket::SplitInlineHeader"),
+            "SFTP subsystem must preserve inline split DATA headers on the channel writer path"
+        );
+        assert!(
             production_source.contains("write_half")
                 && production_source.contains(".data_pair_channel_data(")
+                && production_source.contains(".data_pair_inline_channel_data(")
                 && production_source.contains("data.into_channel_data()"),
-            "split SFTP response packets must pass owned payloads through russh ChannelWriteHalf::data_pair_channel_data"
+            "split SFTP response packets must pass owned payloads through russh ChannelWriteHalf"
         );
         assert!(
             production_source.contains("#[cfg(feature = \"benchmark-matrix-compat\")]"),
