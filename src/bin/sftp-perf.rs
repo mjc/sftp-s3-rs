@@ -1414,6 +1414,7 @@ fn invoke_bench_client(
         .arg(iterations.to_string())
         .arg("--chunk-size")
         .arg(&common.chunk_size)
+        .arg("--nodelay")
         .arg("--insecure")
         .arg("--json-output")
         .arg(output_path);
