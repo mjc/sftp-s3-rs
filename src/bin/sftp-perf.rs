@@ -1701,6 +1701,7 @@ exec "$@"
         Some(ProfileKind::Heaptrack) => {
             let mut command = Command::new("heaptrack");
             command
+                .arg("--record-only")
                 .arg("-o")
                 .arg(artifact_dir.join(format!("{artifact_prefix}.heaptrack")));
             command.arg(binary);
@@ -1723,7 +1724,11 @@ exec "$@"
             target_pid_path: artifact_dir.join(format!("{artifact_prefix}.xctrace-target.pid")),
         }
     } else if matches!(profile_mode, Some(ProfileKind::Perf)) {
-        RunningServerKind::PerfRecord
+        RunningServerKind::ProfileWrapper {
+            name: "perf record",
+        }
+    } else if matches!(profile_mode, Some(ProfileKind::Heaptrack)) {
+        RunningServerKind::ProfileTree { name: "heaptrack" }
     } else {
         RunningServerKind::ServerProcess
     };
@@ -1780,7 +1785,12 @@ struct RunningServer {
 
 enum RunningServerKind {
     ServerProcess,
-    PerfRecord,
+    ProfileWrapper {
+        name: &'static str,
+    },
+    ProfileTree {
+        name: &'static str,
+    },
     XctraceLaunch {
         trace_path: PathBuf,
         export_path: PathBuf,
@@ -1791,7 +1801,8 @@ enum RunningServerKind {
 fn stop_server(server: &mut RunningServer) -> Result<(), BoxError> {
     match &server.kind {
         RunningServerKind::ServerProcess => stop_child(&mut server.child),
-        RunningServerKind::PerfRecord => stop_perf_record(&mut server.child),
+        RunningServerKind::ProfileWrapper { name } => stop_profile_wrapper(&mut server.child, name),
+        RunningServerKind::ProfileTree { name } => stop_profile_tree(&mut server.child, name),
         RunningServerKind::XctraceLaunch {
             trace_path,
             export_path,
@@ -1825,11 +1836,11 @@ fn stop_server(server: &mut RunningServer) -> Result<(), BoxError> {
     }
 }
 
-fn stop_perf_record(child: &mut Child) -> Result<(), BoxError> {
+fn stop_profile_wrapper(child: &mut Child, name: &str) -> Result<(), BoxError> {
     if child.try_wait()?.is_none() {
         interrupt_pid(child.id())?;
     }
-    let status = wait_for_exit(child, Duration::from_secs(60))?;
+    let status = child.wait()?;
     #[cfg(unix)]
     let interrupted = matches!(status.signal(), Some(2 | 15));
     #[cfg(not(unix))]
@@ -1837,7 +1848,71 @@ fn stop_perf_record(child: &mut Child) -> Result<(), BoxError> {
     if status.success() || interrupted || status.code() == Some(130) || status.code() == Some(143) {
         Ok(())
     } else {
-        Err(format!("perf record exited unsuccessfully: {status}").into())
+        Err(format!("{name} exited unsuccessfully: {status}").into())
+    }
+}
+
+fn stop_profile_tree(child: &mut Child, name: &str) -> Result<(), BoxError> {
+    if child.try_wait()?.is_none() {
+        let descendants = process_descendants(child.id());
+        let leaves = leaf_processes(&descendants);
+        if leaves.is_empty() {
+            interrupt_pid(child.id())?;
+        } else {
+            for pid in leaves {
+                let _ = interrupt_pid(pid);
+            }
+        }
+    }
+    let status = child.wait()?;
+    #[cfg(unix)]
+    let interrupted = matches!(status.signal(), Some(2 | 15));
+    #[cfg(not(unix))]
+    let interrupted = false;
+    if status.success() || interrupted || status.code() == Some(130) || status.code() == Some(143) {
+        Ok(())
+    } else {
+        Err(format!("{name} exited unsuccessfully: {status}").into())
+    }
+}
+
+fn leaf_processes(descendants: &[u32]) -> Vec<u32> {
+    descendants
+        .iter()
+        .copied()
+        .filter(|pid| process_children(*pid).is_empty())
+        .collect()
+}
+
+fn process_descendants(pid: u32) -> Vec<u32> {
+    let mut descendants = Vec::new();
+    let mut stack = process_children(pid);
+    while let Some(child) = stack.pop() {
+        stack.extend(process_children(child));
+        descendants.push(child);
+    }
+    descendants
+}
+
+fn process_children(pid: u32) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/task/{pid}/children");
+        fs::read_to_string(path)
+            .ok()
+            .into_iter()
+            .flat_map(|children| {
+                children
+                    .split_whitespace()
+                    .filter_map(|child| child.parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Vec::new()
     }
 }
 
