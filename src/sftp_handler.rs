@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
-const SFTP_MAX_READ_LEN: u64 = 32_768 - 13;
+const SFTP_MAX_READ_LEN: u64 = 64 * 1024 - 13;
 const SFTP_MAX_WRITE_LEN: u64 = 256 * 1024;
 
 // Unix file type bits for SFTP

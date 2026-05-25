@@ -21,7 +21,7 @@ use tracing::debug;
 const MAX_LOCAL_READ_LEN: usize = 16 * 1024 * 1024;
 const MAX_POOLED_READ_BUFFERS: usize = 128;
 const LOCAL_READ_PREFIX_RESERVE: usize = 13;
-pub(crate) const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 32_768 - LOCAL_READ_PREFIX_RESERVE;
+pub(crate) const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 64 * 1024 - LOCAL_READ_PREFIX_RESERVE;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
@@ -979,7 +979,7 @@ mod tests {
     async fn test_open_read_respects_requested_length() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalBackend::new(temp_dir.path());
-        let content = Bytes::from(vec![42; 65_536]);
+        let content = Bytes::from(vec![42; LOCAL_READ_MAX_SINGLE_CHANNEL_DATA]);
 
         backend
             .write_file("test.bin", content.clone())
