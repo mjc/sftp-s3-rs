@@ -21,7 +21,7 @@ use tracing::debug;
 const MAX_LOCAL_READ_LEN: usize = 16 * 1024 * 1024;
 const MAX_POOLED_READ_BUFFERS: usize = 128;
 const LOCAL_READ_PREFIX_RESERVE: usize = 13;
-pub(crate) const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 65_535 - LOCAL_READ_PREFIX_RESERVE;
+pub(crate) const LOCAL_READ_MAX_SINGLE_CHANNEL_DATA: usize = 32_768 - LOCAL_READ_PREFIX_RESERVE;
 
 /// Local filesystem storage backend
 pub struct LocalBackend {
@@ -987,10 +987,16 @@ mod tests {
             .unwrap();
 
         let handle = backend.open_read("test.bin").await.unwrap();
-        let read = handle.read_at(0, 32_768).await.unwrap();
+        let read = handle
+            .read_at(0, LOCAL_READ_MAX_SINGLE_CHANNEL_DATA as u32)
+            .await
+            .unwrap();
 
-        assert_eq!(read.len(), 32_768);
-        assert_eq!(read.as_ref(), &content[..32_768]);
+        assert_eq!(read.len(), LOCAL_READ_MAX_SINGLE_CHANNEL_DATA);
+        assert_eq!(
+            read.as_ref(),
+            &content[..LOCAL_READ_MAX_SINGLE_CHANNEL_DATA]
+        );
     }
 
     #[tokio::test]
