@@ -3172,13 +3172,25 @@ fn rewrite_dependency_paths(
                     russh_path.display()
                 )
             } else if trimmed.starts_with("russh-sftp = ") {
-                format!("russh-sftp = {{ path = \"{}\" }}", russh_sftp_path.display())
+                format!(
+                    "russh-sftp = {{ path = \"{}\", features = [\"russh-channel-data\"] }}",
+                    russh_sftp_path.display()
+                )
             } else {
                 line.to_string()
             }
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let russh_repo = russh_path
+        .parent()
+        .ok_or_else(|| format!("russh path has no parent: {}", russh_path.display()))?;
+    let rewritten = format!(
+        "{rewritten}\n\n[patch.\"https://github.com/mjc/russh.git\"]\nrussh = {{ path = \"{}\" }}\nrussh-cryptovec = {{ path = \"{}\" }}\nrussh-util = {{ path = \"{}\" }}\n",
+        russh_path.display(),
+        russh_repo.join("cryptovec").display(),
+        russh_repo.join("russh-util").display(),
+    );
     fs::write(cargo_toml, rewritten)?;
     Ok(())
 }
