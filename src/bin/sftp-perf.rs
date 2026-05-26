@@ -1383,21 +1383,21 @@ fn run_bench_client(
         let prepare_path = run_dir
             .join("artifacts")
             .join(format!("{artifact_prefix}-prepare.json"));
-        invoke_bench_client_command(
+        run_bench_client_command(&BenchClientInvocation {
             binary,
             common,
             operation,
             size_mb,
-            1,
+            iterations: 1,
             port,
-            &prepare_path,
-            &BenchClientRunOptions {
+            output_path: &prepare_path,
+            options: BenchClientRunOptions {
                 run_id: Some(&download_run_id),
                 prepare_only: true,
                 skip_download_setup: false,
                 keep_files: true,
             },
-        )?;
+        })?;
     }
 
     if warmup > 0 {
@@ -1414,16 +1414,16 @@ fn run_bench_client(
         } else {
             BenchClientRunOptions::default()
         };
-        invoke_bench_client(
+        invoke_bench_client(&BenchClientInvocation {
             binary,
             common,
             operation,
             size_mb,
-            warmup,
+            iterations: warmup,
             port,
-            &warmup_path,
-            &warmup_options,
-        )?;
+            output_path: &warmup_path,
+            options: warmup_options,
+        })?;
     }
     let output_path = run_dir
         .join("artifacts")
@@ -1438,16 +1438,16 @@ fn run_bench_client(
     } else {
         BenchClientRunOptions::default()
     };
-    let output = invoke_bench_client(
+    let output = invoke_bench_client(&BenchClientInvocation {
         binary,
         common,
         operation,
         size_mb,
-        runs,
+        iterations: runs,
         port,
-        &output_path,
-        &run_options,
-    )?;
+        output_path: &output_path,
+        options: run_options,
+    })?;
     let iterations = output
         .results
         .iter()
@@ -1471,57 +1471,42 @@ struct BenchClientRunOptions<'a> {
     keep_files: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn invoke_bench_client(
-    binary: &Path,
-    common: &CommonArgs,
+struct BenchClientInvocation<'a> {
+    binary: &'a Path,
+    common: &'a CommonArgs,
     operation: OperationKind,
     size_mb: u64,
     iterations: u32,
     port: u16,
-    output_path: &Path,
-    options: &BenchClientRunOptions<'_>,
-) -> Result<BenchClientJson, BoxError> {
-    invoke_bench_client_command(
-        binary,
-        common,
-        operation,
-        size_mb,
-        iterations,
-        port,
-        output_path,
-        options,
-    )?;
-    read_json(output_path)
+    output_path: &'a Path,
+    options: BenchClientRunOptions<'a>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn invoke_bench_client_command(
-    binary: &Path,
-    common: &CommonArgs,
-    operation: OperationKind,
-    size_mb: u64,
-    iterations: u32,
-    port: u16,
-    output_path: &Path,
-    options: &BenchClientRunOptions<'_>,
-) -> Result<(), BoxError> {
-    let mut command = Command::new(binary);
+fn invoke_bench_client(
+    invocation: &BenchClientInvocation<'_>,
+) -> Result<BenchClientJson, BoxError> {
+    run_bench_client_command(invocation)?;
+    read_json(invocation.output_path)
+}
+
+fn run_bench_client_command(invocation: &BenchClientInvocation<'_>) -> Result<(), BoxError> {
+    let common = invocation.common;
+    let mut command = Command::new(invocation.binary);
     command
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg(port.to_string())
+        .arg(invocation.port.to_string())
         .arg("--user")
         .arg("benchmark")
         .arg("--password")
         .arg("benchmark")
         .arg("--operation")
-        .arg(operation_name(operation))
+        .arg(operation_name(invocation.operation))
         .arg("--size")
-        .arg(format!("{size_mb}MiB"))
+        .arg(format!("{}MiB", invocation.size_mb))
         .arg("--iterations")
-        .arg(iterations.to_string())
+        .arg(invocation.iterations.to_string())
         .arg("--chunk-size")
         .arg(&common.chunk_size)
         .arg("--max-packet-size")
@@ -1533,17 +1518,17 @@ fn invoke_bench_client_command(
         .arg("--nodelay")
         .arg("--insecure")
         .arg("--json-output")
-        .arg(output_path);
-    if let Some(run_id) = options.run_id {
+        .arg(invocation.output_path);
+    if let Some(run_id) = invocation.options.run_id {
         command.arg("--run-id").arg(run_id);
     }
-    if options.prepare_only {
+    if invocation.options.prepare_only {
         command.arg("--prepare-only");
     }
-    if options.skip_download_setup {
+    if invocation.options.skip_download_setup {
         command.arg("--skip-download-setup");
     }
-    if options.keep_files {
+    if invocation.options.keep_files {
         command.arg("--keep-files");
     }
     if let Some(ciphers) = &common.ciphers {
