@@ -1378,10 +1378,42 @@ fn run_bench_client(
     run_dir: &Path,
     artifact_prefix: &str,
 ) -> Result<MeasurementSeries, BoxError> {
+    let download_run_id = format!("{artifact_prefix}-fixture");
+    if operation == OperationKind::Download {
+        let prepare_path = run_dir
+            .join("artifacts")
+            .join(format!("{artifact_prefix}-prepare.json"));
+        invoke_bench_client_command(
+            binary,
+            common,
+            operation,
+            size_mb,
+            1,
+            port,
+            &prepare_path,
+            &BenchClientRunOptions {
+                run_id: Some(&download_run_id),
+                prepare_only: true,
+                skip_download_setup: false,
+                keep_files: true,
+            },
+        )?;
+    }
+
     if warmup > 0 {
         let warmup_path = run_dir
             .join("artifacts")
             .join(format!("{artifact_prefix}-warmup.json"));
+        let warmup_options = if operation == OperationKind::Download {
+            BenchClientRunOptions {
+                run_id: Some(&download_run_id),
+                prepare_only: false,
+                skip_download_setup: true,
+                keep_files: true,
+            }
+        } else {
+            BenchClientRunOptions::default()
+        };
         invoke_bench_client(
             binary,
             common,
@@ -1390,12 +1422,32 @@ fn run_bench_client(
             warmup,
             port,
             &warmup_path,
+            &warmup_options,
         )?;
     }
     let output_path = run_dir
         .join("artifacts")
         .join(format!("{artifact_prefix}.json"));
-    let output = invoke_bench_client(binary, common, operation, size_mb, runs, port, &output_path)?;
+    let run_options = if operation == OperationKind::Download {
+        BenchClientRunOptions {
+            run_id: Some(&download_run_id),
+            prepare_only: false,
+            skip_download_setup: true,
+            keep_files: false,
+        }
+    } else {
+        BenchClientRunOptions::default()
+    };
+    let output = invoke_bench_client(
+        binary,
+        common,
+        operation,
+        size_mb,
+        runs,
+        port,
+        &output_path,
+        &run_options,
+    )?;
     let iterations = output
         .results
         .iter()
@@ -1411,6 +1463,15 @@ fn run_bench_client(
     })
 }
 
+#[derive(Default)]
+struct BenchClientRunOptions<'a> {
+    run_id: Option<&'a str>,
+    prepare_only: bool,
+    skip_download_setup: bool,
+    keep_files: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn invoke_bench_client(
     binary: &Path,
     common: &CommonArgs,
@@ -1419,7 +1480,32 @@ fn invoke_bench_client(
     iterations: u32,
     port: u16,
     output_path: &Path,
+    options: &BenchClientRunOptions<'_>,
 ) -> Result<BenchClientJson, BoxError> {
+    invoke_bench_client_command(
+        binary,
+        common,
+        operation,
+        size_mb,
+        iterations,
+        port,
+        output_path,
+        options,
+    )?;
+    read_json(output_path)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_bench_client_command(
+    binary: &Path,
+    common: &CommonArgs,
+    operation: OperationKind,
+    size_mb: u64,
+    iterations: u32,
+    port: u16,
+    output_path: &Path,
+    options: &BenchClientRunOptions<'_>,
+) -> Result<(), BoxError> {
     let mut command = Command::new(binary);
     command
         .arg("--host")
@@ -1448,11 +1534,22 @@ fn invoke_bench_client(
         .arg("--insecure")
         .arg("--json-output")
         .arg(output_path);
+    if let Some(run_id) = options.run_id {
+        command.arg("--run-id").arg(run_id);
+    }
+    if options.prepare_only {
+        command.arg("--prepare-only");
+    }
+    if options.skip_download_setup {
+        command.arg("--skip-download-setup");
+    }
+    if options.keep_files {
+        command.arg("--keep-files");
+    }
     if let Some(ciphers) = &common.ciphers {
         command.arg("--ciphers").arg(ciphers);
     }
-    run_status(&mut command, "run sftp-bench-client")?;
-    read_json(output_path)
+    run_status(&mut command, "run sftp-bench-client")
 }
 
 fn run_small_files_bench_client(
