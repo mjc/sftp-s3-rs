@@ -3162,26 +3162,37 @@ fn rewrite_dependency_paths(
     russh_sftp_path: &Path,
 ) -> Result<(), BoxError> {
     let original = fs::read_to_string(cargo_toml)?;
-    let rewritten = original
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("russh = ") {
-                format!(
-                    "russh = {{ path = \"{}\", default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }}",
-                    russh_path.display()
-                )
-            } else if trimmed.starts_with("russh-sftp = ") {
-                format!(
-                    "russh-sftp = {{ path = \"{}\", features = [\"russh-channel-data\"] }}",
-                    russh_sftp_path.display()
-                )
+    let mut rewritten_lines = Vec::new();
+    let mut skip_russh_patch = false;
+    for line in original.lines() {
+        let trimmed = line.trim_start();
+        if trimmed == "[patch.\"https://github.com/mjc/russh.git\"]" {
+            skip_russh_patch = true;
+            continue;
+        }
+        if skip_russh_patch {
+            if trimmed.starts_with('[') {
+                skip_russh_patch = false;
             } else {
-                line.to_string()
+                continue;
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        }
+
+        if trimmed.starts_with("russh = ") {
+            rewritten_lines.push(format!(
+                "russh = {{ path = \"{}\", default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }}",
+                russh_path.display()
+            ));
+        } else if trimmed.starts_with("russh-sftp = ") {
+            rewritten_lines.push(format!(
+                "russh-sftp = {{ path = \"{}\", features = [\"russh-channel-data\"] }}",
+                russh_sftp_path.display()
+            ));
+        } else {
+            rewritten_lines.push(line.to_string());
+        }
+    }
+    let rewritten = rewritten_lines.join("\n");
     let russh_repo = russh_path
         .parent()
         .ok_or_else(|| format!("russh path has no parent: {}", russh_path.display()))?;
