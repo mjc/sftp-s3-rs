@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
-use russh_sftp::protocol::{Data, Packet, Write};
+use russh_sftp::protocol::{Data, DataPayload, Packet, Write};
 use std::hint::black_box;
 
 fn setup_write_1kb() -> Packet {
@@ -25,12 +25,18 @@ fn setup_write_64kb() -> Packet {
 
 fn setup_data_1kb() -> Packet {
     let data = Bytes::from(vec![0xABu8; 1024]);
-    Packet::Data(Data { id: 1, data })
+    Packet::Data(Data {
+        id: 1,
+        data: DataPayload::Bytes(data),
+    })
 }
 
 fn setup_data_64kb() -> Packet {
     let data = Bytes::from(vec![0xABu8; 65536]);
-    Packet::Data(Data { id: 1, data })
+    Packet::Data(Data {
+        id: 1,
+        data: DataPayload::Bytes(data),
+    })
 }
 
 fn setup_write_de_1kb() -> Bytes {

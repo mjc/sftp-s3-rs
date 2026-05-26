@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use russh_sftp::protocol::{Data, Packet, Write};
+use russh_sftp::protocol::{Data, DataPayload, Packet, Write};
 use std::hint::black_box;
 
 const KB: usize = 1024;
@@ -77,7 +77,7 @@ fn bench_data_serialize(c: &mut Criterion) {
             b.iter(|| {
                 let packet = Packet::Data(Data {
                     id: 1,
-                    data: data.clone(),
+                    data: DataPayload::Bytes(data.clone()),
                 });
                 let _: Bytes = packet.try_into().unwrap();
             });
@@ -97,7 +97,7 @@ fn bench_data_deserialize(c: &mut Criterion) {
 
         let packet = Packet::Data(Data {
             id: 1,
-            data: data.clone(),
+            data: DataPayload::Bytes(data.clone()),
         });
         let serialized: Bytes = packet.try_into().unwrap();
         let serialized = black_box(serialized);

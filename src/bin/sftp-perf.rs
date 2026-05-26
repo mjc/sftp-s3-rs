@@ -816,33 +816,52 @@ fn run_mode(
                 let artifact_dir = run_dir.join("artifacts");
                 fs::create_dir_all(&artifact_dir)?;
                 let port = pick_free_port()?;
-                let mut child = start_server(
-                    &server_binary,
-                    &server_log,
-                    &ctx.keys,
+                let attach_profile = should_attach_profile(profile_mode, common.client, *operation);
+                let mut child = start_server(ServerLaunch {
+                    binary: &server_binary,
+                    log_path: &server_log,
+                    keys: &ctx.keys,
                     port,
-                    common.backend,
-                    profile_mode,
-                    perf_frequency.unwrap_or(999),
-                    &artifact_dir,
-                    &artifact_prefix,
-                )?;
+                    backend: common.backend,
+                    profile_mode: if attach_profile { None } else { profile_mode },
+                    perf_frequency: perf_frequency.unwrap_or(999),
+                    artifact_dir: &artifact_dir,
+                    artifact_prefix: &artifact_prefix,
+                })?;
                 wait_for_server(port, &ctx.keys.private_key, &common.ciphers)?;
 
                 let measured = match common.client {
-                    ClientKind::Bench => run_bench_client(
-                        bench_client_bin
-                            .as_ref()
-                            .expect("bench client binary should exist"),
-                        &common,
-                        *operation,
-                        *size_mb,
-                        warmup,
-                        runs,
-                        port,
-                        &run_dir,
-                        &artifact_prefix,
-                    )?,
+                    ClientKind::Bench => {
+                        let job = BenchClientJob {
+                            binary: bench_client_bin
+                                .as_ref()
+                                .expect("bench client binary should exist"),
+                            common: &common,
+                            operation: *operation,
+                            size_mb: *size_mb,
+                            warmup,
+                            runs,
+                            port,
+                            artifact_dir: &artifact_dir,
+                            artifact_prefix: &artifact_prefix,
+                        };
+                        if attach_profile {
+                            let fixture_run_id = prepare_bench_client_download(&job)?;
+                            let mut profile = start_attached_profile(AttachedProfileLaunch {
+                                pid: child.child.id(),
+                                profile_mode: profile_mode.expect("profile mode should exist"),
+                                perf_frequency: perf_frequency.unwrap_or(999),
+                                artifact_dir: &artifact_dir,
+                                artifact_prefix: &artifact_prefix,
+                            })?;
+                            let measured =
+                                run_prepared_bench_client_download(&job, &fixture_run_id)?;
+                            stop_attached_profile(&mut profile)?;
+                            measured
+                        } else {
+                            run_bench_client(&job)?
+                        }
+                    }
                     ClientKind::Openssh => run_openssh_sftp(
                         &common,
                         *operation,
@@ -971,17 +990,17 @@ fn run_small_files(ctx: &AppContext, args: SmallFilesArgs) -> Result<(), BoxErro
     let server_binary = build_server(ctx, &plan, args.no_sccache, profile_mode)?;
     let server_log = run_dir.join("server-current-small-files.log");
     let port = pick_free_port()?;
-    let mut server = start_server(
-        &server_binary,
-        &server_log,
-        &ctx.keys,
+    let mut server = start_server(ServerLaunch {
+        binary: &server_binary,
+        log_path: &server_log,
+        keys: &ctx.keys,
         port,
-        args.backend,
+        backend: args.backend,
         profile_mode,
-        999,
-        &artifact_dir,
-        &format!("current-small-files-{}", client_name(args.client)),
-    )?;
+        perf_frequency: 999,
+        artifact_dir: &artifact_dir,
+        artifact_prefix: &format!("current-small-files-{}", client_name(args.client)),
+    })?;
     wait_for_server(port, &ctx.keys.private_key, &args.ciphers)?;
 
     let warmup = args.warmup.unwrap_or(if args.profile { 0 } else { 2 });
@@ -1366,47 +1385,68 @@ fn build_server(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_bench_client(
-    binary: &Path,
-    common: &CommonArgs,
+struct BenchClientJob<'a> {
+    binary: &'a Path,
+    common: &'a CommonArgs,
     operation: OperationKind,
     size_mb: u64,
     warmup: u32,
     runs: u32,
     port: u16,
-    run_dir: &Path,
-    artifact_prefix: &str,
-) -> Result<MeasurementSeries, BoxError> {
-    let download_run_id = format!("{artifact_prefix}-fixture");
-    if operation == OperationKind::Download {
-        let prepare_path = run_dir
-            .join("artifacts")
-            .join(format!("{artifact_prefix}-prepare.json"));
-        run_bench_client_command(&BenchClientInvocation {
-            binary,
-            common,
-            operation,
-            size_mb,
-            iterations: 1,
-            port,
-            output_path: &prepare_path,
-            options: BenchClientRunOptions {
-                run_id: Some(&download_run_id),
-                prepare_only: true,
-                skip_download_setup: false,
-                keep_files: true,
-            },
-        })?;
-    }
+    artifact_dir: &'a Path,
+    artifact_prefix: &'a str,
+}
 
-    if warmup > 0 {
-        let warmup_path = run_dir
-            .join("artifacts")
-            .join(format!("{artifact_prefix}-warmup.json"));
-        let warmup_options = if operation == OperationKind::Download {
+fn run_bench_client(job: &BenchClientJob<'_>) -> Result<MeasurementSeries, BoxError> {
+    let download_run_id = if job.operation == OperationKind::Download {
+        Some(prepare_bench_client_download(job)?)
+    } else {
+        None
+    };
+    run_bench_client_with_fixture(job, download_run_id.as_deref())
+}
+
+fn prepare_bench_client_download(job: &BenchClientJob<'_>) -> Result<String, BoxError> {
+    let download_run_id = format!("{}-fixture", job.artifact_prefix);
+    let prepare_path = job
+        .artifact_dir
+        .join(format!("{}-prepare.json", job.artifact_prefix));
+    run_bench_client_command(&BenchClientInvocation {
+        binary: job.binary,
+        common: job.common,
+        operation: job.operation,
+        size_mb: job.size_mb,
+        iterations: 1,
+        port: job.port,
+        output_path: &prepare_path,
+        options: BenchClientRunOptions {
+            run_id: Some(&download_run_id),
+            prepare_only: true,
+            skip_download_setup: false,
+            keep_files: true,
+        },
+    })?;
+    Ok(download_run_id)
+}
+
+fn run_prepared_bench_client_download(
+    job: &BenchClientJob<'_>,
+    download_run_id: &str,
+) -> Result<MeasurementSeries, BoxError> {
+    run_bench_client_with_fixture(job, Some(download_run_id))
+}
+
+fn run_bench_client_with_fixture(
+    job: &BenchClientJob<'_>,
+    download_run_id: Option<&str>,
+) -> Result<MeasurementSeries, BoxError> {
+    if job.warmup > 0 {
+        let warmup_path = job
+            .artifact_dir
+            .join(format!("{}-warmup.json", job.artifact_prefix));
+        let warmup_options = if let Some(run_id) = download_run_id {
             BenchClientRunOptions {
-                run_id: Some(&download_run_id),
+                run_id: Some(run_id),
                 prepare_only: false,
                 skip_download_setup: true,
                 keep_files: true,
@@ -1415,22 +1455,22 @@ fn run_bench_client(
             BenchClientRunOptions::default()
         };
         invoke_bench_client(&BenchClientInvocation {
-            binary,
-            common,
-            operation,
-            size_mb,
-            iterations: warmup,
-            port,
+            binary: job.binary,
+            common: job.common,
+            operation: job.operation,
+            size_mb: job.size_mb,
+            iterations: job.warmup,
+            port: job.port,
             output_path: &warmup_path,
             options: warmup_options,
         })?;
     }
-    let output_path = run_dir
-        .join("artifacts")
-        .join(format!("{artifact_prefix}.json"));
-    let run_options = if operation == OperationKind::Download {
+    let output_path = job
+        .artifact_dir
+        .join(format!("{}.json", job.artifact_prefix));
+    let run_options = if let Some(run_id) = download_run_id {
         BenchClientRunOptions {
-            run_id: Some(&download_run_id),
+            run_id: Some(run_id),
             prepare_only: false,
             skip_download_setup: true,
             keep_files: false,
@@ -1439,26 +1479,26 @@ fn run_bench_client(
         BenchClientRunOptions::default()
     };
     let output = invoke_bench_client(&BenchClientInvocation {
-        binary,
-        common,
-        operation,
-        size_mb,
-        iterations: runs,
-        port,
+        binary: job.binary,
+        common: job.common,
+        operation: job.operation,
+        size_mb: job.size_mb,
+        iterations: job.runs,
+        port: job.port,
         output_path: &output_path,
         options: run_options,
     })?;
     let iterations = output
         .results
         .iter()
-        .map(|result| match operation {
+        .map(|result| match job.operation {
             OperationKind::Upload => result.upload_seconds.unwrap_or(result.total_seconds),
             OperationKind::Download => result.download_seconds.unwrap_or(result.total_seconds),
             OperationKind::Roundtrip => result.total_seconds,
         })
         .collect();
     Ok(MeasurementSeries {
-        bytes: bytes_for_operation(operation, size_mb),
+        bytes: bytes_for_operation(job.operation, job.size_mb),
         iterations,
     })
 }
@@ -1853,39 +1893,43 @@ fn run_openssh_scp_iteration(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn start_server(
-    binary: &Path,
-    log_path: &Path,
-    keys: &KeyMaterial,
+struct ServerLaunch<'a> {
+    binary: &'a Path,
+    log_path: &'a Path,
+    keys: &'a KeyMaterial,
     port: u16,
     backend: BackendKind,
     profile_mode: Option<ProfileKind>,
     perf_frequency: u32,
-    artifact_dir: &Path,
-    artifact_prefix: &str,
-) -> Result<RunningServer, BoxError> {
-    let log = fs::File::create(log_path)?;
+    artifact_dir: &'a Path,
+    artifact_prefix: &'a str,
+}
+
+fn start_server(launch: ServerLaunch<'_>) -> Result<RunningServer, BoxError> {
+    let log = fs::File::create(launch.log_path)?;
     let log_err = log.try_clone()?;
-    let backend_name = match backend {
+    let backend_name = match launch.backend {
         BackendKind::Benchmark => "benchmark",
         BackendKind::Memory => "memory",
     };
     let args = vec![
         "--port".to_string(),
-        port.to_string(),
+        launch.port.to_string(),
         "--authorized-keys-file".to_string(),
-        keys.authorized_keys.display().to_string(),
+        launch.keys.authorized_keys.display().to_string(),
         "--user".to_string(),
         "benchmark:benchmark".to_string(),
         "--backend".to_string(),
         backend_name.to_string(),
     ];
-    let mut command = match profile_mode {
+    let mut command = match launch.profile_mode {
         Some(ProfileKind::Perf) if cfg!(target_os = "macos") => {
-            let trace_path = artifact_dir.join(format!("{artifact_prefix}.xctrace.trace"));
-            let target_pid_path =
-                artifact_dir.join(format!("{artifact_prefix}.xctrace-target.pid"));
+            let trace_path = launch
+                .artifact_dir
+                .join(format!("{}.xctrace.trace", launch.artifact_prefix));
+            let target_pid_path = launch
+                .artifact_dir
+                .join(format!("{}.xctrace-target.pid", launch.artifact_prefix));
             let mut command = Command::new("xctrace");
             command
                 .arg("record")
@@ -1906,7 +1950,7 @@ exec "$@"
 "#,
                 )
                 .arg("sftp-perf-xctrace-launch")
-                .arg(binary);
+                .arg(launch.binary);
             command.args(&args);
             command.env("SFTP_PERF_XCTRACE_TARGET_PID", &target_pid_path);
             command
@@ -1916,26 +1960,31 @@ exec "$@"
             command
                 .arg("record")
                 .arg("-F")
-                .arg(perf_frequency.to_string())
+                .arg(launch.perf_frequency.to_string())
                 .arg("-g")
                 .arg("-o")
-                .arg(artifact_dir.join(format!("{artifact_prefix}.perf.data")));
-            command.arg("--").arg(binary);
+                .arg(
+                    launch
+                        .artifact_dir
+                        .join(format!("{}.perf.data", launch.artifact_prefix)),
+                );
+            command.arg("--").arg(launch.binary);
             command.args(&args);
             command
         }
         Some(ProfileKind::Heaptrack) => {
             let mut command = Command::new("heaptrack");
-            command
-                .arg("--record-only")
-                .arg("-o")
-                .arg(artifact_dir.join(format!("{artifact_prefix}.heaptrack")));
-            command.arg(binary);
+            command.arg("--record-only").arg("-o").arg(
+                launch
+                    .artifact_dir
+                    .join(format!("{}.heaptrack", launch.artifact_prefix)),
+            );
+            command.arg(launch.binary);
             command.args(&args);
             command
         }
         None => {
-            let mut command = Command::new(binary);
+            let mut command = Command::new(launch.binary);
             command.args(&args);
             command
         }
@@ -1943,22 +1992,111 @@ exec "$@"
     command.stdout(Stdio::from(log));
     command.stderr(Stdio::from(log_err));
     let child = command.spawn()?;
-    let kind = if matches!(profile_mode, Some(ProfileKind::Perf)) && cfg!(target_os = "macos") {
-        RunningServerKind::XctraceLaunch {
-            trace_path: artifact_dir.join(format!("{artifact_prefix}.xctrace.trace")),
-            export_path: artifact_dir.join(format!("{artifact_prefix}.xctrace.xml")),
-            target_pid_path: artifact_dir.join(format!("{artifact_prefix}.xctrace-target.pid")),
-        }
-    } else if matches!(profile_mode, Some(ProfileKind::Perf)) {
-        RunningServerKind::ProfileWrapper {
-            name: "perf record",
-        }
-    } else if matches!(profile_mode, Some(ProfileKind::Heaptrack)) {
-        RunningServerKind::ProfileTree { name: "heaptrack" }
-    } else {
-        RunningServerKind::ServerProcess
-    };
+    let kind =
+        if matches!(launch.profile_mode, Some(ProfileKind::Perf)) && cfg!(target_os = "macos") {
+            RunningServerKind::XctraceLaunch {
+                trace_path: launch
+                    .artifact_dir
+                    .join(format!("{}.xctrace.trace", launch.artifact_prefix)),
+                export_path: launch
+                    .artifact_dir
+                    .join(format!("{}.xctrace.xml", launch.artifact_prefix)),
+                target_pid_path: launch
+                    .artifact_dir
+                    .join(format!("{}.xctrace-target.pid", launch.artifact_prefix)),
+            }
+        } else if matches!(launch.profile_mode, Some(ProfileKind::Perf)) {
+            RunningServerKind::ProfileWrapper {
+                name: "perf record",
+            }
+        } else if matches!(launch.profile_mode, Some(ProfileKind::Heaptrack)) {
+            RunningServerKind::ProfileTree { name: "heaptrack" }
+        } else {
+            RunningServerKind::ServerProcess
+        };
     Ok(RunningServer { child, kind })
+}
+
+fn should_attach_profile(
+    profile_mode: Option<ProfileKind>,
+    client: ClientKind,
+    operation: OperationKind,
+) -> bool {
+    matches!(profile_mode, Some(ProfileKind::Perf))
+        && client == ClientKind::Bench
+        && operation == OperationKind::Download
+        && cfg!(target_os = "linux")
+}
+
+struct AttachedProfileLaunch<'a> {
+    pid: u32,
+    profile_mode: ProfileKind,
+    perf_frequency: u32,
+    artifact_dir: &'a Path,
+    artifact_prefix: &'a str,
+}
+
+struct AttachedProfile {
+    child: Child,
+    name: &'static str,
+}
+
+fn start_attached_profile(launch: AttachedProfileLaunch<'_>) -> Result<AttachedProfile, BoxError> {
+    let log_path = launch.artifact_dir.join(format!(
+        "{}.{}.log",
+        launch.artifact_prefix,
+        profile_tool_name(launch.profile_mode)
+    ));
+    let log = fs::File::create(log_path)?;
+    let log_err = log.try_clone()?;
+    let mut command = match launch.profile_mode {
+        ProfileKind::Perf => {
+            let mut command = Command::new("perf");
+            command
+                .arg("record")
+                .arg("-F")
+                .arg(launch.perf_frequency.to_string())
+                .arg("-g")
+                .arg("-o")
+                .arg(
+                    launch
+                        .artifact_dir
+                        .join(format!("{}.perf.data", launch.artifact_prefix)),
+                )
+                .arg("-p")
+                .arg(launch.pid.to_string());
+            command
+        }
+        ProfileKind::Heaptrack => {
+            let mut command = Command::new("heaptrack");
+            command
+                .arg("--record-only")
+                .arg("-o")
+                .arg(
+                    launch
+                        .artifact_dir
+                        .join(format!("{}.heaptrack", launch.artifact_prefix)),
+                )
+                .arg("-p")
+                .arg(launch.pid.to_string());
+            command
+        }
+    };
+    command.stdout(Stdio::from(log));
+    command.stderr(Stdio::from(log_err));
+    let child = command.spawn()?;
+    thread::sleep(Duration::from_millis(500));
+    Ok(AttachedProfile {
+        child,
+        name: match launch.profile_mode {
+            ProfileKind::Perf => "perf record",
+            ProfileKind::Heaptrack => "heaptrack",
+        },
+    })
+}
+
+fn stop_attached_profile(profile: &mut AttachedProfile) -> Result<(), BoxError> {
+    stop_profile_wrapper(&mut profile.child, profile.name)
 }
 
 fn wait_for_server(
